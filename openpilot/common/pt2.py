@@ -72,11 +72,11 @@ class PT2Filter:
 
   def compute_saturation_steps(self, w0: float, zeta: float, dt: float) -> int:
     """
-    Berechnet eine Abschätzung der Schritte, bis der Filter (95% des Endwerts) erreicht ist.
+    Estimate the number of steps until the filter reaches 95% of its final value.
 
-    Wir nutzen hier die Abschätzung:
+    Use the settling-time approximation:
         T_s = 4 / (zeta * w0)
-    und setzen N = T_s / dt.
+    and set N = T_s / dt.
     """
     Ts = 4.0 / (zeta * w0)
     N = Ts / dt

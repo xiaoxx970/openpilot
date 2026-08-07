@@ -129,7 +129,6 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     aeb @92;
     userBookmark @95;
     excessiveActuation @96;
-    audioFeedback @97;
     bigModelLoading @100;
     bigModelFailed @102;
     dashcamModeRadDisEngOn @104;
@@ -140,6 +139,7 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     soundsUnavailableDEPRECATED @47;
     deviceFallingDEPRECATED @71;
     usbErrorDEPRECATED @78;
+    audioFeedbackDEPRECATED @97;
     bigModelReadyDEPRECATED @101;
   }
 }

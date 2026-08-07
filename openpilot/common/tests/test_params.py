@@ -108,11 +108,14 @@ class TestParams(OpenpilotTestCase):
 
   def test_params_all_keys(self):
     keys = Params().all_keys()
+    backup_keys = Params().all_keys(ParamKeyFlag.BACKUP)
 
     # sanity checks
     assert len(keys) > 20
     assert len(keys) == len(set(keys))
     assert b"CarParams" in keys
+    assert b"AdbEnabled" in backup_keys
+    assert b"BootCount" not in backup_keys
 
   def test_params_default_value(self):
     self.params.remove("LanguageSetting")

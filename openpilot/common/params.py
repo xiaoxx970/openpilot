@@ -15,8 +15,10 @@ class ParamKeyFlag(IntFlag):
   CLEAR_ON_MANAGER_START = 0x04
   CLEAR_ON_ONROAD_TRANSITION = 0x08
   CLEAR_ON_OFFROAD_TRANSITION = 0x10
+  DONT_LOG = 0x20
   DEVELOPMENT_ONLY = 0x40
   CLEAR_ON_IGNITION_ON = 0x80
+  BACKUP = 0x100
   ALL = 0xFFFFFFFF
 
 
@@ -67,6 +69,7 @@ params_destroy = _bind("params_destroy", [ParamsHandle])
 params_clear_all = _bind("params_clear_all", [ParamsHandle, ctypes.c_uint])
 params_check_key = _bind("params_check_key", [ParamsHandle, ctypes.c_char_p], ctypes.c_bool)
 params_get_key_type = _bind("params_get_key_type", [ParamsHandle, ctypes.c_char_p], ctypes.c_int)
+params_get_key_flag = _bind("params_get_key_flag", [ParamsHandle, ctypes.c_char_p], ctypes.c_uint)
 params_get_default = _bind("params_get_default", [ParamsHandle, ctypes.c_char_p], ParamsBuffer)
 params_get = _bind("params_get", [ParamsHandle, ctypes.c_char_p, ctypes.c_bool], ParamsBuffer)
 params_get_bool = _bind("params_get_bool", [ParamsHandle, ctypes.c_char_p, ctypes.c_bool], ctypes.c_bool)
@@ -185,10 +188,15 @@ class Params:
   def get_type(self, key):
     return ParamKeyType(params_get_key_type(self.p, self.check_key(key)))
 
-  def all_keys(self):
+  def get_flag(self, key):
+    return ParamKeyFlag(params_get_key_flag(self.p, self.check_key(key)))
+
+  def all_keys(self, flag=ParamKeyFlag.ALL):
     keys = []
     for i in range(params_keys_size(self.p)):
-      keys.append(_copy_string(params_key_at(self.p, i)))
+      key = _copy_string(params_key_at(self.p, i))
+      if flag == ParamKeyFlag.ALL or self.get_flag(key) & flag:
+        keys.append(key)
     return keys
 
   def get_default_value(self, key):

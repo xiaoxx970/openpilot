@@ -58,6 +58,8 @@ dependencies = [
 [project.optional-dependencies]
 testing = [
   "coverage",   # line coverage
+  "jinja2",     # opendbc car docs tests
+  "pyyaml",     # sunnypilot settings compiler tests
   "pytest",
   "pytest-mock",
   "pytest-subtests",
