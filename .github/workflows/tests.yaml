@@ -6,6 +6,12 @@ on:
       - master
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_simulator:
+        description: Run the MetaDrive simulator test
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       run_number:
@@ -208,18 +214,22 @@ jobs:
       (github.event.pull_request.head.repo.full_name == 'commaai/openpilot'))
       && fromJSON('["namespace-profile-amd64-8x16"]')
       || fromJSON('["ubuntu-24.04"]') }}
-    if: false  # FIXME: Started to timeout recently
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_simulator }}
     steps:
     - uses: actions/checkout@v7
     - run: ./tools/op.sh setup
+    - name: Install MetaDrive
+      run: uv pip install --python .venv/bin/python "metadrive-simulator @ git+https://github.com/commaai/metadrive.git@minimal"
+    - name: Install headless rendering dependencies
+      run: sudo apt-get install -y --no-install-recommends libgles2 libegl1
     - name: Build openpilot
       run: scons
     - name: Driving test
-      timeout-minutes: 2
+      timeout-minutes: 10
       env:
         # MetaDrive renders offscreen through panda3d's EGL pipe on llvmpipe
         EGL_PLATFORM: surfaceless
-      run: python openpilot/tools/sim/tests/test_metadrive_bridge.py
+      run: tools/op.sh test openpilot/tools/sim/tests/test_metadrive_bridge.py -j 1 -s
 
   create_ui_report:
     name: Create UI Report
