@@ -144,7 +144,7 @@ void fill_panda_state(cereal::PandaState::Builder &ps, cereal::PandaState::Panda
   ps.setSbu2Voltage(health.sbu2_voltage_mV / 1000.0f);
   ps.setSoundOutputLevel(health.sound_output_level_pkt);
   ps.setControlsAllowedLateral(health.controls_allowed_lateral_pkt);
-  ps.setControlsAllowedLongitudinal(health.controls_allowed_longitudinal_pkt);
+  ps.setControlsAllowedLongitudinal(health.controls_allowed_pkt);
 }
 
 void fill_panda_can_state(cereal::PandaState::PandaCanState::Builder &cs, const can_health_t &can_health) {

@@ -262,7 +262,8 @@ RouteSelection parse_route_selection(std::string route_name) {
     if (separator == "/") {
       size_t pos = range_str.find(':');
       int begin_segment = 0;
-      if (!parse_segment_number(range_str.substr(0, pos), &begin_segment)) {
+      const std::string begin_str = range_str.substr(0, pos);
+      if (!begin_str.empty() && !parse_segment_number(begin_str, &begin_segment)) {
         return {};
       }
       route.begin_segment = begin_segment;
@@ -926,7 +927,9 @@ void append_scalar_point(RouteSeries *series,
   series->values.push_back(value);
 }
 
-void append_fixed_scalar_point(RouteSeries *series, double tm, double value) {
+// This has thousands of generated call sites. Inlining it duplicates vector
+// growth logic throughout the extractor and is slower both to compile and run.
+__attribute__((noinline)) void append_fixed_scalar_point(RouteSeries *series, double tm, double value) {
   series->times.push_back(tm);
   series->values.push_back(value);
 }

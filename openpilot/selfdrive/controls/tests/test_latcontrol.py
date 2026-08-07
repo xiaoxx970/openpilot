@@ -1,3 +1,4 @@
+from openpilot.common.test import OpenpilotTestCase
 from openpilot.common.parameterized import parameterized
 
 from openpilot.cereal import log
@@ -18,7 +19,7 @@ from openpilot.common.mock.generators import generate_livePose
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
 
 
-class TestLatControl:
+class TestLatControl(OpenpilotTestCase):
 
   @parameterized.expand([(HONDA.HONDA_CIVIC, LatControlPID), (TOYOTA.TOYOTA_RAV4, LatControlTorque),
                          (NISSAN.NISSAN_LEAF, LatControlAngle), (GM.CHEVROLET_BOLT_EUV, LatControlTorque)])
