@@ -1,5 +1,6 @@
 import json
 import os
+from collections.abc import Callable
 
 import pyray as rl
 
@@ -44,7 +45,7 @@ def _set_platform(platform_name: str, car_list: dict):
 
 
 class ManualSelectPage(NavScroller):
-  def __init__(self, car_list: dict, on_selected: callable):
+  def __init__(self, car_list: dict, on_selected: Callable[[], None]):
     super().__init__()
     self._car_list = car_list
     self._on_selected = on_selected
