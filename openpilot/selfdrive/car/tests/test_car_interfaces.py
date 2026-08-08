@@ -26,6 +26,9 @@ DLC_TO_LEN = (0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64)
 
 
 class TestCarInterfaces(OpenpilotTestCase):
+  def test_car_state_schema_compatibility(self):
+    assert not car.CarState.new_message().carNotReady
+
   @parameterized.expand([(car,) for car in sorted(PLATFORMS)] + [MOCK.MOCK], ids=lambda car_name: car_name)
   @fuzzy_test(max_examples=60)
   def test_car_interfaces(self, car_name, fuzzy):
