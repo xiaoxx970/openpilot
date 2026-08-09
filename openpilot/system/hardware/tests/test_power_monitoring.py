@@ -1,5 +1,4 @@
-import pytest
-
+from openpilot.common.test import OpenpilotTestCase
 from openpilot.common.params import Params
 from openpilot.system.hardware.power_monitoring import PowerMonitoring, CAR_BATTERY_CAPACITY_uWh, \
   CAR_CHARGING_RATE_W, VBATT_PAUSE_CHARGING, DELAY_SHUTDOWN_TIME_S, MAX_TIME_OFFROAD_S
@@ -10,6 +9,10 @@ def mock_time_monotonic():
   global ssb
   ssb += 1.
   return ssb
+
+def set_mock_time(value):
+  global ssb
+  ssb = value
 
 TEST_DURATION_S = 50
 GOOD_VOLTAGE = 12 * 1e3
@@ -22,13 +25,9 @@ def pm_patch(mocker, name, value, constant=False):
     mocker.patch(f"openpilot.system.hardware.power_monitoring.{name}", return_value=value)
 
 
-@pytest.fixture(autouse=True)
-def mock_time(mocker):
-  mocker.patch("time.monotonic", mock_time_monotonic)
-
-
-class TestPowerMonitoring:
+class TestPowerMonitoring(OpenpilotTestCase):
   def setup_method(self):
+    self._fixture("mocker").patch("time.monotonic", mock_time_monotonic)
     self.params = Params()
 
   # Test to see that it doesn't do anything when pandaState is None
@@ -110,10 +109,9 @@ class TestPowerMonitoring:
     pm.car_battery_capacity_uWh = CAR_BATTERY_CAPACITY_uWh
     start_time = ssb
     ignition = False
-    while ssb <= start_time + MOCKED_MAX_OFFROAD_TIME:
-      pm.calculate(GOOD_VOLTAGE, ignition)
-      if (ssb - start_time) % 1000 == 0 and ssb < start_time + MOCKED_MAX_OFFROAD_TIME:
-        assert not pm.should_shutdown(ignition, True, start_time, False)
+    set_mock_time(start_time + MOCKED_MAX_OFFROAD_TIME - 2)
+    assert not pm.should_shutdown(ignition, True, start_time, False)
+    set_mock_time(start_time + MOCKED_MAX_OFFROAD_TIME - 1)
     assert pm.should_shutdown(ignition, True, start_time, False)
 
   def test_car_voltage(self, mocker):
@@ -188,19 +186,17 @@ class TestPowerMonitoring:
     started_seen = True
     pm.calculate(VOLTAGE_BELOW_PAUSE_CHARGING, ignition)
 
-    while ssb < offroad_timestamp + DELAY_SHUTDOWN_TIME_S:
-      assert not pm.should_shutdown(ignition, in_car,
-                                          offroad_timestamp,
-                                          started_seen), \
-                       f"Should not shutdown before {DELAY_SHUTDOWN_TIME_S} seconds offroad time"
+    set_mock_time(offroad_timestamp + DELAY_SHUTDOWN_TIME_S - 1)
+    assert not pm.should_shutdown(ignition, in_car, offroad_timestamp, started_seen), \
+                     f"Should not shutdown before {DELAY_SHUTDOWN_TIME_S} seconds offroad time"
+    set_mock_time(offroad_timestamp + DELAY_SHUTDOWN_TIME_S)
     assert pm.should_shutdown(ignition, in_car,
                                        offroad_timestamp,
                                        started_seen), \
                     f"Should shutdown after {DELAY_SHUTDOWN_TIME_S} seconds offroad time"
 
-  @pytest.mark.parametrize(
-    "max_time_offroad, offroad_time_min, expected_result",
-    [
+  def test_max_time_offroad_exceeded(self):
+    cases = [
       # No max time set – fallback to default (30 hours)
       (None, 0, False),
       (None, MAX_TIME_OFFROAD_S + 1, True),  # exceeds 30h (1800+ mins)
@@ -219,16 +215,12 @@ class TestPowerMonitoring:
       (-100, 100, False),  # should fallback to 30h
       (-1, MAX_TIME_OFFROAD_S + 1, True),  # should fallback to 30h, and exceed it
     ]
-  )
-  def test_max_time_offroad_exceeded(self, max_time_offroad, offroad_time_min, expected_result):
-    # Set the parameter if provided
-    if max_time_offroad is not None:
-      self.params.put("MaxTimeOffroad", max_time_offroad, block=True)
 
-    # Convert offroad time from minutes to seconds
-    offroad_time_s = offroad_time_min * 60
+    for max_time_offroad, offroad_time_min, expected_result in cases:
+      with self.subTest(max_time_offroad=max_time_offroad, offroad_time_min=offroad_time_min):
+        self.params.remove("MaxTimeOffroad")
+        if max_time_offroad is not None:
+          self.params.put("MaxTimeOffroad", max_time_offroad, block=True)
 
-    pm = PowerMonitoring()
-    result = pm.max_time_offroad_exceeded(offroad_time_s)
-
-    assert result == expected_result
+        pm = PowerMonitoring()
+        assert pm.max_time_offroad_exceeded(offroad_time_min * 60) == expected_result

@@ -9,7 +9,7 @@ import asyncio
 import os
 import time
 
-import aiohttp
+import requests
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
@@ -63,27 +63,26 @@ class ModelManagerSP:
     """Downloads a file with progress tracking"""
     self._download_start_times[model.fileName] = time.monotonic()
 
-    async with aiohttp.ClientSession() as session:
-      async with session.get(url) as response:
-        response.raise_for_status()
-        total_size = int(response.headers.get("content-length", 0))
-        bytes_downloaded = 0
+    with requests.get(url, stream=True, timeout=60) as response:  # noqa: ASYNC210
+      response.raise_for_status()
+      total_size = int(response.headers.get("content-length", 0))
+      bytes_downloaded = 0
 
-        with open(path, 'wb') as f:  # noqa: ASYNC230
-          async for chunk in response.content.iter_chunked(self._chunk_size):  # type: bytes
-            f.write(chunk)
-            bytes_downloaded += len(chunk)
+      with open(path, 'wb') as f:  # noqa: ASYNC230
+        for chunk in response.iter_content(chunk_size=self._chunk_size):
+          f.write(chunk)
+          bytes_downloaded += len(chunk)
 
-            if self.params.get("ModelManager_DownloadIndex") is None:
-              raise Exception("Download cancelled")
+          if self.params.get("ModelManager_DownloadIndex") is None:
+            raise Exception("Download cancelled")
 
-            if total_size > 0:
-              progress = (bytes_downloaded / total_size) * 100
-              model.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
-              model.downloadProgress.progress = progress
-              model.downloadProgress.eta = self._calculate_eta(model.fileName, progress)
-              self._sync_artifact_progress(model)
-              self._report_status()
+          if total_size > 0:
+            progress = (bytes_downloaded / total_size) * 100
+            model.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
+            model.downloadProgress.progress = progress
+            model.downloadProgress.eta = self._calculate_eta(model.fileName, progress)
+            self._sync_artifact_progress(model)
+            self._report_status()
 
         # Clean up start time after download completes
         del self._download_start_times[model.fileName]
@@ -102,23 +101,22 @@ class ModelManagerSP:
       chunk_url = get_chunk_name(base_url, i, num_chunks)
       chunk_path = get_chunk_name(base_path, i, num_chunks)
       chunk_downloaded = 0
-      async with aiohttp.ClientSession() as session:
-        async with session.get(chunk_url) as response:
-          response.raise_for_status()
-          chunk_size = int(response.headers.get("content-length", 0))
-          with open(chunk_path, 'wb') as f:  # noqa: ASYNC230
-            async for data in response.content.iter_chunked(self._chunk_size):
-              f.write(data)
-              chunk_downloaded += len(data)
-              if self.params.get("ModelManager_DownloadIndex") is None:
-                raise Exception("Download cancelled")
-              intra = chunk_downloaded / max(chunk_size, 1)
-              progress = min(99.0, ((i + intra) / num_chunks) * 100)
-              artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
-              artifact.downloadProgress.progress = progress
-              artifact.downloadProgress.eta = self._calculate_eta(artifact.fileName, progress)
-              self._sync_artifact_progress(artifact)
-              self._report_status()
+      with requests.get(chunk_url, stream=True, timeout=60) as response:  # noqa: ASYNC210
+        response.raise_for_status()
+        chunk_size = int(response.headers.get("content-length", 0))
+        with open(chunk_path, 'wb') as f:  # noqa: ASYNC230
+          for data in response.iter_content(chunk_size=self._chunk_size):
+            f.write(data)
+            chunk_downloaded += len(data)
+            if self.params.get("ModelManager_DownloadIndex") is None:
+              raise Exception("Download cancelled")
+            intra = chunk_downloaded / max(chunk_size, 1)
+            progress = min(99.0, ((i + intra) / num_chunks) * 100)
+            artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
+            artifact.downloadProgress.progress = progress
+            artifact.downloadProgress.eta = self._calculate_eta(artifact.fileName, progress)
+            self._sync_artifact_progress(artifact)
+            self._report_status()
 
     with open(manifest_path, 'w') as f:  # noqa: ASYNC230
       f.write(str(num_chunks))

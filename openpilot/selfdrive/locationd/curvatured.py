@@ -1,5 +1,6 @@
 import time
 from collections import deque
+from typing import overload
 
 import numpy as np
 
@@ -383,6 +384,16 @@ class CurvatureDLookup:
         start = end = current
     runs.append((start, end))
     return runs
+
+  @overload
+  @classmethod
+  def interp_curve_value(cls, fit_corrections: np.ndarray, fit_valid: np.ndarray,
+                         v_ego: float, abs_curvature: float) -> float: ...
+
+  @overload
+  @classmethod
+  def interp_curve_value(cls, fit_corrections: np.ndarray, fit_valid: np.ndarray,
+                         v_ego: float, abs_curvature: np.ndarray) -> np.ndarray: ...
 
   @classmethod
   def interp_curve_value(cls, fit_corrections: np.ndarray, fit_valid: np.ndarray,

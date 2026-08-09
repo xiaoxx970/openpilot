@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 from enum import IntEnum
 
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.cruise_sub_layouts.speed_limit_settings import SpeedLimitSettingsLayout
+from openpilot.sunnypilot.selfdrive.car.helpers import get_effective_pcm_cruise
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.sunnypilot.widgets.list_view import toggle_item_sp, option_item_sp, simple_button_item_sp
@@ -122,6 +123,7 @@ class CruiseLayout(Widget):
     if ui_state.CP is not None and ui_state.CP_SP is not None:
       has_icbm = ui_state.has_icbm
       has_long = ui_state.has_longitudinal_control
+      pcm_cruise = get_effective_pcm_cruise(ui_state.CP, has_long)
 
       if ui_state.CP_SP.intelligentCruiseButtonManagementAvailable and not has_long:
         self.icbm_toggle.action_item.set_enabled(ui_state.is_offroad())
@@ -143,7 +145,7 @@ class CruiseLayout(Widget):
           self.icbm_toggle.show_description(True)
 
       if has_long or has_icbm:
-        self.custom_acc_toggle.action_item.set_enabled(((has_long and not ui_state.CP.pcmCruise) or has_icbm) and ui_state.is_offroad())
+        self.custom_acc_toggle.action_item.set_enabled(((has_long and not pcm_cruise) or has_icbm) and ui_state.is_offroad())
         self.dec_toggle.action_item.set_enabled(has_long)
         self.scc_v_toggle.action_item.set_enabled(True)
         self.scc_m_toggle.action_item.set_enabled(True)
@@ -169,7 +171,7 @@ class CruiseLayout(Widget):
       show_custom_acc_desc = True
     else:
       if has_long or has_icbm:
-        if has_long and ui_state.CP.pcmCruise:
+        if has_long and pcm_cruise:
           new_custom_acc_desc = tr(ACC_PCMCRUISE_DISABLED_DESCRIPTION)
           show_custom_acc_desc = True
         else:
