@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pytest
 
+from opendbc.car.structs import car
+from openpilot.common.params import Params
 from openpilot.sunnypilot.sunnylink.capabilities import (
   CAPABILITY_DEFAULTS,
   CAPABILITY_FIELDS,
@@ -90,3 +92,27 @@ class TestCapabilitiesShape:
     assert isinstance(caps["brand"], str)
     assert isinstance(caps["steer_control_type"], str)
     assert isinstance(caps["device_type"], str)
+
+
+class TestVolkswagenAlphaLongCapabilities:
+  def test_cached_stock_params_expose_custom_acc(self, tmp_path):
+    CP = car.CarParams(brand="volkswagen", pcmCruise=True, alphaLongitudinalAvailable=True)
+    params = Params(str(tmp_path / "params"))
+    params.put_bool("AlphaLongitudinalEnabled", True, block=True)
+    params.put("CarParamsPersistent", CP.to_bytes(), block=True)
+
+    caps = generate_capabilities(params)
+
+    assert caps["has_longitudinal_control"] is True
+    assert caps["pcm_cruise"] is False
+
+  def test_non_vw_pcm_cruise_is_unchanged(self, tmp_path):
+    CP = car.CarParams(brand="ford", pcmCruise=True, alphaLongitudinalAvailable=True)
+    params = Params(str(tmp_path / "params"))
+    params.put_bool("AlphaLongitudinalEnabled", True, block=True)
+    params.put("CarParamsPersistent", CP.to_bytes(), block=True)
+
+    caps = generate_capabilities(params)
+
+    assert caps["has_longitudinal_control"] is True
+    assert caps["pcm_cruise"] is True

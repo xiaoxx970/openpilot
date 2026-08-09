@@ -14,6 +14,7 @@ from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.hardware import HARDWARE
+from openpilot.sunnypilot.selfdrive.car.helpers import get_effective_pcm_cruise
 
 
 # Wire-protocol version for the capabilities payload. Bump on breaking changes
@@ -148,7 +149,7 @@ def generate_capabilities(params: Params | None = None) -> dict:
       CP = messaging.log_from_bytes(CP_bytes, car.CarParams)
       caps["alpha_long_available"] = bool(CP.alphaLongitudinalAvailable)
       if CP.alphaLongitudinalAvailable:
-        caps["has_longitudinal_control"] = params.get_bool("AlphaLongitudinalEnabled")
+        caps["has_longitudinal_control"] = bool(CP.openpilotLongitudinalControl) or params.get_bool("AlphaLongitudinalEnabled")
       else:
         caps["has_longitudinal_control"] = bool(CP.openpilotLongitudinalControl)
       # CP.steerControlType is the physical control mode (angle / torque).
@@ -158,7 +159,7 @@ def generate_capabilities(params: Params | None = None) -> dict:
       caps["torque_allowed"] = CP.steerControlType != car.CarParams.SteerControlType.angle
       if not caps["brand"] and CP.brand:
         caps["brand"] = str(CP.brand)
-      caps["pcm_cruise"] = bool(CP.pcmCruise)
+      caps["pcm_cruise"] = get_effective_pcm_cruise(CP, caps["has_longitudinal_control"])
       caps["enable_bsm"] = bool(CP.enableBsm)
       # Generic SnG fallback. Brand-specific opaque flags below override.
       caps["has_stop_and_go"] = bool(CP.openpilotLongitudinalControl)
