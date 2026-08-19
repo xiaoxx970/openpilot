@@ -92,7 +92,12 @@ class VCruiseHelper(VCruiseHelperSP):
   def _update_v_cruise_non_pcm(self, CS, enabled, is_metric):
     # handle button presses. TODO: this should be in state_control, but a decelCruise press
     # would have the effect of both enabling and changing speed is checked after the state transition
-    if not enabled:
+
+    # Preset the set speed with +/- while cruise is available but openpilot long is not engaged,
+    # so a later resume comes back at the chosen speed. Mirrors stock VW behavior, where the
+    # set speed can be dialed in before ever engaging ACC.
+    presetting = not enabled
+    if presetting and self.CP.pcmCruise:
       return
 
     long_press = False
@@ -122,7 +127,7 @@ class VCruiseHelper(VCruiseHelperSP):
       return
 
     # Don't adjust speed if we've enabled since the button was depressed (some ports enable on rising edge)
-    if not self.button_change_states[button_type]["enabled"]:
+    if not presetting and not self.button_change_states[button_type]["enabled"]:
       return
 
     # Speed Limit Assist for Non PCM long cars.
@@ -130,6 +135,10 @@ class VCruiseHelper(VCruiseHelperSP):
     # False: Allow set speed changes as SLA is not requesting user confirmation
     if self.update_speed_limit_assist_pre_active_confirmed(button_type):
       return
+
+    # Seed from current speed the first time, so a preset press does not act on V_CRUISE_UNSET
+    if presetting and not self.v_cruise_initialized:
+      self.v_cruise_kph = int(round(np.clip(CS.vEgo * CV.MS_TO_KPH, V_CRUISE_INITIAL, V_CRUISE_MAX)))
 
     long_press, v_cruise_delta = VCruiseHelperSP.update_v_cruise_delta(self, long_press, v_cruise_delta)
     if long_press and self.v_cruise_kph % v_cruise_delta != 0:  # partial interval
