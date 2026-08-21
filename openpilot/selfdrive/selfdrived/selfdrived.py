@@ -255,8 +255,10 @@ class SelfdriveD(CruiseHelper):
     if self.CP.passive:
       return
 
-    # Block resume if cruise never previously enabled
-    resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
+    # Block resume if cruise never previously enabled. Resume itself is exempt: with no set
+    # speed, initialize_v_cruise already falls back to the current speed, which is what stock
+    # cruise does, and on VW resume is one of the two buttons that can engage at all.
+    resume_pressed = any(be.type == ButtonType.accelCruise for be in CS.buttonEvents)
     if not self.CP.pcmCruise and CS.vCruise > 250 and resume_pressed:
       self.events.add(EventName.resumeBlocked)
 
