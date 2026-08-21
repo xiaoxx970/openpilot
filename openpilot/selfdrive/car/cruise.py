@@ -100,6 +100,14 @@ class VCruiseHelper(VCruiseHelperSP):
     if presetting and self.CP.pcmCruise:
       return
 
+    # SET while already engaged re-targets the current speed, like stock cruise. Without this
+    # a manual acceleration can only be locked in by disengaging and engaging again, since
+    # setCruise is not one of the buttons tracked in button_timers below.
+    if enabled and not self.CP.pcmCruise and \
+       any(b.type == ButtonType.setCruise and not b.pressed for b in CS.buttonEvents):
+      self.v_cruise_kph = float(np.clip(round(CS.vEgo * CV.MS_TO_KPH, 1), V_CRUISE_INITIAL, V_CRUISE_MAX))
+      return
+
     long_press = False
     button_type = None
 
