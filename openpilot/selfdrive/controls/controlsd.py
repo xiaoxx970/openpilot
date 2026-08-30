@@ -13,7 +13,7 @@ from openpilot.common.swaglog import cloudlog
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.selfdrive.controls.lib.curvatured import CurvatureDController
-from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature
+from openpilot.selfdrive.controls.lib.drive_helpers import MAX_LATERAL_JERK, clip_curvature, lane_change_lateral_jerk
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
@@ -64,6 +64,7 @@ class Controls(ControlsExt):
     self.roll_compensation = 0.0
     self.model_desired_curvature = 0.0
     self.desired_curvature = 0.0
+    self.lane_change_starting_t = 0.0
 
     self.enable_curvature_controller = self.params.get_bool("EnableCurvatureController")
     self.enable_curvatured = self.params.get_bool("EnableCurvatureD")
@@ -203,7 +204,16 @@ class Controls(ControlsExt):
       else:
         correction = 0.0
       self.LaC.set_curvature_correction(correction)
-    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
+    # Soften the entry to a lane change; see lane_change_lateral_jerk. The exit and normal curve
+    # following keep the full limit.
+    if model_v2.meta.laneChangeState == LaneChangeState.laneChangeStarting:
+      self.lane_change_starting_t += DT_CTRL
+      max_lateral_jerk = lane_change_lateral_jerk(self.lane_change_starting_t)
+    else:
+      self.lane_change_starting_t = 0.0
+      max_lateral_jerk = MAX_LATERAL_JERK
+    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature,
+                                                               lp.roll, max_lateral_jerk)
     lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 
     actuators.curvature = self.desired_curvature

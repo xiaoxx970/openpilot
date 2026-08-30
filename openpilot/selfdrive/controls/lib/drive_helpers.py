@@ -13,6 +13,13 @@ MIN_STABLE_DELAY = 0.3
 MAX_LATERAL_JERK = 5.0  # m/s^3
 MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
 
+# The model steps its desired curvature the instant a lane change starts, so the jerk limit below
+# runs pinned at MAX_LATERAL_JERK for the first few hundred ms and the entry lands much harder than
+# the exit, which coasts back at 1.5-1.8 m/s^3. Ease the limit in over the start of the manoeuvre so
+# both ends feel the same. Only the entry is shaped; curve following is untouched.
+LANE_CHANGE_START_JERK = 1.5  # m/s^3, allowed at the very start of a lane change
+LANE_CHANGE_JERK_RAMP_T = 1.0  # s, time taken to ease back up to MAX_LATERAL_JERK
+
 
 def should_stop(v_ego: float, a_target: float) -> bool:
   return bool(v_ego < 0.3 and a_target < 0.1)
@@ -25,10 +32,17 @@ def smooth_value(val, prev_val, tau, dt=DT_MDL):
   alpha = 1 - np.exp(-dt/tau) if tau > 0 else 1
   return alpha * val + (1 - alpha) * prev_val
 
-def clip_curvature(v_ego, prev_curvature, new_curvature, roll) -> tuple[float, bool]:
+def lane_change_lateral_jerk(t_since_start: float) -> float:
+  # Linear ease-in from LANE_CHANGE_START_JERK back up to the normal limit
+  if t_since_start >= LANE_CHANGE_JERK_RAMP_T:
+    return MAX_LATERAL_JERK
+  frac = max(t_since_start, 0.0) / LANE_CHANGE_JERK_RAMP_T
+  return LANE_CHANGE_START_JERK + frac * (MAX_LATERAL_JERK - LANE_CHANGE_START_JERK)
+
+def clip_curvature(v_ego, prev_curvature, new_curvature, roll, max_lateral_jerk=MAX_LATERAL_JERK) -> tuple[float, bool]:
   # This function respects ISO lateral jerk and acceleration limits + a max curvature
   v_ego = max(v_ego, MIN_SPEED)
-  max_curvature_rate = MAX_LATERAL_JERK / (v_ego ** 2)  # inexact calculation, check https://github.com/commaai/openpilot/pull/24755
+  max_curvature_rate = max_lateral_jerk / (v_ego ** 2)  # inexact calculation, check https://github.com/commaai/openpilot/pull/24755
   new_curvature = np.clip(new_curvature,
                           prev_curvature - max_curvature_rate * DT_CTRL,
                           prev_curvature + max_curvature_rate * DT_CTRL)
