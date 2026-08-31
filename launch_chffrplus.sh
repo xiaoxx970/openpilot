@@ -26,6 +26,11 @@ function agnos_init {
     fi
     $DIR/openpilot/common/hardware/tici/updater $AGNOS_PY $MANIFEST
   fi
+
+  # start tailscaled if installed (static binaries in /data survive AGNOS updates)
+  if [ -x /data/tailscale/tailscaled ] && ! pgrep -x tailscaled > /dev/null; then
+    sudo /data/tailscale/tailscaled --statedir=/data/tailscale/state --socket=/data/tailscale/tailscaled.sock > /data/tailscale/tailscaled.log 2>&1 &
+  fi
 }
 
 function launch {
