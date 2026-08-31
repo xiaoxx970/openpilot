@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import signal
+import string
 import subprocess
 import tempfile
 import time
@@ -316,7 +317,7 @@ class Modem:
       imei = ""
 
     iccid = (self._atv("AT+QCCID", "+QCCID:") or "").rstrip("F")
-    if not iccid.isdigit():
+    if not all(c in string.hexdigits for c in iccid):
       iccid = ""
 
     imsi = first_line("AT+CIMI")
