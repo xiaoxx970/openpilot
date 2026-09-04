@@ -300,6 +300,19 @@ class Car:
     cs_ic_send.carStateIC = CS_IC
     self.pm.send('carStateIC', cs_ic_send)
 
+  def update_hud_ic(self, CC_IC_dc) -> None:
+    """Feed sunnypilot's speed limit resolver and vision curve control into the car HUD (cluster pACC-style prompts)."""
+    lp_sp = self.sm['longitudinalPlanSP']
+    resolver = lp_sp.speedLimit.resolver
+    CC_IC_dc.hudSpeedLimit = float(resolver.speedLimit) if resolver.speedLimitValid else 0.
+    CC_IC_dc.hudSpeedLimitFromMap = resolver.source == custom.LongitudinalPlanSP.SpeedLimit.Source.map
+    CC_IC_dc.hudSpeedLimitAhead = resolver.distToSpeedLimit > 0.
+
+    vision = lp_sp.smartCruiseControl.vision
+    VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.VisionState
+    slowing_for_curve = vision.active and vision.state in (VisionState.entering, VisionState.turning)
+    CC_IC_dc.hudCurveSpeed = float(vision.vTarget) if slowing_for_curve else 0.
+
   def controls_update(self, CS: car.CarState, CC: car.CarControl, CC_SP: custom.CarControlSP, CC_IC: custom.CarControlIC):
     """control update loop, driven by carControl"""
 
@@ -313,7 +326,9 @@ class Car:
     if self.sm.all_alive(['carControl']):
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
-      self.last_actuators_output, can_sends = self.CI.apply(CC, convert_carControlSP(CC_SP), convert_carControlIC(CC_IC), now_nanos)
+      CC_IC_dc = convert_carControlIC(CC_IC)
+      self.update_hud_ic(CC_IC_dc)
+      self.last_actuators_output, can_sends = self.CI.apply(CC, convert_carControlSP(CC_SP), CC_IC_dc, now_nanos)
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
 
       self.CC_prev = CC

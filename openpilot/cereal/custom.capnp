@@ -524,6 +524,10 @@ struct CarControlIC @0xa30662f84033036c {
   cruiseSpeedLimitPredReactToCurves @9 :Bool;
   hudLeadFollowTime @10 :Float32;
   hudLeadDistance @11 :Float32;
+  hudSpeedLimit @12 :Float32; # m/s, current speed limit resolved by sunnypilot (car camera or map), 0 = none
+  hudSpeedLimitFromMap @13 :Bool;
+  hudSpeedLimitAhead @14 :Bool;
+  hudCurveSpeed @15 :Float32; # m/s, vision curve control target speed while slowing for a curve, 0 = none
 }
 
 struct CarParamsIC @0xc86a3d38d13eb3ef {
