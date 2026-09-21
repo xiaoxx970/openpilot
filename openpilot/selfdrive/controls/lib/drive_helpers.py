@@ -17,8 +17,8 @@ MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
 # runs pinned at MAX_LATERAL_JERK for the first few hundred ms and the entry lands much harder than
 # the exit, which coasts back at 1.5-1.8 m/s^3. Ease the limit in over the start of the manoeuvre so
 # both ends feel the same. Only the entry is shaped; curve following is untouched.
-LANE_CHANGE_START_JERK = 1.5  # m/s^3, allowed at the very start of a lane change
-LANE_CHANGE_JERK_RAMP_T = 1.0  # s, time taken to ease back up to MAX_LATERAL_JERK
+LANE_CHANGE_START_JERK = 0.8  # m/s^3, allowed at the very start of a lane change
+LANE_CHANGE_JERK_RAMP_T = 2.0  # s, time taken to ease back up to MAX_LATERAL_JERK
 
 
 def should_stop(v_ego: float, a_target: float) -> bool:
