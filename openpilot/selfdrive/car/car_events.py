@@ -2,10 +2,14 @@ from openpilot.cereal import log
 from opendbc.car.structs import car
 from opendbc.car import DT_CTRL, structs
 from opendbc.car.car_helpers import interfaces
-from opendbc.car.interfaces import MAX_CTRL_SPEED
 from opendbc.car.toyota.values import ToyotaFlags
 
+from openpilot.common.constants import CV
 from openpilot.selfdrive.selfdrived.events import Events
+
+# The set speed stays capped at V_CRUISE_MAX (145 kph), but the driver can gas-override above it.
+# Only warn once we are past the speed we are willing to drive at all.
+MAX_CTRL_SPEED = 180 * CV.KPH_TO_MS
 
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
