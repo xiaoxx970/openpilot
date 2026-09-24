@@ -43,6 +43,13 @@ _TURNING_ACC_BP = [1.5, 2.3, 3.]  # absolute value of current lat acc
 
 _LEAVING_ACC = 0.5  # Conformable acceleration to regain speed while leaving a turn.
 
+# Direction of the turn being slowed for, e.g. to pick a left/right curve icon on the car's cluster.
+CURVE_NONE = 0
+CURVE_LEFT = -1
+CURVE_RIGHT = 1
+CURVE_S_BEND = 2
+_S_BEND_RATIO = 0.6  # both directions reach this share of the peak lateral accel ahead -> S-bend
+
 
 class SmartCruiseControlVision:
   v_target: float = 0
@@ -65,6 +72,20 @@ class SmartCruiseControlVision:
     self.state = VisionState.disabled
     self.current_lat_acc = 0.
     self.max_pred_lat_acc = 0.
+    self.pred_curve_direction = CURVE_NONE
+    self.curve_direction = CURVE_NONE
+
+  @staticmethod
+  def get_curve_direction(signed_lat_accels: np.ndarray) -> int:
+    # modelV2 orientation is in the device frame (z down): a positive yaw rate is a right turn
+    right = max(float(np.max(signed_lat_accels)), 0.)
+    left = max(-float(np.min(signed_lat_accels)), 0.)
+    peak = max(left, right)
+    if peak < _ABORT_ENTERING_PRED_LAT_ACC_TH:
+      return CURVE_NONE
+    if min(left, right) >= _S_BEND_RATIO * peak:
+      return CURVE_S_BEND
+    return CURVE_LEFT if left > right else CURVE_RIGHT
 
   def get_a_target_from_control(self) -> float:
     return self.a_target
@@ -83,8 +104,10 @@ class SmartCruiseControlVision:
     if not self.long_enabled:
       return
     else:
-      rate_plan = np.array(np.abs(sm['modelV2'].orientationRate.z))
+      signed_rate_plan = np.array(sm['modelV2'].orientationRate.z)
+      rate_plan = np.abs(signed_rate_plan)
       vel_plan = np.array(sm['modelV2'].velocity.x)
+      self.pred_curve_direction = self.get_curve_direction(signed_rate_plan * vel_plan)
 
       self.current_lat_acc = self.v_ego ** 2 * abs(sm['controlsState'].curvature)
 
@@ -196,6 +219,13 @@ class SmartCruiseControlVision:
 
     self.is_enabled, self.is_active = self._update_state_machine()
     self.a_target = self._update_solution()
+
+    # Latch the direction for the whole slow-down so a cluster icon does not flip mid-curve
+    if self.state in (VisionState.entering, VisionState.turning):
+      if self.curve_direction == CURVE_NONE:
+        self.curve_direction = self.pred_curve_direction
+    else:
+      self.curve_direction = CURVE_NONE
 
     self.output_v_target = self.get_v_target_from_control()
     self.output_a_target = self.get_a_target_from_control()
