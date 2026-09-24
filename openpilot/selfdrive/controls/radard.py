@@ -29,6 +29,12 @@ V_EGO_STATIONARY = 4.   # no stationary object flag below this speed
 
 RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
 
+# A track the radar itself places in a neighbouring lane may only be matched to the vision lead once it is this
+# close to the planned path. Matching is otherwise by distance and speed alone, so while overtaking a slower car in
+# the next lane could become the lead. At 2 m from the path a car's inner side is already over the lane line.
+NEIGHBOUR_LANE_MAX_PATH_OFFSET = 2.0  # m
+LaneAssignment = structs.RadarData.RadarPoint.LaneAssignment
+
 
 class KalmanParams:
   def __init__(self, dt: float):
@@ -62,12 +68,13 @@ class Track:
     self.K_K = kalman_params.K
     self.kf = KF1D([[v_lead], [0.0]], self.K_A, self.K_C, self.K_K)
 
-  def update(self, d_rel: float, y_rel: float, v_rel: float, v_lead: float):
+  def update(self, d_rel: float, y_rel: float, v_rel: float, v_lead: float, lane_assignment=LaneAssignment.unknown):
     # relative values, copy
     self.dRel = d_rel   # LONG_DIST
     self.yRel = y_rel   # -LAT_DIST
     self.vRel = v_rel   # REL_SPEED
     self.vLead = v_lead
+    self.laneAssignment = lane_assignment
 
     # computed velocity and accelerations
     if self.cnt > 0:
@@ -99,6 +106,17 @@ class Track:
       "radarTrackId": self.identifier,
     }
 
+  def path_offset(self, path: capnp._DynamicStructReader) -> float:
+    # radar y is positive left, model y is positive right
+    if len(path.x) == 0:
+      return self.yRel
+    return self.yRel + float(np.interp(self.dRel + RADAR_TO_CAMERA, path.x, path.y))
+
+  def may_match_vision(self, path: capnp._DynamicStructReader) -> bool:
+    if self.laneAssignment in (LaneAssignment.left, LaneAssignment.right):
+      return abs(self.path_offset(path)) < NEIGHBOUR_LANE_MAX_PATH_OFFSET
+    return True
+
   def potential_low_speed_lead(self, v_ego: float):
     # stop for stuff in front of you and low speed, even without model confirmation
     # Radar points closer than 0.75, are almost always glitches on toyota radars
@@ -114,7 +132,8 @@ def laplacian_pdf(x: float, mu: float, b: float):
   return math.exp(-abs(x-mu)/b)
 
 
-def match_vision_to_track(v_ego: float, lead: capnp._DynamicStructReader, tracks: dict[int, Track]):
+def match_vision_to_track(v_ego: float, lead: capnp._DynamicStructReader, tracks: dict[int, Track],
+                          path: capnp._DynamicStructReader):
   offset_vision_dist = lead.x[0] - RADAR_TO_CAMERA
 
   def prob(c):
@@ -125,7 +144,10 @@ def match_vision_to_track(v_ego: float, lead: capnp._DynamicStructReader, tracks
     # This isn't exactly right, but it's a good heuristic
     return prob_d * prob_y * prob_v
 
-  track = max(tracks.values(), key=prob)
+  candidates = [c for c in tracks.values() if c.may_match_vision(path)]
+  if len(candidates) == 0:
+    return None
+  track = max(candidates, key=prob)
 
   # if no 'sane' match is found return -1
   # stationary radar points can be false positives
@@ -156,10 +178,10 @@ def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: floa
 
 def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
              model_v_ego: float, lead_prob: float, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
-             low_speed_override: bool = True) -> dict[str, Any]:
+             path: capnp._DynamicStructReader, low_speed_override: bool = True) -> dict[str, Any]:
   # Determine leads, this is where the essential logic happens
   if len(tracks) > 0 and ready and lead_prob > .5:
-    track = match_vision_to_track(v_ego, lead_msg, tracks)
+    track = match_vision_to_track(v_ego, lead_msg, tracks, path)
   else:
     track = None
 
@@ -218,7 +240,7 @@ class RadarD:
       self.v_ego_hist.append(self.v_ego)
       self.last_v_ego_frame = sm.recv_frame['carState']
 
-    ar_pts = {pt.trackId: [pt.dRel, pt.yRel, pt.vRel] for pt in rr.points}
+    ar_pts = {pt.trackId: [pt.dRel, pt.yRel, pt.vRel, pt.laneAssignment] for pt in rr.points}
 
     # *** remove missing points from meta data ***
     for ids in list(self.tracks.keys()):
@@ -235,7 +257,7 @@ class RadarD:
       # create the track if it doesn't exist or it's a new track
       if ids not in self.tracks:
         self.tracks[ids] = Track(ids, v_lead, self.kalman_params)
-      self.tracks[ids].update(rpt[0], rpt[1], rpt[2], v_lead)
+      self.tracks[ids].update(rpt[0], rpt[1], rpt[2], v_lead, rpt[3])
 
     # *** publish radarState ***
     self.radar_state_valid = sm.all_checks()
@@ -248,6 +270,7 @@ class RadarD:
     else:
       model_v_ego = self.v_ego
     leads_v3 = sm['modelV2'].leadsV3
+    path = sm['modelV2'].position
     if len(leads_v3) > 1:
       for i in range(2):
         # Asymmetric filter on lead prob to keep lead when uncertain
@@ -258,9 +281,9 @@ class RadarD:
           self.lead_prob_filters[i].update(lead_prob)
 
       self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x,
-                                          self.CP, self.CP_SP, low_speed_override=True)
+                                          self.CP, self.CP_SP, path, low_speed_override=True)
       self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x,
-                                          self.CP, self.CP_SP, low_speed_override=False)
+                                          self.CP, self.CP_SP, path, low_speed_override=False)
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
