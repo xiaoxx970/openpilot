@@ -19,6 +19,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
+from openpilot.selfdrive.controls.lib.lane_line_visibility import LaneLineVisibility
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
@@ -64,6 +65,8 @@ class Controls(ControlsExt):
     self.roll_compensation = 0.0
     self.model_desired_curvature = 0.0
     self.desired_curvature = 0.0
+    self.left_lane_line = LaneLineVisibility()
+    self.right_lane_line = LaneLineVisibility()
     self.lane_change_starting_t = 0.0
 
     self.enable_curvature_controller = self.params.get_bool("EnableCurvatureController")
@@ -276,8 +279,13 @@ class Controls(ControlsExt):
     CC_IC.hudLeadFollowTime = get_T_FOLLOW(hudControl.leadDistanceBars - 1)
     hudControl.visualAlert = self.sm['selfdriveState'].alertHudVisual
 
-    hudControl.rightLaneVisible = True
-    hudControl.leftLaneVisible = True
+    # Report a lane line to the car's HUD only while the model actually sees it, per side
+    lane_line_probs = self.sm['modelV2'].laneLineProbs
+    if len(lane_line_probs) > 2:
+      self.left_lane_line.update(lane_line_probs[1])
+      self.right_lane_line.update(lane_line_probs[2])
+    hudControl.leftLaneVisible = self.left_lane_line.visible
+    hudControl.rightLaneVisible = self.right_lane_line.visible
     if self.sm.valid['driverAssistance']:
       hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
       hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
