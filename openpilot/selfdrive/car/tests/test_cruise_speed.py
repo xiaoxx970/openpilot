@@ -9,6 +9,7 @@ from openpilot.selfdrive.car.cruise import (
   V_CRUISE_INITIAL, V_CRUISE_MAX, V_CRUISE_MIN,
 )
 from openpilot.cereal import custom
+from openpilot.selfdrive.car.distance_display import DISTANCE_DISPLAY_FRAMES
 from opendbc.car.structs import car, CarStateIC
 from openpilot.common.constants import CV
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
@@ -120,8 +121,8 @@ class TestVCruiseHelper(OpenpilotTestCase):
 
   def test_set_gas_pressed(self):
     """
-    Asserts pressing set while enabled with gas pressed sets
-    the speed to the maximum of vEgo and current cruise speed.
+    Asserts pressing - while enabled with gas pressed only steps the set speed down,
+    it does not jump to the current speed.
     """
 
     for v_ego in np.linspace(0, 100, 101):
@@ -130,7 +131,6 @@ class TestVCruiseHelper(OpenpilotTestCase):
 
       # first decrement speed, then perform gas pressed logic
       expected_v_cruise_kph = self.v_cruise_helper.v_cruise_kph - IMPERIAL_INCREMENT
-      expected_v_cruise_kph = max(expected_v_cruise_kph, v_ego * CV.MS_TO_KPH)  # clip to min of vEgo
       expected_v_cruise_kph = float(np.clip(round(expected_v_cruise_kph, 1), V_CRUISE_MIN, V_CRUISE_MAX))
 
       CS = car.CarState(vEgo=float(v_ego), gasPressed=True, cruiseState={"available": True})
@@ -141,6 +141,89 @@ class TestVCruiseHelper(OpenpilotTestCase):
       if v_ego == 0.0:
         continue
       assert expected_v_cruise_kph == self.v_cruise_helper.v_cruise_kph
+
+  def press(self, btn, enabled, **cs):
+    for pressed in (True, False):
+      CS = car.CarState(cruiseState={"available": True}, **cs)
+      CS.buttonEvents = [ButtonEvent(type=btn, pressed=pressed)]
+      self.v_cruise_helper.update_v_cruise(CS, self.CS_IC, enabled=enabled, is_metric=True)
+
+  def test_set_resume_step_while_engaged(self):
+    """
+    Asserts RES and SET step the set speed up and down by one while engaged, like stock VW.
+    """
+
+    self.enable(80 * CV.KPH_TO_MS, False, False)
+    self.press(ButtonType.resumeCruise, enabled=True, vEgo=80 * CV.KPH_TO_MS)
+    assert self.v_cruise_helper.v_cruise_kph == 81
+
+    # SET at or above the set speed steps down
+    self.press(ButtonType.setCruise, enabled=True, vEgo=90 * CV.KPH_TO_MS)
+    self.press(ButtonType.setCruise, enabled=True, vEgo=80 * CV.KPH_TO_MS)
+    assert self.v_cruise_helper.v_cruise_kph == 79
+
+    # SET while overriding faster than the set speed also steps down
+    self.press(ButtonType.setCruise, enabled=True, vEgo=100 * CV.KPH_TO_MS, gasPressed=True)
+    assert self.v_cruise_helper.v_cruise_kph == 78
+    self.press(ButtonType.resumeCruise, enabled=True, vEgo=80 * CV.KPH_TO_MS)
+
+    # SET below the set speed takes the current speed
+    self.press(ButtonType.setCruise, enabled=True, vEgo=62.4 * CV.KPH_TO_MS)
+    assert self.v_cruise_helper.v_cruise_kph == 62
+
+    # RES at a stop only pulls away
+    self.press(ButtonType.resumeCruise, enabled=True, standstill=True)
+    assert self.v_cruise_helper.v_cruise_kph == 62
+
+  def test_set_resume_ignore_custom_increments(self):
+    """
+    Asserts RES and SET step by one even when +/- use custom increments.
+    """
+
+    self.v_cruise_helper.custom_acc_enabled = True
+    self.v_cruise_helper.short_increment = 10
+    self.v_cruise_helper.long_increment = 10
+    self.enable(80 * CV.KPH_TO_MS, False, False)
+
+    self.press(ButtonType.accelCruise, enabled=True, vEgo=80 * CV.KPH_TO_MS)
+    assert self.v_cruise_helper.v_cruise_kph == 90
+    self.press(ButtonType.resumeCruise, enabled=True, vEgo=80 * CV.KPH_TO_MS)
+    assert self.v_cruise_helper.v_cruise_kph == 91
+    self.press(ButtonType.setCruise, enabled=True, vEgo=95 * CV.KPH_TO_MS)
+    assert self.v_cruise_helper.v_cruise_kph == 90
+    self.press(ButtonType.decelCruise, enabled=True, vEgo=95 * CV.KPH_TO_MS)
+    assert self.v_cruise_helper.v_cruise_kph == 80
+
+  def test_set_resume_do_not_preset(self):
+    """
+    Asserts SET and RES leave the set speed alone while disengaged, they are the engage buttons.
+    """
+
+    self.enable(80 * CV.KPH_TO_MS, False, False)
+    for btn in (ButtonType.setCruise, ButtonType.resumeCruise):
+      self.press(btn, enabled=False)
+      assert self.v_cruise_helper.v_cruise_kph == 80
+
+  def test_plus_minus_adjust_distance_while_shown(self):
+    """
+    Asserts +/- change the following distance instead of the set speed while the distance is shown.
+    """
+
+    self.CP = car.CarParams(pcmCruise=self.pcm_cruise, openpilotLongitudinalControl=True)
+    self.v_cruise_helper = VCruiseHelper(self.CP, self.CP_SP)
+    self.reset_cruise_speed_state()
+    self.enable(80 * CV.KPH_TO_MS, False, False)
+
+    self.press(ButtonType.gapAdjustCruise, enabled=True)
+    self.press(ButtonType.accelCruise, enabled=True)
+    self.press(ButtonType.decelCruise, enabled=True)
+    assert self.v_cruise_helper.v_cruise_kph == 80
+
+    # the display closes 2 s after the last press
+    for _ in range(DISTANCE_DISPLAY_FRAMES):
+      self.v_cruise_helper.update_v_cruise(car.CarState(cruiseState={"available": True}), self.CS_IC, enabled=True, is_metric=True)
+    self.press(ButtonType.accelCruise, enabled=True)
+    assert self.v_cruise_helper.v_cruise_kph == 81
 
   def test_initialize_v_cruise(self):
     """
