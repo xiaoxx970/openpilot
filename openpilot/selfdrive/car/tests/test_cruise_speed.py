@@ -194,6 +194,20 @@ class TestVCruiseHelper(OpenpilotTestCase):
     self.press(ButtonType.decelCruise, enabled=True, vEgo=95 * CV.KPH_TO_MS)
     assert self.v_cruise_helper.v_cruise_kph == 80
 
+  def test_preset_while_disengaged(self):
+    """
+    Asserts +/- preset the set speed while disengaged, but only from a press that was seen.
+    """
+
+    self.enable(80 * CV.KPH_TO_MS, False, False)
+    self.press(ButtonType.accelCruise, enabled=False)
+    assert self.v_cruise_helper.v_cruise_kph == 81
+
+    CS = car.CarState(cruiseState={"available": True})
+    CS.buttonEvents = [ButtonEvent(type=ButtonType.accelCruise, pressed=False)]
+    self.v_cruise_helper.update_v_cruise(CS, self.CS_IC, enabled=False, is_metric=True)
+    assert self.v_cruise_helper.v_cruise_kph == 81
+
   def test_set_resume_do_not_preset(self):
     """
     Asserts SET and RES leave the set speed alone while disengaged, they are the engage buttons.

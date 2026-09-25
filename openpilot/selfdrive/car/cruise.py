@@ -196,6 +196,10 @@ class VCruiseHelper(VCruiseHelperSP):
     if presetting and button_type in ENGAGED_CRUISE_BUTTON:
       return
 
+    # Only preset from a press seen here, not a stray release (e.g. of a press made before cruise was available)
+    if presetting and self.button_timers[button_type] == 0:
+      return
+
     # Don't adjust speed when pressing resume to exit standstill
     cruise_standstill = self.button_change_states[button_type]["standstill"] or CS.cruiseState.standstill
     if button_type == ButtonType.accelCruise and cruise_standstill:
