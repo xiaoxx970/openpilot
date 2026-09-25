@@ -21,11 +21,11 @@ from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import Lon
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 J_CRUISE_VALS = [1.6, 1.2, 0.8, 0.6]
-# Cruise decel by longitudinal personality; the stock -1.2 m/s^2 is kept for aggressive only
-A_CRUISE_MIN_VALS = {
-  log.LongitudinalPersonality.relaxed: -0.6,
-  log.LongitudinalPersonality.standard: -0.8,
-  log.LongitudinalPersonality.aggressive: -1.2,
+# Cruise decel mirrors the accel table, scaled by longitudinal personality
+A_CRUISE_MIN_SCALE = {
+  log.LongitudinalPersonality.relaxed: 0.75,
+  log.LongitudinalPersonality.standard: 1.0,
+  log.LongitudinalPersonality.aggressive: 1.25,
 }
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
@@ -63,7 +63,8 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
       coast_limit = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [max_accel, clipped_accel_coast])
       max_accel = min(max_accel, coast_limit)
 
-  target_accel = np.clip(v_cruise - v_ego, A_CRUISE_MIN_VALS.get(personality, A_CRUISE_MIN_VALS[log.LongitudinalPersonality.standard]), max_accel)
+  min_accel = -get_max_accel(v_ego) * A_CRUISE_MIN_SCALE.get(personality, 1.0)
+  target_accel = np.clip(v_cruise - v_ego, min_accel, max_accel)
   j_cruise = np.interp(v_ego, A_CRUISE_MAX_BP, J_CRUISE_VALS)
   target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * dt, a_cruise_prev + j_cruise * dt))
 
