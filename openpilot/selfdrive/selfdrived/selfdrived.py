@@ -541,14 +541,20 @@ class SelfdriveD(CruiseHelper):
     if self.CP.openpilotLongitudinalControl:
       self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
       personality = self.personality
+      show_personality = self.distance_display.step != 0
       if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
-        if self.distance_display.cycle and not self.experimental_mode_switched:
-          personality = (personality + 1) % 3
+        if not self.experimental_mode_switched:
+          # the first press shows the current personality on screen too, like the cluster
+          show_personality = CS.cruiseState.available
+          if self.distance_display.cycle:
+            personality = (personality + 1) % 3
         self.experimental_mode_switched = False
       personality = min(max(personality + self.distance_display.step, 0), 2)
       if personality != self.personality:
         self.personality = personality
         self.params.put('LongitudinalPersonality', self.personality)
+        show_personality = True
+      if show_personality:
         self.events.add(EventName.personalityChanged)
 
     self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
