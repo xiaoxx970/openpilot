@@ -312,6 +312,7 @@ class Car:
     VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.VisionState
     slowing_for_curve = vision.active and vision.state in (VisionState.entering, VisionState.turning)
     CC_IC_dc.hudCurveSpeed = float(vision.vTarget) if slowing_for_curve else 0.
+    CC_IC_dc.hudCurveDirection = int(vision.curveDirection) if slowing_for_curve else 0
 
   def controls_update(self, CS: car.CarState, CC: car.CarControl, CC_SP: custom.CarControlSP, CC_IC: custom.CarControlIC):
     """control update loop, driven by carControl"""

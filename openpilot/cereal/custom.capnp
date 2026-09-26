@@ -228,6 +228,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
       maxPredictedLateralAccel @4 :Float32;
       enabled @5 :Bool;
       active @6 :Bool;
+      curveDirection @7 :Int8; # turn being slowed for: 0 = none, -1 = left, 1 = right, 2 = S-bend
     }
 
     struct Map {
@@ -530,6 +531,7 @@ struct CarControlIC @0xa30662f84033036c {
   hudSpeedLimitFromMap @13 :Bool;
   hudSpeedLimitAhead @14 :Bool;
   hudCurveSpeed @15 :Float32; # m/s, vision curve control target speed while slowing for a curve, 0 = none
+  hudCurveDirection @16 :Int8; # direction of that curve: 0 = none, -1 = left, 1 = right, 2 = S-bend
 }
 
 struct CarParamsIC @0xc86a3d38d13eb3ef {
