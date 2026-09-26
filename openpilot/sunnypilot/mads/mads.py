@@ -21,6 +21,8 @@ GearShifter = structs.CarState.GearShifter
 SafetyModel = structs.CarParams.SafetyModel
 
 SET_SPEED_BUTTONS = (ButtonType.accelCruise, ButtonType.resumeCruise, ButtonType.decelCruise, ButtonType.setCruise)
+# VW reports the momentary main switch as cancel
+MAIN_CRUISE_BUTTONS = (ButtonType.mainCruise, ButtonType.cancel)
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
 
@@ -34,6 +36,7 @@ class ModularAssistiveDrivingSystem:
     self.active = False
     self.available = False
     self.lateral_mismatch_counter = 0
+    self.main_cruise_drop_while_braking = False
     self.allow_always = False
     self.no_main_cruise = False
     self.selfdrive = selfdrive
@@ -89,6 +92,22 @@ class ModularAssistiveDrivingSystem:
       return True
 
     return False
+
+  def main_cruise_rising_edge(self, CS: structs.CarState) -> bool:
+    # Hard braking can take cruise out of available by itself (VW TSK), and it comes back once the brake
+    # is released. That return is not a main switch press, so it must not engage MADS if MADS was off when
+    # it dropped. With MADS engaged it drops and re-engages on the return as before.
+    available, available_prev = CS.cruiseState.available, self.selfdrive.CS_prev.cruiseState.available
+    if any(be.type in MAIN_CRUISE_BUTTONS for be in CS.buttonEvents):
+      self.main_cruise_drop_while_braking = False
+    if available_prev and not available:
+      self.main_cruise_drop_while_braking = not self.enabled and (CS.brakePressed or self.selfdrive.CS_prev.brakePressed)
+
+    rising_edge = available and not available_prev
+    if rising_edge and self.main_cruise_drop_while_braking:
+      self.main_cruise_drop_while_braking = False
+      return False
+    return rising_edge
 
   def get_wrong_car_mode(self, alert_only: bool) -> None:
     if alert_only:
@@ -150,6 +169,7 @@ class ModularAssistiveDrivingSystem:
       self.events.remove(EventName.espActive)
 
     selfdrive_enable_events = self.events.has(EventName.pcmEnable) or self.events.has(EventName.buttonEnable)
+    main_cruise_rising_edge = self.main_cruise_rising_edge(CS)
     set_speed_btns_enable = any(be.type in SET_SPEED_BUTTONS for be in CS.buttonEvents)
 
     # wrongCarMode alert only or actively block control
@@ -164,7 +184,7 @@ class ModularAssistiveDrivingSystem:
         self.events.remove(EventName.buttonEnable)
     else:
       if self.main_enabled_toggle:
-        if CS.cruiseState.available and not self.selfdrive.CS_prev.cruiseState.available:
+        if main_cruise_rising_edge:
           self.events_sp.add(EventNameSP.lkasEnable)
 
     for be in CS.buttonEvents:
