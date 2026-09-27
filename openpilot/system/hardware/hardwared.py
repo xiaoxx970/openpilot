@@ -82,6 +82,39 @@ class Chestnut:
     self.thread.start()
 
 
+class ParamWriter:
+  """Persists params on its own thread, in order, so a stalled disk cannot hold up deviceState.
+
+  /data is mounted with online discard, and freeing a large file can block all disk I/O for
+  seconds. A blocking put here then stops deviceState, and selfdrived disengages with commIssue.
+  Slow writes are logged, so a stalling disk is still visible.
+  """
+  SLOW_WRITE = 1.0  # s
+
+  def __init__(self):
+    self.queue: queue.Queue = queue.Queue()
+    threading.Thread(target=self._run, daemon=True).start()
+
+  def put(self, key: str, val) -> None:
+    self.queue.put((key, val))
+
+  def _run(self) -> None:
+    params = Params()
+    while True:
+      key, val = self.queue.get()
+      start = time.monotonic()
+      try:
+        if isinstance(val, bool):
+          params.put_bool(key, val, block=True)
+        else:
+          params.put(key, val, block=True)
+      except Exception:
+        cloudlog.exception(f"failed to write param {key}")
+      duration = time.monotonic() - start
+      if duration > self.SLOW_WRITE:
+        cloudlog.event("slow_param_write", key=key, duration=round(duration, 2), pending=self.queue.qsize(), error=True)
+
+
 ThermalBand = namedtuple("ThermalBand", ['min_temp', 'max_temp'])
 HardwareState = namedtuple("HardwareState", ['network_type', 'network_info', 'network_strength', 'network_stats',
                                              'network_metered', 'modem_temps', 'usb_state'])
@@ -233,6 +266,7 @@ def hardware_thread(end_event, hw_queue) -> None:
   offroad_cycle_count = 0
 
   params = Params()
+  param_writer = ParamWriter()
   power_monitor = PowerMonitoring()
 
   uptime_offroad: float = params.get("UptimeOffroad", return_default=True)
@@ -389,13 +423,13 @@ def hardware_thread(end_event, hw_queue) -> None:
       should_start = should_start and all(startup_conditions.values())
 
     if should_start != should_start_prev or (count == 0):
-      params.put_bool("IsEngaged", False, block=True)
+      param_writer.put("IsEngaged", False)
       engaged_prev = False
 
     if sm.updated['selfdriveState']:
       engaged = sm['selfdriveState'].enabled
       if engaged != engaged_prev:
-        params.put_bool("IsEngaged", engaged, block=True)
+        param_writer.put("IsEngaged", engaged)
         engaged_prev = engaged
 
       try:
@@ -495,7 +529,7 @@ def hardware_thread(end_event, hw_queue) -> None:
       # save last one before going onroad
       if rising_edge_started:
         try:
-          params.put("LastOffroadStatusPacket", dat, block=True)
+          param_writer.put("LastOffroadStatusPacket", dat)
         except Exception:
           cloudlog.exception("failed to save offroad status")
 
@@ -509,8 +543,8 @@ def hardware_thread(end_event, hw_queue) -> None:
     last_uptime_ts = now_ts
 
     if (count % int(60. / DT_HW)) == 0:
-      params.put("UptimeOffroad", uptime_offroad, block=True)
-      params.put("UptimeOnroad", uptime_onroad, block=True)
+      param_writer.put("UptimeOffroad", uptime_offroad)
+      param_writer.put("UptimeOnroad", uptime_onroad)
 
     count += 1
     should_start_prev = should_start
