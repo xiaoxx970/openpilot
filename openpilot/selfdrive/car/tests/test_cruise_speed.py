@@ -239,6 +239,29 @@ class TestVCruiseHelper(OpenpilotTestCase):
     self.press(ButtonType.accelCruise, enabled=True)
     assert self.v_cruise_helper.v_cruise_kph == 81
 
+  def test_resume_restores_speed_when_enable_lags(self):
+    """
+    Asserts RES restores the previous set speed even if card sees the engagement a few frames after the release.
+    """
+
+    self.enable(80 * CV.KPH_TO_MS, False, False)
+    for btn, expected in ((ButtonType.resumeCruise, 80), (ButtonType.setCruise, 60)):
+      self.press(btn, enabled=False, vEgo=60 * CV.KPH_TO_MS)
+      for _ in range(3):
+        self.v_cruise_helper.update_v_cruise(car.CarState(vEgo=60 * CV.KPH_TO_MS, cruiseState={"available": True}), self.CS_IC,
+                                             enabled=False, is_metric=True)
+      self.v_cruise_helper.initialize_v_cruise(car.CarState(vEgo=60 * CV.KPH_TO_MS), False, False)
+      assert self.v_cruise_helper.v_cruise_kph == expected
+      self.v_cruise_helper.v_cruise_kph = 80
+
+    # a stale RES long before does not count
+    self.press(ButtonType.resumeCruise, enabled=False, vEgo=60 * CV.KPH_TO_MS)
+    for _ in range(100):
+      self.v_cruise_helper.update_v_cruise(car.CarState(vEgo=60 * CV.KPH_TO_MS, cruiseState={"available": True}), self.CS_IC,
+                                           enabled=False, is_metric=True)
+    self.v_cruise_helper.initialize_v_cruise(car.CarState(vEgo=60 * CV.KPH_TO_MS), False, False)
+    assert self.v_cruise_helper.v_cruise_kph == 60
+
   def test_initialize_v_cruise(self):
     """
     Asserts allowed cruise speeds on enabling with SET.
