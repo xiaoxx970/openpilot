@@ -850,8 +850,9 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.NO_ENTRY: NoEntryAlert("Vehicle Sensors Calibrating"),
   },
 
+  # also shown while disengaged, the distance can be set before engaging like on the cluster
   EventName.personalityChanged: {
-    ET.WARNING: personality_changed_alert,
+    ET.PERMANENT: personality_changed_alert,
   },
 
   EventName.userBookmark: {

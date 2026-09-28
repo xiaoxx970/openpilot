@@ -17,6 +17,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
+from openpilot.selfdrive.car.distance_display import DistanceDisplay
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
@@ -162,6 +163,7 @@ class SelfdriveD(CruiseHelper):
     self.personality_write_event = threading.Event()
     self.personality_write_pending: int | None = None
     self.personality_generation = 0
+    self.distance_display = DistanceDisplay()
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -260,8 +262,10 @@ class SelfdriveD(CruiseHelper):
     if self.CP.passive:
       return
 
-    # Block resume if cruise never previously enabled
-    resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
+    # Block resume if cruise never previously enabled. Resume itself is exempt: with no set
+    # speed, initialize_v_cruise already falls back to the current speed, which is what stock
+    # cruise does, and on VW resume is one of the two buttons that can engage at all.
+    resume_pressed = any(be.type == ButtonType.accelCruise for be in CS.buttonEvents)
     if not self.CP.pcmCruise and CS.vCruise > 250 and resume_pressed:
       self.events.add(EventName.resumeBlocked)
 
@@ -536,13 +540,30 @@ class SelfdriveD(CruiseHelper):
 
     CruiseHelper.update(self, CS, self.events_sp, self.experimental_mode)
 
-    # decrement personality on distance button press
+    # distance button like stock VW: the first press only shows the distance, presses while it is
+    # shown step it up (wrapping to the shortest) and +/- step it up and down
     if self.CP.openpilotLongitudinalControl:
+      self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
+      personality = self.personality
+      show_personality = self.distance_display.step != 0
       if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
         if not self.experimental_mode_switched:
-          self._change_personality()
-          self.events.add(EventName.personalityChanged)
+          # the first press shows the current personality on screen too, like the cluster
+          show_personality = CS.cruiseState.available
+          if self.distance_display.cycle:
+            personality = (personality + 1) % 3
         self.experimental_mode_switched = False
+      personality = min(max(personality + self.distance_display.step, 0), 2)
+      if personality != self.personality:
+        self._set_personality(personality)
+        show_personality = True
+      # Write once when the distance display closes, not on every press: each write is fsync'd, and
+      # bursts of them while driving went with multi-second disk stalls (deviceState -> commIssue).
+      # Until then the pending write keeps params_thread from reading the old value back.
+      if self.personality_write_pending is not None and not self.distance_display.is_open:
+        self.personality_write_event.set()
+      if show_personality:
+        self.events.add(EventName.personalityChanged)
 
     self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
 
@@ -689,6 +710,13 @@ class SelfdriveD(CruiseHelper):
       self.personality_generation += 1
       self.personality_write_event.set()
       return old_personality, self.personality
+
+  def _set_personality(self, personality: int) -> None:
+    # step() wakes personality_write_thread once the distance display has closed
+    with self.personality_lock:
+      self.personality = personality
+      self.personality_write_pending = personality
+      self.personality_generation += 1
 
   def params_thread(self, evt):
     while not evt.is_set():
