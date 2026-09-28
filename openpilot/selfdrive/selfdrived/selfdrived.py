@@ -57,6 +57,9 @@ TurnDirection = custom.ModelDataV2SP.TurnDirection
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
 
+PERSONALITY_WRITE_TIMEOUT = 10.  # s, then trust the param again
+
+
 class SelfdriveD(CruiseHelper):
   def __init__(self, CP=None, CP_SP=None, CP_IC=None):
     self.params = Params()
@@ -160,6 +163,7 @@ class SelfdriveD(CruiseHelper):
       self.params
     )
     self.distance_display = DistanceDisplay()
+    self.personality_pending: tuple[int, float] | None = None  # changed here, maybe not on disk yet
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -551,6 +555,7 @@ class SelfdriveD(CruiseHelper):
         self.experimental_mode_switched = False
       personality = min(max(personality + self.distance_display.step, 0), 2)
       if personality != self.personality:
+        self.personality_pending = (personality, time.monotonic())
         self.personality = personality
         self.params.put('LongitudinalPersonality', self.personality)
         show_personality = True
@@ -700,7 +705,13 @@ class SelfdriveD(CruiseHelper):
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
-      self.personality = self.params.get("LongitudinalPersonality", return_default=True)
+      # The write above is non-blocking and can take seconds on a busy disk; until it lands, reading
+      # the param back would undo the change (seen flipping back within 30 ms)
+      personality = self.params.get("LongitudinalPersonality", return_default=True)
+      pending = self.personality_pending
+      if pending is None or personality == pending[0] or time.monotonic() - pending[1] > PERSONALITY_WRITE_TIMEOUT:
+        self.personality_pending = None
+        self.personality = personality
 
       self.mads.read_params()
       time.sleep(0.1)
