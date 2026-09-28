@@ -13,6 +13,7 @@ class ICTogglesLayoutMici(NavScroller):
     enable_curvature_correction = BigParamControl("VW: Lateral Correction (Recommended)", "EnableCurvatureController")
     enable_long_comfort_mode    = BigParamControl("VW: Longitudinal Comfort Mode", "EnableLongComfortMode")
     enable_sl_control           = BigParamControl("VW: Speed Limit Control", "EnableSpeedLimitControl")
+    enable_car_types            = BigParamControl("VW: Car Types on Cluster", "VwVisionCarTypes")
     enable_sl_pred_control      = BigParamControl("VW: Predicative Speed Limit (pACC)", "EnableSpeedLimitPredicative")
     enable_sl_pred_sl           = BigParamControl("VW: Predicative - Reaction to Speed Limits", "EnableSLPredReactToSL")
     enable_sl_pred_curve        = BigParamControl("VW: Predicative - Reaction to Curves", "EnableSLPredReactToCurves")
@@ -34,6 +35,7 @@ class ICTogglesLayoutMici(NavScroller):
       enable_curvature_correction,
       enable_long_comfort_mode,
       enable_sl_control,
+      enable_car_types,
       enable_sl_pred_control,
       enable_sl_pred_sl,
       enable_sl_pred_curve,
@@ -53,6 +55,7 @@ class ICTogglesLayoutMici(NavScroller):
       ("EnableCurvatureController", enable_curvature_correction),
       ("EnableLongComfortMode", enable_long_comfort_mode),
       ("EnableSpeedLimitControl", enable_sl_control),
+      ("VwVisionCarTypes", enable_car_types),
       ("EnableSpeedLimitPredicative", enable_sl_pred_control),
       ("EnableSLPredReactToSL", enable_sl_pred_sl),
       ("EnableSLPredReactToCurves", enable_sl_pred_curve),

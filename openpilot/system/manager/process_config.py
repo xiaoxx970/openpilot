@@ -62,6 +62,11 @@ def always_run(started: bool, params: Params, CP: car.CarParams) -> bool:
 def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started
 
+def vision_car_types_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # opt-in; the model is not part of the repo (see openpilot/selfdrive/yolo_lead/yolo_leadd.py)
+  return started and CP.brand == "volkswagen" and params.get_bool("VwVisionCarTypes") and \
+    os.path.exists("/data/yolo_lead/yolo26n.onnx")
+
 def curvatured_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   return only_onroad(started, params, CP) and params.get_bool("EnableCurvatureD")
 
@@ -151,6 +156,7 @@ procs = [
   PythonProcess("maneuversd", "openpilot.tools.longitudinal_maneuvers.maneuversd", long_maneuver),
   PythonProcess("lateral_maneuversd", "openpilot.tools.lateral_maneuvers.lateral_maneuversd", lat_maneuver),
   PythonProcess("radard", "openpilot.selfdrive.controls.radard", only_onroad),
+  PythonProcess("yolo_leadd", "openpilot.selfdrive.yolo_lead.yolo_leadd", vision_car_types_enabled, enabled=not PC),
   PythonProcess("hardwared", "openpilot.system.hardware.hardwared", always_run),
   PythonProcess("modem", "openpilot.common.hardware.comma.modem", always_run, enabled=COMMA_HARDWARE),
   PythonProcess("tombstoned", "openpilot.system.tombstoned", always_run, enabled=not PC),
