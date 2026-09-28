@@ -27,6 +27,10 @@ DESCRIPTIONS = {
   "EnableSpeedLimitControl": tr_noop(
     "Enables setting maximum speed by speed limit detection"
   ),
+  "VwVisionCarTypes": tr_noop(
+    "Shows trucks, two-wheelers and people as such on the cluster's lead and side lane cars. " +
+    "Needs the model file in /data/yolo_lead; uses an idle CPU core, never the GPU."
+  ),
   "EnableSpeedLimitPredicative": tr_noop(
     "Enables setting predicative speed limit"
   ),
@@ -80,6 +84,12 @@ class ICTogglesLayout(Widget):
         lambda: tr("VW: Speed Limit Control"),
         DESCRIPTIONS["EnableSpeedLimitControl"],
         "speed_limit.png",
+        False,
+      ),
+      "VwVisionCarTypes": (
+        lambda: tr("VW: Car Types on Cluster"),
+        DESCRIPTIONS["VwVisionCarTypes"],
+        "chffr_wheel.png",
         False,
       ),
       "EnableSpeedLimitPredicative": (
