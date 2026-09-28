@@ -11,8 +11,10 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, get_speed_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
+from openpilot.cereal import log
 from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
@@ -20,7 +22,23 @@ from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import Lon
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 J_CRUISE_VALS = [1.6, 1.2, 0.8, 0.6]
-A_CRUISE_MIN = -1.2
+# Cruise accel and decel both follow the table above, scaled by longitudinal personality
+A_CRUISE_MAX_SCALE = {
+  log.LongitudinalPersonality.relaxed: 0.75,
+  log.LongitudinalPersonality.standard: 1.0,
+  log.LongitudinalPersonality.aggressive: 1.0,
+}
+A_CRUISE_MIN_SCALE = {
+  log.LongitudinalPersonality.relaxed: 0.75,
+  log.LongitudinalPersonality.standard: 1.0,
+  log.LongitudinalPersonality.aggressive: 1.25,
+}
+# With a lead ahead, cruise may close the extra gap at most this much faster than the lead,
+# and only as fast as would close that gap over LEAD_CLOSE_TIME
+LEAD_CLOSE_MAX_SPEED = 5. * CV.KPH_TO_MS
+LEAD_CLOSE_TIME = 20.
+# When that cap is what limits cruise, only ease off toward it; real braking for the lead stays with the MPC
+LEAD_CLOSE_MIN_ACCEL = -0.3
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
@@ -31,6 +49,16 @@ _A_TOTAL_MAX_BP = [20., 40.]
 
 def get_max_accel(v_ego):
   return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
+
+
+def limit_cruise_to_lead(v_cruise, v_ego, lead, personality):
+  # Returns the cruise target and whether the lead cap is what set it
+  if not lead.present:
+    return v_cruise, False
+  desired_distance = get_safe_obstacle_distance(v_ego, get_T_FOLLOW(personality)) - get_stopped_equivalence_factor(lead.vLead)
+  close_speed = float(np.clip((lead.dRel - desired_distance) / LEAD_CLOSE_TIME, 0., LEAD_CLOSE_MAX_SPEED))
+  v_lead_cap = lead.vLead + close_speed
+  return (v_lead_cap, True) if v_lead_cap < v_cruise else (v_cruise, False)
 
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
@@ -43,8 +71,9 @@ def get_lead_distance(radarState):
   return 0
 
 
-def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle):
-  max_accel = ACCEL_MAX if e2e else get_max_accel(v_ego)
+def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle,
+                     personality=log.LongitudinalPersonality.standard, lead_capped=False):
+  max_accel = ACCEL_MAX if e2e else get_max_accel(v_ego) * A_CRUISE_MAX_SCALE.get(personality, 1.0)
 
   if not e2e:
     a_total_max = np.interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
@@ -56,7 +85,10 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
       coast_limit = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [max_accel, clipped_accel_coast])
       max_accel = min(max_accel, coast_limit)
 
-  target_accel = np.clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel)
+  min_accel = -get_max_accel(v_ego) * A_CRUISE_MIN_SCALE.get(personality, 1.0)
+  if lead_capped:
+    min_accel = max(min_accel, LEAD_CLOSE_MIN_ACCEL)
+  target_accel = np.clip(v_cruise - v_ego, min_accel, max_accel)
   j_cruise = np.interp(v_ego, A_CRUISE_MAX_BP, J_CRUISE_VALS)
   target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * dt, a_cruise_prev + j_cruise * dt))
 
@@ -149,9 +181,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     is_e2e = self.is_e2e(sm)
 
+    v_cruise, lead_capped = limit_cruise_to_lead(v_cruise, v_ego, sm['radarState'].leadOne, sm['selfdriveState'].personality)
     self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
-                                     accel_coast, self.allow_throttle)
+                                     accel_coast, self.allow_throttle, sm['selfdriveState'].personality, lead_capped)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
