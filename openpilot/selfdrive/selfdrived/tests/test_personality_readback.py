@@ -52,6 +52,15 @@ class TestPersonalityReadback:
     read_params_once(sd)
     assert sd.personality == 1
 
+  def test_unwritten_change_is_kept(self, mocker):
+    sd = self.make(mocker, on_disk=2)
+    now = mocker.patch.object(selfdrived.time, "monotonic", return_value=100.)
+    sd.personality_pending = (0, None)  # distance display still open
+    sd.personality = 0
+    now.return_value = 100. + selfdrived.PERSONALITY_WRITE_TIMEOUT + 1
+    read_params_once(sd)
+    assert sd.personality == 0
+
   def test_trust_param_after_timeout(self, mocker):
     sd = self.make(mocker, on_disk=2)
     now = mocker.patch.object(selfdrived.time, "monotonic", return_value=100.)

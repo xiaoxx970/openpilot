@@ -163,7 +163,8 @@ class SelfdriveD(CruiseHelper):
       self.params
     )
     self.distance_display = DistanceDisplay()
-    self.personality_pending: tuple[int, float] | None = None  # changed here, maybe not on disk yet
+    # changed here and maybe not on disk yet: (personality, time written or None while unwritten)
+    self.personality_pending: tuple[int, float | None] | None = None
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -555,10 +556,15 @@ class SelfdriveD(CruiseHelper):
         self.experimental_mode_switched = False
       personality = min(max(personality + self.distance_display.step, 0), 2)
       if personality != self.personality:
-        self.personality_pending = (personality, time.monotonic())
+        self.personality_pending = (personality, None)
         self.personality = personality
-        self.params.put('LongitudinalPersonality', self.personality)
         show_personality = True
+      # Write once when the distance display closes, not on every press: each write is fsync'd, and
+      # bursts of them while driving went with multi-second disk stalls (deviceState -> commIssue)
+      pending = self.personality_pending
+      if pending is not None and pending[1] is None and not self.distance_display.is_open:
+        self.personality_pending = (pending[0], time.monotonic())
+        self.params.put('LongitudinalPersonality', pending[0])
       if show_personality:
         self.events.add(EventName.personalityChanged)
 
@@ -705,11 +711,12 @@ class SelfdriveD(CruiseHelper):
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
-      # The write above is non-blocking and can take seconds on a busy disk; until it lands, reading
-      # the param back would undo the change (seen flipping back within 30 ms)
+      # The write above is delayed and non-blocking and can take seconds on a busy disk; until it lands,
+      # reading the param back would undo the change (seen flipping back within 30 ms)
       personality = self.params.get("LongitudinalPersonality", return_default=True)
       pending = self.personality_pending
-      if pending is None or personality == pending[0] or time.monotonic() - pending[1] > PERSONALITY_WRITE_TIMEOUT:
+      if pending is None or personality == pending[0] or \
+         (pending[1] is not None and time.monotonic() - pending[1] > PERSONALITY_WRITE_TIMEOUT):
         self.personality_pending = None
         self.personality = personality
 
