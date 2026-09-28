@@ -55,3 +55,22 @@ class TestParamWriter:
     assert wait_for(lambda: event.called)
     assert event.call_args.args[0] == "slow_param_write"
     assert event.call_args.kwargs["key"] == "UptimeOnroad"
+
+
+class TestStallWatchdog:
+  def test_logs_stack_of_stuck_loop(self, mocker):
+    mocker.patch.object(hardwared.StallWatchdog, "STALL", 0.2)
+    event = mocker.patch.object(hardwared.cloudlog, "event")
+    stuck = threading.Event()
+
+    def loop():
+      watchdog = hardwared.StallWatchdog()
+      stuck.wait(0.8)  # stands in for a call blocked on the disk
+      watchdog.kick()
+
+    t = threading.Thread(target=loop)
+    t.start()
+    t.join()
+    names = [c.args[0] for c in event.call_args_list]
+    assert names == ["hardwared_stall", "hardwared_stall_end"]
+    assert "stuck.wait" in event.call_args_list[0].kwargs["stack"]

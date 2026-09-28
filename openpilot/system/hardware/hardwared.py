@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections import OrderedDict, namedtuple
 
 import openpilot.cereal.messaging as messaging
@@ -113,6 +114,36 @@ class ParamWriter:
       duration = time.monotonic() - start
       if duration > self.SLOW_WRITE:
         cloudlog.event("slow_param_write", key=key, duration=round(duration, 2), pending=self.queue.qsize(), error=True)
+
+
+class StallWatchdog:
+  """Logs where the deviceState loop is stuck when it has not published for a while.
+
+  A stall of a few seconds makes selfdrived disengage with commIssue; the stack says which call held it.
+  """
+  STALL = 1.5  # s
+
+  def __init__(self):
+    self.ident = threading.get_ident()  # the thread that publishes deviceState
+    self.last = time.monotonic()
+    self.reported = False
+    threading.Thread(target=self._run, daemon=True).start()
+
+  def kick(self) -> None:
+    if self.reported:
+      cloudlog.event("hardwared_stall_end", duration=round(time.monotonic() - self.last, 2), error=True)
+    self.last = time.monotonic()
+    self.reported = False
+
+  def _run(self) -> None:
+    while True:
+      time.sleep(0.25)
+      stalled = time.monotonic() - self.last
+      if stalled > self.STALL and not self.reported:
+        self.reported = True
+        frame = sys._current_frames().get(self.ident)
+        stack = "".join(traceback.format_stack(frame)) if frame is not None else ""
+        cloudlog.event("hardwared_stall", stalled=round(stalled, 2), stack=stack, error=True)
 
 
 ThermalBand = namedtuple("ThermalBand", ['min_temp', 'max_temp'])
@@ -267,6 +298,7 @@ def hardware_thread(end_event, hw_queue) -> None:
 
   params = Params()
   param_writer = ParamWriter()
+  watchdog = StallWatchdog()
   power_monitor = PowerMonitoring()
 
   uptime_offroad: float = params.get("UptimeOffroad", return_default=True)
@@ -495,6 +527,7 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     msg.deviceState.thermalStatus = thermal_status
     pm.send("deviceState", msg)
+    watchdog.kick()
 
     statlog.gauge("free_space_percent", msg.deviceState.freeSpacePercent)
     statlog.gauge("gpu_usage_percent", msg.deviceState.gpuUsagePercent)
