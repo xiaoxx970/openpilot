@@ -438,7 +438,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     is_unsupported_combo = COMMA_HARDWARE and HARDWARE.get_device_type() == "tici" and build_metadata.channel_type != "tici"
     startup_conditions["not_tici"] = not is_unsupported_combo
     onroad_conditions["not_tici"] = not is_unsupported_combo
-    set_offroad_alert("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
+    set_offroad_alert_if_changed("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
 
     # if the temperature enters the danger zone, go offroad to cool down
     onroad_conditions["device_temp_good"] = thermal_status < ThermalStatus.critical
