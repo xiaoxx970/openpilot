@@ -28,6 +28,32 @@ class TestDeleter(UploaderTestCase):
     assert deleter.deleter_step() == (True, str(f_path.parent))
     assert not f_path.exists()
 
+  def test_delete_big_file_in_chunks(self, mocker):
+    mocker.patch.object(deleter, "DELETE_CHUNK_BYTES", 256 * 1024)
+    mocker.patch.object(deleter, "DELETE_CHUNK_PAUSE", 0)
+    truncate_sizes = []
+    real_open = open
+
+    class Recorder:
+      def __init__(self, f):
+        self.f = f
+      def __enter__(self):
+        return self
+      def __exit__(self, *args):
+        self.f.close()
+      def truncate(self, size):
+        truncate_sizes.append(size)
+        return self.f.truncate(size)
+      def fileno(self):
+        return self.f.fileno()
+
+    mocker.patch.object(deleter, "open", lambda fn, mode: Recorder(real_open(fn, mode)), create=True)
+    f_path = self.make_file_with_data(self.seg_dir, self.f_type, size_mb=1)
+    small = self.make_file_with_data(self.seg_dir, "qlog.zst", size_mb=.001)
+    assert deleter.deleter_step() == (True, str(f_path.parent))
+    assert not f_path.exists() and not small.exists()
+    assert truncate_sizes == [768 * 1024, 512 * 1024, 256 * 1024, 0]
+
   def assertDeleteOrder(self, f_paths: Sequence[Path]) -> None:
     deleted_order = []
     for _ in f_paths:
