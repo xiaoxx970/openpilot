@@ -17,7 +17,6 @@ State = custom.ModularAssistiveDrivingSystem.ModularAssistiveDrivingSystemState
 ButtonType = structs.CarState.ButtonEvent.Type
 EventName = log.OnroadEvent.EventName
 EventNameSP = custom.OnroadEventSP.EventName
-GearShifter = structs.CarState.GearShifter
 SafetyModel = structs.CarParams.SafetyModel
 
 SET_SPEED_BUTTONS = (ButtonType.accelCruise, ButtonType.resumeCruise, ButtonType.decelCruise, ButtonType.setCruise)
@@ -37,6 +36,9 @@ class ModularAssistiveDrivingSystem:
     self.available = False
     self.lateral_mismatch_counter = 0
     self.main_cruise_drop_while_braking = False
+    self.wrong_gear_prev = True
+    self.door_open_prev = True
+    self.seatbelt_unlatched_prev = True
     self.allow_always = False
     self.no_main_cruise = False
     self.selfdrive = selfdrive
@@ -136,18 +138,34 @@ class ModularAssistiveDrivingSystem:
       self.lateral_mismatch_counter += 1
 
   def update_events(self, CS: structs.CarState):
+    # Leaving drive at any speed, or opening a door or unlatching the seatbelt at a standstill, disengages MADS
+    # with one chime instead of a soft disable countdown. Only the frame it happens on does: MADS that was
+    # paused or enabled while already in that state (main switch at P after starting) keeps waiting silently.
+    wrong_gear = self.events.has(EventName.wrongGear)
+    left_drive = wrong_gear and not self.wrong_gear_prev
+    self.wrong_gear_prev = wrong_gear
+    door_open = self.events.has(EventName.doorOpen)
+    door_opened = door_open and not self.door_open_prev and CS.standstill
+    self.door_open_prev = door_open
+    seatbelt_unlatched = self.events.has(EventName.seatbeltNotLatched)
+    seatbelt_unlatched_now = seatbelt_unlatched and not self.seatbelt_unlatched_prev and CS.standstill
+    self.seatbelt_unlatched_prev = seatbelt_unlatched
+    disengage = left_drive or door_opened or seatbelt_unlatched_now
+
     if not self.selfdrive.enabled and self.enabled:
       if CS.standstill:
         if self.events.has(EventName.doorOpen):
           self.replace_event(EventName.doorOpen, EventNameSP.silentDoorOpen)
-          self.transition_paused_state()
+          if not disengage:
+            self.transition_paused_state()
         if self.events.has(EventName.seatbeltNotLatched):
           self.replace_event(EventName.seatbeltNotLatched, EventNameSP.silentSeatbeltNotLatched)
-          self.transition_paused_state()
-      if self.events.has(EventName.wrongGear) and (CS.vEgo < 2.5 or CS.gearShifter == GearShifter.reverse):
+          if not disengage:
+            self.transition_paused_state()
+      if self.events.has(EventName.wrongGear) and not left_drive:
         self.replace_event(EventName.wrongGear, EventNameSP.silentWrongGear)
         self.transition_paused_state()
-      if self.events.has(EventName.reverseGear):
+      if self.events.has(EventName.reverseGear) and not left_drive:
         self.replace_event(EventName.reverseGear, EventNameSP.silentReverseGear)
         self.transition_paused_state()
       if self.events.has(EventName.brakeHold):
@@ -160,6 +178,11 @@ class ModularAssistiveDrivingSystem:
       if self.steering_mode_on_brake == MadsSteeringModeOnBrake.PAUSE:
         if self.pedal_pressed_non_gas_pressed(CS):
           self.transition_paused_state()
+
+      if disengage:
+        self.events_sp.remove(EventNameSP.silentLkasDisable)
+        if door_opened or seatbelt_unlatched_now:
+          self.events_sp.add(EventNameSP.lkasDisable)
 
       self.events.remove(EventName.preEnableStandstill)
       self.events.remove(EventName.belowEngageSpeed)
