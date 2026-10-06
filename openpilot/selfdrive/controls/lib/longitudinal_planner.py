@@ -39,6 +39,13 @@ LEAD_CLOSE_MAX_SPEED = 5. * CV.KPH_TO_MS
 LEAD_CLOSE_TIME = 20.
 # When that cap is what limits cruise, only ease off toward it; real braking for the lead stays with the MPC
 LEAD_CLOSE_MIN_ACCEL = -0.3
+# Closing speed never drops below this, so in steady following cruise sits just above the MPC instead of fighting it
+LEAD_CLOSE_MIN_SPEED = 0.3
+# Low-pass on the capped target against radar noise, and how long a lead dropout keeps the filter state
+LEAD_CLOSE_FILTER_TAU = 2.
+LEAD_CLOSE_LOST_TIME = 1.
+# Track the capped target with a 4 s time constant instead of cruise's 1 s, so lead noise barely reaches the command
+LEAD_CLOSE_ACCEL_TIME = 4.
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
@@ -51,14 +58,37 @@ def get_max_accel(v_ego):
   return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
 
 
-def limit_cruise_to_lead(v_cruise, v_ego, lead, personality):
-  # Returns the cruise target and whether the lead cap is what set it
-  if not lead.present:
-    return v_cruise, False
-  desired_distance = get_safe_obstacle_distance(v_ego, get_T_FOLLOW(personality)) - get_stopped_equivalence_factor(lead.vLead)
-  close_speed = float(np.clip((lead.dRel - desired_distance) / LEAD_CLOSE_TIME, 0., LEAD_CLOSE_MAX_SPEED))
-  v_lead_cap = lead.vLead + close_speed
-  return (v_lead_cap, True) if v_lead_cap < v_cruise else (v_cruise, False)
+class LeadClosingLimit:
+  """Caps the cruise target while a lead is present.
+
+  Cruise may run at most LEAD_CLOSE_MAX_SPEED faster than the lead, scaled down as the gap beyond the
+  MPC's desired distance shrinks, but never below LEAD_CLOSE_MIN_SPEED. That floor keeps cruise just above
+  the MPC in steady following, so the MPC alone shapes the follow there. The target is low-passed so radar
+  noise on vLead does not reach the accel command.
+  """
+  def __init__(self, dt):
+    self.dt = dt
+    self.active = False
+    self.lead_lost_time = 0.
+    self.v_target = FirstOrderFilter(0., LEAD_CLOSE_FILTER_TAU, dt)
+
+  def update(self, v_cruise, v_ego, lead, personality):
+    # Returns the cruise target and whether the lead cap is what set it
+    if not lead.present:
+      self.lead_lost_time += self.dt
+      if self.lead_lost_time > LEAD_CLOSE_LOST_TIME:
+        self.active = False
+      return v_cruise, False
+    self.lead_lost_time = 0.
+
+    desired_distance = get_safe_obstacle_distance(v_ego, get_T_FOLLOW(personality)) - get_stopped_equivalence_factor(lead.vLead)
+    close_speed = float(np.clip((lead.dRel - desired_distance) / LEAD_CLOSE_TIME, LEAD_CLOSE_MIN_SPEED, LEAD_CLOSE_MAX_SPEED))
+    if not self.active:
+      self.active = True
+      self.v_target.x = lead.vLead + close_speed
+    v_lead_cap = self.v_target.update(lead.vLead + close_speed)
+    return (v_lead_cap, True) if v_lead_cap < v_cruise else (v_cruise, False)
+
 
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
@@ -87,8 +117,9 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
 
   min_accel = -get_max_accel(v_ego) * A_CRUISE_MIN_SCALE.get(personality, 1.0)
   if lead_capped:
-    min_accel = max(min_accel, LEAD_CLOSE_MIN_ACCEL)
-  target_accel = np.clip(v_cruise - v_ego, min_accel, max_accel)
+    target_accel = np.clip((v_cruise - v_ego) / LEAD_CLOSE_ACCEL_TIME, max(min_accel, LEAD_CLOSE_MIN_ACCEL), max_accel)
+  else:
+    target_accel = np.clip(v_cruise - v_ego, min_accel, max_accel)
   j_cruise = np.interp(v_ego, A_CRUISE_MAX_BP, J_CRUISE_VALS)
   target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * dt, a_cruise_prev + j_cruise * dt))
 
@@ -106,6 +137,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
+    self.lead_closing_limit = LeadClosingLimit(self.dt)
     self.output_a_target = init_a
     self.output_should_stop = False
     self.output_v_target = 0.0
@@ -181,7 +213,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     is_e2e = self.is_e2e(sm)
 
-    v_cruise, lead_capped = limit_cruise_to_lead(v_cruise, v_ego, sm['radarState'].leadOne, sm['selfdriveState'].personality)
+    v_cruise, lead_capped = self.lead_closing_limit.update(v_cruise, v_ego, sm['radarState'].leadOne, sm['selfdriveState'].personality)
     self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
                                      accel_coast, self.allow_throttle, sm['selfdriveState'].personality, lead_capped)

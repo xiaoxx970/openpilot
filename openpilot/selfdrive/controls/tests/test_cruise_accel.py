@@ -4,8 +4,10 @@ import numpy as np
 
 from openpilot.cereal import log
 from openpilot.common.constants import CV
-from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_accel, limit_cruise_to_lead, \
-                                                                  LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
+from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_accel, LeadClosingLimit, \
+                                                                  LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
+                                                                  LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL
 
 Personality = log.LongitudinalPersonality
 CP = SimpleNamespace(steerRatio=15., wheelbase=2.6)
@@ -21,6 +23,14 @@ def settled_cruise_accel(v_cruise, v_ego, personality, lead_capped=False):
 
 def lead(d_rel, v_lead, present=True):
   return SimpleNamespace(present=present, dRel=d_rel, vLead=v_lead)
+
+
+def desired_distance(v, personality):
+  return get_safe_obstacle_distance(v, get_T_FOLLOW(personality)) - get_stopped_equivalence_factor(v)
+
+
+def run(limit, v_cruise, v_ego, leads, personality=Personality.relaxed):
+  return [limit.update(v_cruise, v_ego, ld, personality) for ld in leads]
 
 
 class TestCruiseAccelLimits:
@@ -41,26 +51,48 @@ class TestCruiseAccelLimits:
     for personality in (Personality.relaxed, Personality.standard, Personality.aggressive):
       np.testing.assert_allclose(settled_cruise_accel(15., 25., personality, lead_capped=True), LEAD_CLOSE_MIN_ACCEL, atol=1e-3)
 
+  def test_lead_cap_tracks_softly(self):
+    # a small speed error toward the lead cap gives a proportionally small command, not cruise's 1 s gain
+    np.testing.assert_allclose(settled_cruise_accel(25.4, 25., Personality.standard, lead_capped=True), 0.4 / LEAD_CLOSE_ACCEL_TIME, atol=1e-3)
 
-class TestLimitCruiseToLead:
+
+class TestLeadClosingLimit:
   def test_no_lead_keeps_set_speed(self):
-    assert limit_cruise_to_lead(33., 24., lead(110., 24., present=False), Personality.relaxed) == (33., False)
+    assert LeadClosingLimit(DT).update(33., 24., lead(110., 24., present=False), Personality.relaxed) == (33., False)
 
   def test_far_lead_caps_closing_speed(self):
     # route 000001a2 segment 35: lead 110 m ahead at ~87 km/h, set speed well above
     v_lead = 87 * CV.KPH_TO_MS
-    v_target, capped = limit_cruise_to_lead(120 * CV.KPH_TO_MS, v_lead, lead(110., v_lead), Personality.relaxed)
+    v_target, capped = run(LeadClosingLimit(DT), 120 * CV.KPH_TO_MS, v_lead, [lead(110., v_lead)] * 200)[-1]
     assert capped
-    np.testing.assert_allclose(v_target, v_lead + LEAD_CLOSE_MAX_SPEED)
+    np.testing.assert_allclose(v_target, v_lead + LEAD_CLOSE_MAX_SPEED, atol=1e-3)
 
   def test_closing_speed_shrinks_with_gap(self):
-    v_lead = 24.
-    targets = [limit_cruise_to_lead(33., v_lead, lead(d, v_lead), Personality.relaxed)[0] for d in (110., 70., 55., 40.)]
-    assert targets[0] > targets[1] > targets[2] > targets[3] == v_lead
+    v = 25.
+    targets = [run(LeadClosingLimit(DT), 33., v, [lead(d, v)])[-1][0] for d in (75., 65., 58.)]
+    assert targets[0] > targets[1] > targets[2] > v + LEAD_CLOSE_MIN_SPEED
 
-  def test_ego_above_cap_targets_lead_speed(self):
-    # at or inside the desired distance there is no closing speed left
-    assert limit_cruise_to_lead(33., 26., lead(30., 24.), Personality.standard) == (24., True)
+  def test_steady_following_left_to_mpc(self):
+    # at or inside the desired distance cruise still allows a little closing speed, so the MPC is what binds
+    v = 25.
+    for d in (desired_distance(v, Personality.relaxed), 20.):
+      np.testing.assert_allclose(run(LeadClosingLimit(DT), 33., v, [lead(d, v)])[-1][0], v + LEAD_CLOSE_MIN_SPEED)
+
+  def test_lead_speed_noise_filtered(self):
+    v = 25.
+    leads = [lead(120., v + (0.5 if k % 2 else -0.5)) for k in range(400)]
+    targets = np.array([t for t, _ in run(LeadClosingLimit(DT), 33., v, leads)])
+    assert np.std(targets[200:]) < 0.05
+
+  def test_brief_lead_dropout_keeps_cap(self):
+    v = 25.
+    limit = LeadClosingLimit(DT)
+    run(limit, 33., v, [lead(120., v)] * 100)
+    dropout = int(LEAD_CLOSE_LOST_TIME / DT) - 2
+    assert all(t == 33. for t, _ in run(limit, 33., v, [lead(0., 0., present=False)] * dropout))
+    assert limit.active
+    run(limit, 33., v, [lead(0., 0., present=False)] * 5)
+    assert not limit.active
 
   def test_lower_set_speed_still_wins(self):
-    assert limit_cruise_to_lead(20., 25., lead(110., 24.), Personality.relaxed) == (20., False)
+    assert run(LeadClosingLimit(DT), 20., 25., [lead(110., 24.)])[-1] == (20., False)
