@@ -642,8 +642,9 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.NO_ENTRY: NoEntryAlert("System Overheated"),
   },
 
+  # leaving drive disengages like other cars' cruise and assist do: one disengage chime, no countdown
   EventName.wrongGear: {
-    ET.SOFT_DISABLE: user_soft_disable_alert("Gear not D"),
+    ET.USER_DISABLE: EngagementAlert(AudibleAlert.disengage),
     ET.NO_ENTRY: NoEntryAlert("Gear not D"),
   },
 
@@ -806,7 +807,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       "",
       AlertStatus.normal, AlertSize.full,
       Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2, creation_delay=0.5),
-    ET.USER_DISABLE: ImmediateDisableAlert("Reverse Gear"),
+    ET.USER_DISABLE: EngagementAlert(AudibleAlert.disengage),
     ET.NO_ENTRY: NoEntryAlert("Reverse Gear"),
   },
 
@@ -923,7 +924,7 @@ if HARDWARE.get_device_type() == 'mici':
         "",
         AlertStatus.normal, AlertSize.full,
         Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2, creation_delay=0.5),
-      ET.USER_DISABLE: ImmediateDisableAlert("Reverse"),
+      ET.USER_DISABLE: EngagementAlert(AudibleAlert.disengage),
       ET.NO_ENTRY: NoEntryAlert("Reverse"),
     },
   })
