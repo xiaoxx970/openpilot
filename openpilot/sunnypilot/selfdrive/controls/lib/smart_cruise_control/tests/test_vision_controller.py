@@ -16,7 +16,8 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control import MIN_V
-from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.vision_controller import SmartCruiseControlVision, _ENTERING_PRED_LAT_ACC_TH
+from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.vision_controller import SmartCruiseControlVision, _ENTERING_PRED_LAT_ACC_TH, \
+  CURVE_NONE, CURVE_LEFT, CURVE_RIGHT, CURVE_S_BEND
 from openpilot.common.test import OpenpilotTestCase
 
 VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.VisionState
@@ -205,5 +206,16 @@ class TestSmartCruiseControlVision(OpenpilotTestCase):
       assert float(np.max(pred_lat_accels)) >= th
       assert self.scc_v.max_pred_lat_acc < th
       assert self.scc_v.state == VisionState.enabled
+
+  # signed predicted lateral accel along the plan, positive = right turn (device frame, z down)
+  @parameterized.expand([
+    ("right_curve", [0.0, 0.5, 2.0, 2.5, 1.0], CURVE_RIGHT),
+    ("left_curve", [0.0, -0.5, -2.0, -2.5, -1.0], CURVE_LEFT),
+    ("s_bend", [-2.0, -0.5, 0.0, 0.8, 1.6], CURVE_S_BEND),
+    ("weak_counter_turn_is_ignored", [-2.5, -1.0, 0.0, 0.5], CURVE_LEFT),
+    ("straight", [0.2, -0.3, 0.1], CURVE_NONE),
+  ])
+  def test_curve_direction(self, _name, signed_lat_accels, expected):
+    assert SmartCruiseControlVision.get_curve_direction(np.array(signed_lat_accels)) == expected
 
   # TODO-SP: mock modelV2 data to test other states

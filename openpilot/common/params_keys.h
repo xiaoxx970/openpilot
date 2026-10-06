@@ -150,6 +150,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 	{"EnableLongComfortMode", {PERSISTENT, BOOL}},
     {"EnableSmoothSteer", {PERSISTENT, BOOL}},
     {"EnableSpeedLimitControl", {PERSISTENT, BOOL}},
+    {"VwVisionCarTypes", {PERSISTENT, BOOL, "0"}},
     {"EnableSpeedLimitPredicative", {PERSISTENT, BOOL}},
 	{"EnableSLPredReactToSL", {PERSISTENT, BOOL}},
 	{"EnableSLPredReactToCurves", {PERSISTENT, BOOL}},

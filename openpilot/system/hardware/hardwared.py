@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections import OrderedDict, namedtuple
 
 import openpilot.cereal.messaging as messaging
@@ -80,6 +81,69 @@ class Chestnut:
     cloudlog.warning(f"chestnut firmware out of date, flashing (attempt {self.attempts})")
     self.thread = threading.Thread(target=self.flash, daemon=True)
     self.thread.start()
+
+
+class ParamWriter:
+  """Persists params on its own thread, in order, so a stalled disk cannot hold up deviceState.
+
+  /data is mounted with online discard, and freeing a large file can block all disk I/O for
+  seconds. A blocking put here then stops deviceState, and selfdrived disengages with commIssue.
+  Slow writes are logged, so a stalling disk is still visible.
+  """
+  SLOW_WRITE = 1.0  # s
+
+  def __init__(self):
+    self.queue: queue.Queue = queue.Queue()
+    threading.Thread(target=self._run, daemon=True).start()
+
+  def put(self, key: str, val) -> None:
+    self.queue.put((key, val))
+
+  def _run(self) -> None:
+    params = Params()
+    while True:
+      key, val = self.queue.get()
+      start = time.monotonic()
+      try:
+        if isinstance(val, bool):
+          params.put_bool(key, val, block=True)
+        else:
+          params.put(key, val, block=True)
+      except Exception:
+        cloudlog.exception(f"failed to write param {key}")
+      duration = time.monotonic() - start
+      if duration > self.SLOW_WRITE:
+        cloudlog.event("slow_param_write", key=key, duration=round(duration, 2), pending=self.queue.qsize(), error=True)
+
+
+class StallWatchdog:
+  """Logs where the deviceState loop is stuck when it has not published for a while.
+
+  A stall of a few seconds makes selfdrived disengage with commIssue; the stack says which call held it.
+  """
+  STALL = 1.5  # s
+
+  def __init__(self):
+    self.ident = threading.get_ident()  # the thread that publishes deviceState
+    self.last = time.monotonic()
+    self.reported = False
+    threading.Thread(target=self._run, daemon=True).start()
+
+  def kick(self) -> None:
+    if self.reported:
+      cloudlog.event("hardwared_stall_end", duration=round(time.monotonic() - self.last, 2), error=True)
+    self.last = time.monotonic()
+    self.reported = False
+
+  def _run(self) -> None:
+    while True:
+      time.sleep(0.25)
+      stalled = time.monotonic() - self.last
+      if stalled > self.STALL and not self.reported:
+        self.reported = True
+        frame = sys._current_frames().get(self.ident)
+        stack = "".join(traceback.format_stack(frame)) if frame is not None else ""
+        cloudlog.event("hardwared_stall", stalled=round(stalled, 2), stack=stack, error=True)
 
 
 ThermalBand = namedtuple("ThermalBand", ['min_temp', 'max_temp'])
@@ -233,6 +297,8 @@ def hardware_thread(end_event, hw_queue) -> None:
   offroad_cycle_count = 0
 
   params = Params()
+  param_writer = ParamWriter()
+  watchdog = StallWatchdog()
   power_monitor = PowerMonitoring()
 
   uptime_offroad: float = params.get("UptimeOffroad", return_default=True)
@@ -372,7 +438,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     is_unsupported_combo = COMMA_HARDWARE and HARDWARE.get_device_type() == "tici" and build_metadata.channel_type != "tici"
     startup_conditions["not_tici"] = not is_unsupported_combo
     onroad_conditions["not_tici"] = not is_unsupported_combo
-    set_offroad_alert("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
+    set_offroad_alert_if_changed("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
 
     # if the temperature enters the danger zone, go offroad to cool down
     onroad_conditions["device_temp_good"] = thermal_status < ThermalStatus.critical
@@ -389,13 +455,13 @@ def hardware_thread(end_event, hw_queue) -> None:
       should_start = should_start and all(startup_conditions.values())
 
     if should_start != should_start_prev or (count == 0):
-      params.put_bool("IsEngaged", False, block=True)
+      param_writer.put("IsEngaged", False)
       engaged_prev = False
 
     if sm.updated['selfdriveState']:
       engaged = sm['selfdriveState'].enabled
       if engaged != engaged_prev:
-        params.put_bool("IsEngaged", engaged, block=True)
+        param_writer.put("IsEngaged", engaged)
         engaged_prev = engaged
 
       try:
@@ -461,6 +527,7 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     msg.deviceState.thermalStatus = thermal_status
     pm.send("deviceState", msg)
+    watchdog.kick()
 
     statlog.gauge("free_space_percent", msg.deviceState.freeSpacePercent)
     statlog.gauge("gpu_usage_percent", msg.deviceState.gpuUsagePercent)
@@ -495,7 +562,7 @@ def hardware_thread(end_event, hw_queue) -> None:
       # save last one before going onroad
       if rising_edge_started:
         try:
-          params.put("LastOffroadStatusPacket", dat, block=True)
+          param_writer.put("LastOffroadStatusPacket", dat)
         except Exception:
           cloudlog.exception("failed to save offroad status")
 
@@ -509,8 +576,8 @@ def hardware_thread(end_event, hw_queue) -> None:
     last_uptime_ts = now_ts
 
     if (count % int(60. / DT_HW)) == 0:
-      params.put("UptimeOffroad", uptime_offroad, block=True)
-      params.put("UptimeOnroad", uptime_onroad, block=True)
+      param_writer.put("UptimeOffroad", uptime_offroad)
+      param_writer.put("UptimeOnroad", uptime_onroad)
 
     count += 1
     should_start_prev = should_start

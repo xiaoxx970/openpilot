@@ -17,6 +17,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
+from openpilot.selfdrive.car.distance_display import DistanceDisplay
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
@@ -54,6 +55,9 @@ MonitoringPolicy = log.DriverMonitoringState.MonitoringPolicy
 TurnDirection = custom.ModelDataV2SP.TurnDirection
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
+
+
+PERSONALITY_WRITE_TIMEOUT = 10.  # s, then trust the param again
 
 
 class SelfdriveD(CruiseHelper):
@@ -158,6 +162,9 @@ class SelfdriveD(CruiseHelper):
       max(log.LongitudinalPersonality.schema.enumerants.values()),
       self.params
     )
+    self.distance_display = DistanceDisplay()
+    # changed here and maybe not on disk yet: (personality, time written or None while unwritten)
+    self.personality_pending: tuple[int, float | None] | None = None
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -534,14 +541,32 @@ class SelfdriveD(CruiseHelper):
 
     CruiseHelper.update(self, CS, self.events_sp, self.experimental_mode)
 
-    # decrement personality on distance button press
+    # distance button like stock VW: the first press only shows the distance, presses while it is
+    # shown step it up (wrapping to the shortest) and +/- step it up and down
     if self.CP.openpilotLongitudinalControl:
+      self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
+      personality = self.personality
+      show_personality = self.distance_display.step != 0
       if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
         if not self.experimental_mode_switched:
-          self.personality = (self.personality - 1) % 3
-          self.params.put('LongitudinalPersonality', self.personality)
-          self.events.add(EventName.personalityChanged)
+          # the first press shows the current personality on screen too, like the cluster
+          show_personality = CS.cruiseState.available
+          if self.distance_display.cycle:
+            personality = (personality + 1) % 3
         self.experimental_mode_switched = False
+      personality = min(max(personality + self.distance_display.step, 0), 2)
+      if personality != self.personality:
+        self.personality_pending = (personality, None)
+        self.personality = personality
+        show_personality = True
+      # Write once when the distance display closes, not on every press: each write is fsync'd, and
+      # bursts of them while driving went with multi-second disk stalls (deviceState -> commIssue)
+      pending = self.personality_pending
+      if pending is not None and pending[1] is None and not self.distance_display.is_open:
+        self.personality_pending = (pending[0], time.monotonic())
+        self.params.put('LongitudinalPersonality', pending[0])
+      if show_personality:
+        self.events.add(EventName.personalityChanged)
 
     self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
 
@@ -686,7 +711,14 @@ class SelfdriveD(CruiseHelper):
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
-      self.personality = self.params.get("LongitudinalPersonality", return_default=True)
+      # The write above is delayed and non-blocking and can take seconds on a busy disk; until it lands,
+      # reading the param back would undo the change (seen flipping back within 30 ms)
+      personality = self.params.get("LongitudinalPersonality", return_default=True)
+      pending = self.personality_pending
+      if pending is None or personality == pending[0] or \
+         (pending[1] is not None and time.monotonic() - pending[1] > PERSONALITY_WRITE_TIMEOUT):
+        self.personality_pending = None
+        self.personality = personality
 
       self.mads.read_params()
       time.sleep(0.1)
