@@ -6,6 +6,7 @@ from openpilot.cereal import log
 from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
 from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_accel, LeadClosingLimit, \
+                                                                  AccelDirectionHold, is_calm, ACCEL_HOLD_TIME, ACCEL_HOLD_OVERRIDE, ACCEL_HOLD_OVERRIDE_JERK, \
                                                                   LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
                                                                   LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL
 
@@ -22,7 +23,7 @@ def settled_cruise_accel(v_cruise, v_ego, personality, lead_capped=False):
 
 
 def lead(d_rel, v_lead, present=True):
-  return SimpleNamespace(present=present, dRel=d_rel, vLead=v_lead)
+  return SimpleNamespace(present=present, dRel=d_rel, vLead=v_lead, aLeadK=0.)
 
 
 def desired_distance(v, personality):
@@ -96,3 +97,63 @@ class TestLeadClosingLimit:
 
   def test_lower_set_speed_still_wins(self):
     assert run(LeadClosingLimit(DT), 20., 25., [lead(110., 24.)])[-1] == (20., False)
+
+
+def hold_run(hold, accels, calm=True):
+  return [hold.update(a, calm) for a in accels]
+
+
+class TestAccelDirectionHold:
+  def test_small_flips_are_held(self):
+    # the downhill set-speed case: the request wobbles +-0.05 around zero every second
+    accels = [0.05 * np.sin(2 * np.pi * k * DT / 1.5) for k in range(int(4 / DT))]
+    out = np.array(hold_run(AccelDirectionHold(DT), accels))
+    turns = np.sum(np.diff(np.sign(np.diff(out[np.abs(np.diff(out, prepend=out[0])) > 1e-6]))) != 0)
+    assert turns <= 1
+
+  def test_reverses_after_hold_time(self):
+    hold = AccelDirectionHold(DT)
+    # up, then a turn down (the first turn after a reset is free) ...
+    hold_run(hold, [0., 0.1, 0.05])
+    # ... so turning back up is held for ACCEL_HOLD_TIME
+    out = hold_run(hold, [0.1] * int((ACCEL_HOLD_TIME + 1) / DT))
+    assert out[int((ACCEL_HOLD_TIME - 1) / DT)] == 0.05
+    np.testing.assert_allclose(out[-1], 0.1)
+
+  def test_large_change_passes_at_once_rate_limited(self):
+    hold = AccelDirectionHold(DT)
+    hold_run(hold, [0., 0.1])
+    out = hold_run(hold, [0.1 - ACCEL_HOLD_OVERRIDE - 0.1] * int(2 / DT))
+    assert out[1] < out[0] < 0.1
+    assert np.max(np.abs(np.diff(out))) <= ACCEL_HOLD_OVERRIDE_JERK * DT + 1e-9
+    np.testing.assert_allclose(out[-1], 0.1 - ACCEL_HOLD_OVERRIDE - 0.1)
+
+  def test_not_calm_passes_through(self):
+    hold = AccelDirectionHold(DT)
+    hold_run(hold, [0., 0.1])
+    assert hold.update(-1.0, calm=False) == -1.0
+
+
+class TestIsCalm:
+  def test_cruising_without_lead(self):
+    assert is_calm(25., 0., lead(0., 0., present=False), Personality.standard, False, False)
+
+  def test_not_calm(self):
+    v = 25.
+    d = desired_distance(v, Personality.standard)
+    cases = [
+      (3., lead(0., 0., present=False), False, False),                          # slow
+      (v, lead(0., 0., present=False), True, False),                            # stopping
+      (v, lead(0., 0., present=False), False, True),                            # fcw
+      (v, lead(0.7 * d, v), False, False),                                      # too close
+      (v, SimpleNamespace(present=True, dRel=d, vLead=v, aLeadK=-1.), False, False),  # lead braking
+      (v, lead(30., v - 6.), False, False),                                     # 5 s to collision
+    ]
+    for v_ego, ld, stop, fcw in cases:
+      assert not is_calm(v_ego, 0., ld, Personality.standard, stop, fcw)
+    # a real braking request, e.g. the model stopping for a red light with no lead
+    assert not is_calm(v, -0.8, lead(0., 0., present=False), Personality.standard, False, False)
+
+  def test_steady_follow_is_calm(self):
+    v = 25.
+    assert is_calm(v, 0., lead(desired_distance(v, Personality.standard), v), Personality.standard, False, False)

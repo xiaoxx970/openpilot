@@ -46,6 +46,21 @@ LEAD_CLOSE_FILTER_TAU = 2.
 LEAD_CLOSE_LOST_TIME = 1.
 # Track the capped target with a 4 s time constant instead of cruise's 1 s, so lead noise barely reaches the command
 LEAD_CLOSE_ACCEL_TIME = 4.
+# In calm driving the accel command may reverse its trend at most once per ACCEL_HOLD_TIME; a request that
+# moves further than ACCEL_HOLD_OVERRIDE from the held value always gets through
+ACCEL_HOLD_TIME = 5.
+ACCEL_HOLD_OVERRIDE = 0.3
+# While calm the released command slews at most this fast, so letting go of a hold is not a step either;
+# a change beyond ACCEL_HOLD_OVERRIDE is a real demand and slews at the faster rate
+ACCEL_HOLD_JERK = 0.5
+ACCEL_HOLD_OVERRIDE_JERK = 2.
+# Calm means: not slow, not inside this share of the desired following distance, lead not braking, time to collision long
+ACCEL_HOLD_MIN_SPEED = 5.
+ACCEL_HOLD_MIN_DISTANCE_RATIO = 0.8
+ACCEL_HOLD_LEAD_BRAKE = -0.5
+ACCEL_HOLD_MIN_TTC = 6.
+# Any planner request braking harder than this is never calm, e.g. stopping for a light or a cut-in
+ACCEL_HOLD_MAX_BRAKE = -0.5
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
@@ -88,6 +103,60 @@ class LeadClosingLimit:
       self.v_target.x = lead.vLead + close_speed
     v_lead_cap = self.v_target.update(lead.vLead + close_speed)
     return (v_lead_cap, True) if v_lead_cap < v_cruise else (v_cruise, False)
+
+
+class AccelDirectionHold:
+  """Stops small back-and-forth changes in the accel command.
+
+  Holding a speed downhill, the cruise loop flipped the command around zero every 1-2 s and the
+  powertrain amplified each flip into a felt throttle/drag change. While calm, once the command has
+  turned, it may not turn back for ACCEL_HOLD_TIME unless the request moves ACCEL_HOLD_OVERRIDE away.
+  """
+  def __init__(self, dt):
+    self.dt = dt
+    self.reset()
+
+  def reset(self):
+    self.held = None
+    self.output = None
+    self.direction = 0
+    self.since_reversal = ACCEL_HOLD_TIME
+
+  def update(self, accel, calm):
+    self.since_reversal += self.dt
+    if self.held is None:
+      self.held = self.output = accel
+      return accel
+
+    delta = accel - self.held
+    if self.direction == 0 or delta * self.direction >= 0:
+      if delta != 0. and self.direction == 0:
+        self.direction = 1 if delta > 0 else -1
+      self.held = accel
+    elif not calm or abs(delta) > ACCEL_HOLD_OVERRIDE or self.since_reversal >= ACCEL_HOLD_TIME:
+      # outside calm the request always passes, but the turn still counts so calm cannot allow another right after
+      self.direction = -self.direction
+      self.since_reversal = 0.
+      self.held = accel
+
+    if calm:
+      step = (ACCEL_HOLD_OVERRIDE_JERK if abs(self.held - self.output) > ACCEL_HOLD_OVERRIDE else ACCEL_HOLD_JERK) * self.dt
+      self.output = float(np.clip(self.held, self.output - step, self.output + step))
+    else:
+      self.output = self.held
+    return self.output
+
+
+def is_calm(v_ego, accel_request, lead, personality, should_stop, fcw):
+  if v_ego < ACCEL_HOLD_MIN_SPEED or accel_request < ACCEL_HOLD_MAX_BRAKE or should_stop or fcw:
+    return False
+  if not lead.present:
+    return True
+  desired_distance = get_safe_obstacle_distance(v_ego, get_T_FOLLOW(personality)) - get_stopped_equivalence_factor(lead.vLead)
+  closing_speed = v_ego - lead.vLead
+  if lead.dRel < ACCEL_HOLD_MIN_DISTANCE_RATIO * desired_distance or lead.aLeadK < ACCEL_HOLD_LEAD_BRAKE:
+    return False
+  return closing_speed <= 0. or lead.dRel / closing_speed > ACCEL_HOLD_MIN_TTC
 
 
 def get_coast_accel(pitch):
@@ -138,6 +207,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
     self.lead_closing_limit = LeadClosingLimit(self.dt)
+    self.accel_hold = AccelDirectionHold(self.dt)
     self.output_a_target = init_a
     self.output_should_stop = False
     self.output_v_target = 0.0
@@ -227,6 +297,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
+    if reset_state:
+      self.accel_hold.reset()
+    calm = is_calm(v_ego, float(self.output_a_target), sm['radarState'].leadOne, sm['selfdriveState'].personality, self.output_should_stop, self.fcw)
+    self.output_a_target = self.accel_hold.update(float(self.output_a_target), calm)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
     self.output_v_target = get_speed_from_plan(self.v_desired_trajectory, CONTROL_N_T_IDX, action_t=action_t)
