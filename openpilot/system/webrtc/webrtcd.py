@@ -3,7 +3,6 @@
 from abc import abstractmethod
 from collections.abc import Callable
 import os
-import socket
 import time
 import capnp
 import argparse
@@ -30,18 +29,6 @@ SESSION_TIMEOUT_SECONDS = 300
 # ice candidate parser for logging
 def _ice_candidates(sdp: str) -> list[str]:
   return [line.removeprefix("a=") for line in sdp.splitlines() if line.startswith("a=candidate:")]
-
-# socket trick: route lookup for 8.8.8.8 (nothing is sent or actually connected to)
-# return the source interfaces IP which is the default interface of the device
-def _default_route_ip() -> str | None:
-  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-  try:
-    s.connect(("8.8.8.8", 53))  # selects a route, sends nothing
-    return s.getsockname()[0]
-  except OSError:
-    return None
-  finally:
-    s.close()
 
 class AsyncTaskRunner:
   def __init__(self):
@@ -233,7 +220,10 @@ class StreamSession:
 
     self.identifier = str(uuid.uuid4())
     self.params = Params()
-    builder = WebRTCAnswerBuilder(body.sdp, bind_address=_default_route_ip())
+    # No bind address: gather host candidates on every interface, not just the default route, so a
+    # viewer on the tailnet can reach the device directly over tailscale0 when cellular NAT and
+    # TURN are unreachable. The only other interface up on the device is tailscale0.
+    builder = WebRTCAnswerBuilder(body.sdp)
 
     self.enabled = body.enabled
     self.video_tracks = []
