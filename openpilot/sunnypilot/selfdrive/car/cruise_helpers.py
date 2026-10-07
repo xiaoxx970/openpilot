@@ -15,6 +15,10 @@ EventNameSP = custom.OnroadEventSP.EventName
 
 DISTANCE_LONG_PRESS = 50
 
+# DEC state set by the last long press. Params writes are asynchronous, so the alert built in the same
+# frame reads this instead of reading the param back.
+last_dec_switch = False
+
 
 class CruiseHelper:
   def __init__(self, CP: structs.CarParams):
@@ -22,7 +26,8 @@ class CruiseHelper:
     self.params = Params()
 
     self.button_frame_counts = {ButtonType.gapAdjustCruise: 0}
-    self._experimental_mode = False
+    self._dynamic_experimental_control = False
+    # set once the long press has acted, so its release does not also step the following distance
     self.experimental_mode_switched = False
 
   def update(self, CS, events, experimental_mode) -> None:
@@ -30,8 +35,8 @@ class CruiseHelper:
       if CS.cruiseState.available:
         self.update_button_frame_counts(CS)
 
-        # toggle experimental mode once on distance button hold
-        self.update_experimental_mode(events, experimental_mode)
+        # toggle Dynamic Experimental Control once on distance button hold
+        self.update_dynamic_experimental_control(events)
 
   def update_button_frame_counts(self, CS) -> None:
     for button in self.button_frame_counts:
@@ -43,9 +48,12 @@ class CruiseHelper:
       if button in self.button_frame_counts:
         self.button_frame_counts[button] = int(button_event.pressed)
 
-  def update_experimental_mode(self, events, experimental_mode) -> None:
+  def update_dynamic_experimental_control(self, events) -> None:
+    # DEC and the planner read the param back within a second, so the switch applies while driving
+    global last_dec_switch
     if self.button_frame_counts[ButtonType.gapAdjustCruise] >= DISTANCE_LONG_PRESS and not self.experimental_mode_switched:
-      self._experimental_mode = not experimental_mode
-      self.params.put_bool("ExperimentalMode", self._experimental_mode)
+      self._dynamic_experimental_control = not self.params.get_bool("DynamicExperimentalControl")
+      self.params.put_bool("DynamicExperimentalControl", self._dynamic_experimental_control)
+      last_dec_switch = self._dynamic_experimental_control
       events.add(EventNameSP.experimentalModeSwitched)
       self.experimental_mode_switched = True

@@ -8,6 +8,8 @@ import openpilot.cereal.messaging as messaging
 from openpilot.cereal import log, custom
 from opendbc.car.structs import car
 from openpilot.common.constants import CV
+from openpilot.common.params import Params
+from openpilot.sunnypilot.selfdrive.car import cruise_helpers
 from openpilot.sunnypilot.selfdrive.selfdrived.events_base import EventsBase, Priority, ET, Alert, \
   NoEntryAlert, ImmediateDisableAlert, EngagementAlert, NormalPermanentAlert, AlertCallbackType, wrong_car_mode_alert
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import PCM_LONG_REQUIRED_MAX_SET_SPEED, CONFIRM_SPEED_THRESHOLD
@@ -26,6 +28,13 @@ EventNameSP = custom.OnroadEventSP.EventName
 EVENT_NAME_SP = {v: k for k, v in EventNameSP.schema.enumerants.items()}
 
 IS_MICI = HARDWARE.get_device_type() == 'mici'
+
+
+def dynamic_experimental_control_switched_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool,
+                                                soft_disable_time: int, personality) -> Alert:
+  state = "On" if cruise_helpers.last_dec_switch else "Off"
+  note = "" if Params().get_bool("ExperimentalMode") else "No effect: Experimental Mode is off"
+  return NormalPermanentAlert(f"DEC {state}", note, duration=1.5)
 
 
 def speed_limit_adjust_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
@@ -185,8 +194,9 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.NO_ENTRY: NoEntryAlert("Controls Mismatch: Lateral"),
   },
 
+  # raised by a long press of the distance button, which toggles Dynamic Experimental Control
   EventNameSP.experimentalModeSwitched: {
-    ET.WARNING: NormalPermanentAlert("Experimental Mode Switched", duration=1.5)
+    ET.WARNING: dynamic_experimental_control_switched_alert,
   },
 
   EventNameSP.wrongCarModeAlertOnly: {
