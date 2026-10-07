@@ -17,6 +17,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
+from openpilot.selfdrive.car.distance_display import DistanceDisplay
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
@@ -160,6 +161,7 @@ class SelfdriveD:
     self.personality_generation = 0
     self.distance_button_pressed_frame: int | None = None
     self.distance_button_long_press = False
+    self.distance_display = DistanceDisplay()
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -260,8 +262,10 @@ class SelfdriveD:
     if self.CP.passive:
       return
 
-    # Block resume if cruise never previously enabled
-    resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
+    # Block resume if cruise never previously enabled. Resume itself is exempt: with no set
+    # speed, initialize_v_cruise already falls back to the current speed, which is what stock
+    # cruise does, and on VW resume is one of the two buttons that can engage at all.
+    resume_pressed = any(be.type == ButtonType.accelCruise for be in CS.buttonEvents)
     if not self.CP.pcmCruise and CS.vCruise > 250 and resume_pressed:
       self.events.add(EventName.resumeBlocked)
 
@@ -535,7 +539,31 @@ class SelfdriveD:
     if CS.gearShifter == car.CarState.GearShifter.park and self.mads.enabled:
       self.events.remove(EventName.canBusMissing)
 
-    self._update_distance_button(CS)
+    # a long press (1 s) toggles Blendful; its release is no distance press
+    distance_long_release = self._update_distance_button(CS)
+
+    # distance button like stock VW: the first press only shows the distance, presses while it is
+    # shown step it up (wrapping to the shortest) and +/- step it up and down
+    if self.CP.openpilotLongitudinalControl:
+      self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
+      personality = self.personality
+      show_personality = self.distance_display.step != 0
+      if not distance_long_release and any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
+        # the first press shows the current personality on screen too, like the cluster
+        show_personality = CS.cruiseState.available
+        if self.distance_display.cycle:
+          personality = (personality + 1) % 3
+      personality = min(max(personality + self.distance_display.step, 0), 2)
+      if personality != self.personality:
+        self._set_personality(personality)
+        show_personality = True
+      # Write once when the distance display closes, not on every press: each write is fsync'd, and
+      # bursts of them while driving went with multi-second disk stalls (deviceState -> commIssue).
+      # Until then the pending write keeps params_thread from reading the old value back.
+      if self.personality_write_pending is not None and not self.distance_display.is_open:
+        self.personality_write_event.set()
+      if show_personality:
+        self.events.add(EventName.personalityChanged)
 
     self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
 
@@ -673,11 +701,13 @@ class SelfdriveD:
 
     self.CS_prev = CS
 
-  def _update_distance_button(self, CS):
+  def _update_distance_button(self, CS) -> bool:
+    """Toggles Blendful once a distance press is held for 1 s. Returns True on the release that ends such a
+    long press, so the distance logic in update_events does not take it as a press of its own."""
     if not CS.canValid:
       self.distance_button_pressed_frame = None
       self.distance_button_long_press = False
-      return
+      return False
 
     released = False
     for button in CS.buttonEvents:
@@ -689,7 +719,7 @@ class SelfdriveD:
           released = True
 
     if self.distance_button_pressed_frame is None:
-      return
+      return False
     if not self.distance_button_long_press and (self.sm.frame - self.distance_button_pressed_frame) * DT_CTRL >= 1.0:
       self.distance_button_long_press = True
       if self.params.get("ModelRunnerTypeCache") == custom.ModelManagerSP.Runner.tinygrad:
@@ -698,11 +728,11 @@ class SelfdriveD:
         event = custom.OnroadEventSP.EventName.blendfulEnabled if enabled else custom.OnroadEventSP.EventName.blendfulDisabled
         self.events_sp.add(event)
     if released:
-      if not self.distance_button_long_press and self.CP.openpilotLongitudinalControl:
-        self._change_personality()
-        self.events.add(EventName.personalityChanged)
+      long_press = self.distance_button_long_press
       self.distance_button_pressed_frame = None
       self.distance_button_long_press = False
+      return long_press
+    return False
 
   def _change_personality(self) -> tuple[int, int]:
     with self.personality_lock:
@@ -712,6 +742,13 @@ class SelfdriveD:
       self.personality_generation += 1
       self.personality_write_event.set()
       return old_personality, self.personality
+
+  def _set_personality(self, personality: int) -> None:
+    # step() wakes personality_write_thread once the distance display has closed
+    with self.personality_lock:
+      self.personality = personality
+      self.personality_write_pending = personality
+      self.personality_generation += 1
 
   def params_thread(self, evt):
     while not evt.is_set():

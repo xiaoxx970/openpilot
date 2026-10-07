@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from openpilot.cereal import custom
-from openpilot.selfdrive.selfdrived.events import ET, EventName
+from openpilot.selfdrive.selfdrived.events import ET
 from openpilot.selfdrive.selfdrived.selfdrived import ButtonType, SelfdriveD
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EVENTS_SP
 
@@ -28,13 +28,14 @@ class TestBlendfulButton(unittest.TestCase):
   def tick(self, frame, pressed=None, valid=True):
     self.selfdrive.sm.frame = frame
     buttons = [] if pressed is None else [SimpleNamespace(type=ButtonType.gapAdjustCruise, pressed=pressed)]
-    self.selfdrive._update_distance_button(SimpleNamespace(buttonEvents=buttons, canValid=valid))
+    return self.selfdrive._update_distance_button(SimpleNamespace(buttonEvents=buttons, canValid=valid))
 
-  def test_short_press_changes_personality_only(self):
-    self.tick(0, True)
-    self.tick(99, False)
-    self.selfdrive._change_personality.assert_called_once_with()
-    self.assertEqual(self.events, [EventName.personalityChanged])
+  def test_short_press_is_left_to_the_distance_logic(self):
+    # the fork's distance display in update_events handles short presses (test_distance_long_press.py)
+    self.assertFalse(self.tick(0, True))
+    self.assertFalse(self.tick(99, False))
+    self.selfdrive._change_personality.assert_not_called()
+    self.assertEqual(self.events, [])
     self.assertEqual(self.events_sp, [])
     self.selfdrive.params.put_bool.assert_not_called()
 
@@ -44,8 +45,8 @@ class TestBlendfulButton(unittest.TestCase):
     self.assertFalse(self.values["Blendful"])
     self.tick(100)
     self.tick(200, True)  # Repeated press event must not restart the hold.
-    self.tick(300)
-    self.tick(301, False)
+    self.assertFalse(self.tick(300))
+    self.assertTrue(self.tick(301, False))  # the release ends a long press
     self.selfdrive.params.put_bool.assert_called_once_with("Blendful", True)
     self.assertEqual(self.events_sp, [custom.OnroadEventSP.EventName.blendfulEnabled])
     self.selfdrive._change_personality.assert_not_called()
@@ -81,13 +82,13 @@ class TestBlendfulButton(unittest.TestCase):
 
   def test_invalid_can_cancels_hold(self):
     self.tick(0, True)
-    self.tick(50, valid=False)
-    self.tick(150, False)
+    self.assertFalse(self.tick(50, valid=False))
+    self.assertFalse(self.tick(150, False))
     self.selfdrive.params.put_bool.assert_not_called()
     self.selfdrive._change_personality.assert_not_called()
 
   def test_release_without_press_is_ignored(self):
-    self.tick(0, False)
+    self.assertFalse(self.tick(0, False))
     self.selfdrive._change_personality.assert_not_called()
     self.selfdrive.params.put_bool.assert_not_called()
 
