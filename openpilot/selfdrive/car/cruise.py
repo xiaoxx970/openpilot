@@ -3,6 +3,7 @@ import numpy as np
 
 from opendbc.car.structs import car, CarStateIC
 from openpilot.common.constants import CV
+from openpilot.selfdrive.car.distance_display import DistanceDisplay
 from openpilot.sunnypilot.selfdrive.car.cruise_ext import VCruiseHelperSP
 
 
@@ -21,6 +22,8 @@ ButtonType = car.CarState.ButtonEvent.Type
 CRUISE_LONG_PRESS = 50
 PREDICTIVE_TYPE_SPEED_LIMIT = 1
 PREDICTIVE_TYPE_CURVE = 2
+# engagement reaches card a few frames after the button that caused it, remember that button this long
+ENABLE_BUTTON_FRAMES = 50
 CRUISE_NEAREST_FUNC = {
   ButtonType.accelCruise: math.ceil,
   ButtonType.decelCruise: math.floor,
@@ -28,6 +31,11 @@ CRUISE_NEAREST_FUNC = {
 CRUISE_INTERVAL_SIGN = {
   ButtonType.accelCruise: +1,
   ButtonType.decelCruise: -1,
+}
+# While engaged, RES and SET step the set speed up and down by one, as on stock VW
+ENGAGED_CRUISE_BUTTON = {
+  ButtonType.resumeCruise: ButtonType.accelCruise,
+  ButtonType.setCruise: ButtonType.decelCruise,
 }
 
 
@@ -38,12 +46,17 @@ class VCruiseHelper(VCruiseHelperSP):
     self.v_cruise_kph = V_CRUISE_UNSET
     self.v_cruise_cluster_kph = V_CRUISE_UNSET
     self.v_cruise_kph_last = 0
-    self.button_timers = {ButtonType.decelCruise: 0, ButtonType.accelCruise: 0}
+    self.button_timers = {ButtonType.decelCruise: 0, ButtonType.accelCruise: 0,
+                          ButtonType.setCruise: 0, ButtonType.resumeCruise: 0}
     self.button_change_states = {btn: {"standstill": False, "enabled": False} for btn in self.button_timers}
     self.v_speed_limit_kph = 0
     self.curve_speed_cap_active = False
     self.curve_speed_cap_baseline_kph = V_CRUISE_UNSET
     self.curve_speed_cap_kph = V_CRUISE_UNSET
+    self.distance_display = DistanceDisplay()
+    self.frame = 0
+    self.resume_released_frame = -ENABLE_BUTTON_FRAMES  # last release of RES or +
+    self.enable_released_frame = -ENABLE_BUTTON_FRAMES  # last release of any cruise button
 
   @property
   def v_cruise_initialized(self):
@@ -51,16 +64,28 @@ class VCruiseHelper(VCruiseHelperSP):
 
   def update_v_cruise(self, CS, CS_IC: CarStateIC, enabled, is_metric, speed_limit_control=False, speed_limit_predicative=False):
     self.v_cruise_kph_last = self.v_cruise_kph
+    self.frame += 1
+
+    for b in CS.buttonEvents:
+      if not b.pressed and b.type in (ButtonType.setCruise, ButtonType.resumeCruise, ButtonType.accelCruise, ButtonType.decelCruise):
+        self.enable_released_frame = self.frame
+        if b.type in (ButtonType.resumeCruise, ButtonType.accelCruise):
+          self.resume_released_frame = self.frame
 
     self.get_minimum_set_speed(is_metric)
 
     _enabled = self.update_enabled_state(CS, enabled)
 
+    # +/- presses that adjust the following distance must not change the set speed
+    button_events = CS.buttonEvents
+    if self.CP.openpilotLongitudinalControl:
+      button_events = self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
+
     if CS.cruiseState.available:
       if not self.CP.pcmCruise or (not self.CP_SP.pcmCruiseSpeed and _enabled):
         # if stock cruise is completely disabled, then we can use our own set speed logic
         self._update_v_speed_limit(CS, CS_IC, _enabled, speed_limit_control, speed_limit_predicative)
-        self._update_v_cruise_non_pcm(CS, _enabled, is_metric)
+        self._update_v_cruise_non_pcm(CS, button_events, _enabled, is_metric)
         self.update_speed_limit_assist_v_cruise_non_pcm()
         self._apply_curve_speed_cap()
         self.v_cruise_cluster_kph = self.v_cruise_kph
@@ -80,7 +105,7 @@ class VCruiseHelper(VCruiseHelperSP):
       self.v_cruise_cluster_kph = V_CRUISE_UNSET
 
     if not self.CP.pcmCruise or not self.CP_SP.pcmCruiseSpeed:
-      self.update_button_timers(CS, enabled)
+      self.update_button_timers(CS, button_events, enabled)
 
   def _update_v_speed_limit(self, CS, CS_IC: CarStateIC, enabled, speed_limit_control, predicative):
     if not speed_limit_control: # or not enabled # always set speed limit
@@ -147,10 +172,15 @@ class VCruiseHelper(VCruiseHelperSP):
     self.curve_speed_cap_baseline_kph = V_CRUISE_UNSET
     self.curve_speed_cap_kph = V_CRUISE_UNSET
 
-  def _update_v_cruise_non_pcm(self, CS, enabled, is_metric):
+  def _update_v_cruise_non_pcm(self, CS, button_events, enabled, is_metric):
     # handle button presses. TODO: this should be in state_control, but a decelCruise press
     # would have the effect of both enabling and changing speed is checked after the state transition
-    if not enabled:
+
+    # Preset the set speed with +/- while cruise is available but openpilot long is not engaged,
+    # so a later resume comes back at the chosen speed. Mirrors stock VW behavior, where the
+    # set speed can be dialed in before ever engaging ACC.
+    presetting = not enabled
+    if presetting and self.CP.pcmCruise:
       return
 
     long_press = False
@@ -158,7 +188,7 @@ class VCruiseHelper(VCruiseHelperSP):
 
     v_cruise_delta = 1. if is_metric else IMPERIAL_INCREMENT
 
-    for b in CS.buttonEvents:
+    for b in button_events:
       if b.type.raw in self.button_timers and not b.pressed:
         if self.button_timers[b.type.raw] > CRUISE_LONG_PRESS:
           return  # end long press
@@ -174,14 +204,28 @@ class VCruiseHelper(VCruiseHelperSP):
     if button_type is None:
       return
 
+    # SET and RES engage while disengaged, only +/- preset the speed there
+    if presetting and button_type in ENGAGED_CRUISE_BUTTON:
+      return
+
+    # Only preset from a press seen here, not a stray release (e.g. of a press made before cruise was available)
+    if presetting and self.button_timers[button_type] == 0:
+      return
+
     # Don't adjust speed when pressing resume to exit standstill
     cruise_standstill = self.button_change_states[button_type]["standstill"] or CS.cruiseState.standstill
     if button_type == ButtonType.accelCruise and cruise_standstill:
       return
+    # RES at a stop only pulls away
+    if button_type == ButtonType.resumeCruise and (cruise_standstill or CS.standstill):
+      return
 
     # Don't adjust speed if we've enabled since the button was depressed (some ports enable on rising edge)
-    if not self.button_change_states[button_type]["enabled"]:
+    if not presetting and not self.button_change_states[button_type]["enabled"]:
       return
+    set_pressed = button_type == ButtonType.setCruise
+    set_resume = button_type in ENGAGED_CRUISE_BUTTON
+    button_type = ENGAGED_CRUISE_BUTTON.get(button_type, button_type)
 
     # Speed Limit Assist for Non PCM long cars.
     # True: Disallow set speed changes when user confirmed the target set speed during preActive state
@@ -189,25 +233,35 @@ class VCruiseHelper(VCruiseHelperSP):
     if self.update_speed_limit_assist_pre_active_confirmed(button_type):
       return
 
-    long_press, v_cruise_delta = VCruiseHelperSP.update_v_cruise_delta(self, long_press, v_cruise_delta)
+    # SET below the set speed takes the current speed, like stock VW; at or above it, it steps down
+    v_ego_kph = round(CS.vEgo * CV.MS_TO_KPH)
+    if set_pressed and v_ego_kph < self.v_cruise_kph:
+      self.v_cruise_kph = float(np.clip(v_ego_kph, self.v_cruise_min, V_CRUISE_MAX))
+      return
+
+    # Seed from current speed the first time, so a preset press does not act on V_CRUISE_UNSET
+    if presetting and not self.v_cruise_initialized:
+      self.v_cruise_kph = int(round(np.clip(CS.vEgo * CV.MS_TO_KPH, V_CRUISE_INITIAL, V_CRUISE_MAX)))
+
+    # RES and SET always step by one, the custom increments belong to +/-
+    if set_resume:
+      long_press = False
+    else:
+      long_press, v_cruise_delta = VCruiseHelperSP.update_v_cruise_delta(self, long_press, v_cruise_delta)
     if long_press and self.v_cruise_kph % v_cruise_delta != 0:  # partial interval
       self.v_cruise_kph = CRUISE_NEAREST_FUNC[button_type](self.v_cruise_kph / v_cruise_delta) * v_cruise_delta
     else:
       self.v_cruise_kph += v_cruise_delta * CRUISE_INTERVAL_SIGN[button_type]
 
-    # If set is pressed while overriding, clip cruise speed to minimum of vEgo
-    if CS.gasPressed and button_type in (ButtonType.decelCruise, ButtonType.setCruise):
-      self.v_cruise_kph = max(self.v_cruise_kph, CS.vEgo * CV.MS_TO_KPH)
-
     self.v_cruise_kph = np.clip(round(self.v_cruise_kph, 1), self.v_cruise_min, V_CRUISE_MAX)
 
-  def update_button_timers(self, CS, enabled):
+  def update_button_timers(self, CS, button_events, enabled):
     # increment timer for buttons still pressed
     for k in self.button_timers:
       if self.button_timers[k] > 0:
         self.button_timers[k] += 1
 
-    for b in CS.buttonEvents:
+    for b in button_events:
       if b.type.raw in self.button_timers:
         # Start/end timer and store current state on change of button pressed
         self.button_timers[b.type.raw] = 1 if b.pressed else 0
@@ -221,7 +275,11 @@ class VCruiseHelper(VCruiseHelperSP):
     initial_experimental_mode = experimental_mode and not dynamic_experimental_control
     initial = V_CRUISE_INITIAL_EXPERIMENTAL_MODE if initial_experimental_mode else V_CRUISE_INITIAL
 
-    if any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) and self.v_cruise_initialized:
+    # The engaging carState may be a few frames old by the time card sees carControl.enabled, so also use the
+    # latest recent button: resume unless a SET came after it
+    resume_pressed = any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) or \
+                     (self.frame - self.resume_released_frame < ENABLE_BUTTON_FRAMES and self.resume_released_frame == self.enable_released_frame)
+    if resume_pressed and self.v_cruise_initialized:
       self.v_cruise_kph = self.v_cruise_kph_last
     else:
       self.v_cruise_kph = int(round(np.clip(CS.vEgo * CV.MS_TO_KPH, initial, V_CRUISE_MAX)))
