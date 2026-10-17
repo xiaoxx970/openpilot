@@ -15,6 +15,12 @@ MIN_PERCENT = 10
 
 DELETE_LAST = ['boot', 'crash']
 
+# /data is mounted with online discard: freeing a whole ~40 MB video at once sends one large TRIM that
+# blocks all disk I/O for seconds (deviceState stops, selfdrived disengages with commIssue). Shrink big
+# files in committed steps first, so every discard stays small.
+DELETE_CHUNK_BYTES = 8 * 1024 * 1024
+DELETE_CHUNK_PAUSE = 0.05  # s
+
 PRESERVE_ATTR_NAME = 'user.preserve'
 PRESERVE_ATTR_VALUE = b'1'
 PRESERVE_COUNT = 5
@@ -47,6 +53,27 @@ def get_preserved_segments(dirs_by_creation: list[str]) -> set[str]:
   return preserved
 
 
+def delete_segment(path: str) -> None:
+  start = time.monotonic()
+  for root, _, files in os.walk(path):
+    for name in files:
+      fn = os.path.join(root, name)
+      try:
+        size = os.path.getsize(fn)
+        if size <= DELETE_CHUNK_BYTES:
+          continue
+        with open(fn, 'r+b') as f:
+          while size > 0:
+            size = max(0, size - DELETE_CHUNK_BYTES)
+            f.truncate(size)
+            os.fsync(f.fileno())
+            time.sleep(DELETE_CHUNK_PAUSE)
+      except OSError:
+        pass  # rmtree below still removes it
+  shutil.rmtree(path)
+  cloudlog.info(f"deleted {path} in {time.monotonic() - start:.2f}s")
+
+
 def deleter_step() -> tuple[bool, str | None]:
   out_of_bytes = get_available_bytes(default=MIN_BYTES + 1) < MIN_BYTES
   out_of_percent = get_available_percent(default=MIN_PERCENT + 1) < MIN_PERCENT
@@ -66,7 +93,7 @@ def deleter_step() -> tuple[bool, str | None]:
 
     try:
       cloudlog.info(f"deleting {delete_path}")
-      shutil.rmtree(delete_path)
+      delete_segment(delete_path)
       return True, delete_path
     except OSError:
       cloudlog.exception(f"issue deleting {delete_path}")
@@ -126,7 +153,7 @@ def deleter_thread(exit_event: threading.Event):
 
         try:
           cloudlog.info(f"deleting {delete_path}")
-          shutil.rmtree(delete_path)
+          delete_segment(delete_path)
           break
         except OSError:
           cloudlog.exception(f"issue deleting {delete_path}")
