@@ -446,8 +446,10 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     # if the temperature enters the danger zone, go offroad to cool down
     onroad_conditions["device_temp_good"] = thermal_status < ThermalStatus.critical
-    extra_text = f"{offroad_comp_temp:.1f}C"
     show_alert = (not onroad_conditions["device_temp_good"] or not startup_conditions["device_temp_engageable"]) and onroad_conditions["ignition"]
+    # the temperature is only part of the alert while it shows; passing it while hidden made every 0.1C change look
+    # like a changed alert and removed the param twice a second (a blocking /data write, 4-5 s on a busy disk)
+    extra_text = f"{offroad_comp_temp:.1f}C" if show_alert else None
     set_offroad_alert_if_changed("Offroad_TemperatureTooHigh", show_alert, extra_text=extra_text)
 
     if show_alert:
