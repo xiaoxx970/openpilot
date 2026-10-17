@@ -176,3 +176,45 @@ class TestCoastBandHold(unittest.TestCase):
     self.feed(hold, [0.6] * 20)
     self.feed(hold, [0.6] * 2, idle=True)                         # idle while accelerating hard: a gear shift, not the coast line
     self.assertEqual(hold.edges(self.COAST), (-0.6, -0.3))
+
+
+class TestCoastBandCalibration(unittest.TestCase):
+  COAST = -0.3
+
+  def learn(self, hold, at):
+    hold.update(at, self.COAST, True, False, False)
+    for _ in range(20):
+      hold.update(at, self.COAST, True, False, False)
+    hold.update(at, self.COAST, True, True, False)
+    for _ in range(20):
+      hold.update(at, self.COAST, True, True, False)
+    for _ in range(20):
+      hold.update(0.2, self.COAST, True, False, False)
+
+  def test_starts_from_half_of_the_saved_band(self):
+    hold = CoastBandHold(DT, {"offset": -0.2, "width": 0.5, "edges": 30})
+    self.assertAlmostEqual(hold.coast_offset, -0.1)
+    self.assertAlmostEqual(hold.band_width, 0.4)
+    self.assertEqual(hold.learn_count, 0)
+
+  def test_bad_saved_values_are_ignored(self):
+    for saved in (None, {}, {"offset": "x", "width": 0.3}, {"offset": 1.5, "width": 0.3}, {"offset": 0., "width": 3.}):
+      hold = CoastBandHold(DT, saved)
+      self.assertEqual((hold.coast_offset, hold.band_width), (0., 0.3))
+
+  def test_calibration_counts_accepted_edges(self):
+    hold = CoastBandHold(DT)
+    self.learn(hold, -0.45)
+    self.learn(hold, -0.45)
+    cal = hold.calibration()
+    self.assertEqual(cal["edges"], 2)
+    self.assertLess(cal["offset"], 0.)
+    again = CoastBandHold(DT, cal)
+    self.assertAlmostEqual(again.coast_offset, 0.5 * cal["offset"], places=4)
+
+  def test_reset_keeps_the_calibration(self):
+    hold = CoastBandHold(DT)
+    self.learn(hold, -0.45)
+    before = hold.calibration()
+    hold.reset()
+    self.assertEqual(hold.calibration(), before)

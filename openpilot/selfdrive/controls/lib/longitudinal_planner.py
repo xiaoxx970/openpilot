@@ -6,6 +6,7 @@ import openpilot.cereal.messaging as messaging
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
@@ -59,6 +60,10 @@ COAST_BAND_JERK = 0.5           # m/s^3 slewing onto an edge and back off it
 COAST_BAND_OVERRIDE_JERK = 2.   # m/s^3 when leaving a hold for a demand beyond COAST_BAND_OVERRIDE
 COAST_BAND_MIN_SPEED = 5.       # m/s; slower than that stopping and creeping shape the command
 COAST_BAND_FLAG_DEBOUNCE = 0.5  # s a car flag must have held its previous value for its edge to count
+# The learnt band is the car's (drag, rolling, gearbox) plus this drive's load; carry half of it into the next drive
+COAST_BAND_PARAM = "CoastBandCalibration"
+COAST_BAND_KEEP = 0.5
+COAST_BAND_SAVE_INTERVAL = 120.  # s between saves, and only after new edges; the write is non-blocking
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
@@ -114,11 +119,27 @@ class CoastBandHold:
   edge is a real demand and always passes. The band sits at the pitch-based coast estimate and is
   corrected from the car's own flag edges, so load, grade and drag move it.
   """
-  def __init__(self, dt):
+  def __init__(self, dt, saved=None):
     self.dt = dt
     self.coast_offset = 0.                   # throttle-off edge relative to the coast estimate
     self.band_width = COAST_BAND_PRIOR_WIDTH  # throttle-off edge minus brake-on edge
+    self.learn_count = 0
+    self.last_edges = (-COAST_BAND_PRIOR_WIDTH, 0.)
+    self.load(saved)
     self.reset()
+
+  def load(self, saved):
+    # start from part of the last drive's band; anything malformed or out of range is ignored
+    try:
+      offset, width = float(saved["offset"]), float(saved["width"])
+    except (TypeError, KeyError, ValueError):
+      return
+    if abs(offset) <= COAST_BAND_MAX_OFFSET and 0.05 <= width <= 2. * COAST_BAND_PRIOR_WIDTH:
+      self.coast_offset = COAST_BAND_KEEP * offset
+      self.band_width = COAST_BAND_PRIOR_WIDTH + COAST_BAND_KEEP * (width - COAST_BAND_PRIOR_WIDTH)
+
+  def calibration(self):
+    return {"offset": round(self.coast_offset, 4), "width": round(self.band_width, 4), "edges": self.learn_count}
 
   def reset(self):
     self.state = None                        # 1 throttle, 0 coasting, -1 braking
@@ -143,10 +164,12 @@ class CoastBandHold:
             offset = sent - accel_coast
             if abs(offset) <= COAST_BAND_MAX_OFFSET:
               self.coast_offset += COAST_BAND_LEARN_RATE * (offset - self.coast_offset)
+              self.learn_count += 1
           else:
             width = accel_coast + self.coast_offset - sent
             if 0.05 <= width <= 2. * COAST_BAND_PRIOR_WIDTH:
               self.band_width += COAST_BAND_LEARN_RATE * (width - self.band_width)
+              self.learn_count += 1
         self.flag_age[name] = 0.
       else:
         self.flag_age[name] += self.dt
@@ -155,7 +178,7 @@ class CoastBandHold:
   def update(self, accel, accel_coast, active, engine_idle, brake_requested):
     self._learn(engine_idle, brake_requested, accel_coast)
     self.since_change += self.dt
-    lo, hi = self.edges(accel_coast)
+    lo, hi = self.last_edges = self.edges(accel_coast)
     state = 1 if accel > hi else (-1 if accel < lo else 0)
     target = accel
     if active and self.state is not None and state != self.state:
@@ -230,7 +253,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
     self.lead_closing_limit = LeadClosingLimit(self.dt)
-    self.coast_band_hold = CoastBandHold(self.dt)
+    self.params = Params()
+    try:
+      saved = self.params.get(COAST_BAND_PARAM)
+    except Exception:
+      saved = None
+    self.coast_band_hold = CoastBandHold(self.dt, saved)
+    self.coast_band_saved_count = self.coast_band_hold.learn_count
+    self.coast_band_save_timer = 0.
     self.output_a_target = init_a
     self.output_should_stop = False
     self.output_v_target = 0.0
@@ -329,6 +359,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
                   accel_coast < ACCEL_MAX and not self.fcw and not self.output_should_stop)
     self.output_a_target = self.coast_band_hold.update(float(self.output_a_target), accel_coast, coast_gate,
                                                        cs_ic.engineIdle, cs_ic.brakeRequested)
+    self.coast_band_save_timer += self.dt
+    if self.coast_band_save_timer >= COAST_BAND_SAVE_INTERVAL and self.coast_band_hold.learn_count != self.coast_band_saved_count:
+      self.coast_band_save_timer = 0.
+      self.coast_band_saved_count = self.coast_band_hold.learn_count
+      self.params.put(COAST_BAND_PARAM, self.coast_band_hold.calibration())  # non-blocking
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
     self.output_v_target = get_speed_from_plan(self.v_desired_trajectory, CONTROL_N_T_IDX, action_t=action_t)
@@ -363,6 +398,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     plan_ic_send.valid = sm.all_checks()
     plan_ic_send.longitudinalPlanIC.leadDistance = get_lead_distance(sm['radarState'])
     plan_ic_send.longitudinalPlanIC.vTarget = float(self.output_v_target)
+    hold = self.coast_band_hold
+    plan_ic_send.longitudinalPlanIC.coastBandLow, plan_ic_send.longitudinalPlanIC.coastBandHigh = (float(e) for e in hold.last_edges)
+    plan_ic_send.longitudinalPlanIC.coastBandOffset = float(hold.coast_offset)
+    plan_ic_send.longitudinalPlanIC.coastBandWidth = float(hold.band_width)
+    plan_ic_send.longitudinalPlanIC.coastBandLearnCount = hold.learn_count
+    plan_ic_send.longitudinalPlanIC.coastBandHolding = bool(hold.holding)
     pm.send('longitudinalPlanIC', plan_ic_send)
 
     self.publish_longitudinal_plan_sp(sm, pm)
