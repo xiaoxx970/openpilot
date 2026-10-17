@@ -496,6 +496,13 @@ struct ControlsStateIC @0xb057204d7deadf3f {
 struct LongitudinalPlanIC @0xbd443b539493bc68 {
   leadDistance @0 :Float32;
   vTarget @1 :Float32;
+  # cruise coast-band gate: where the car's throttle-off / brake-on edges are believed to be
+  coastBandHigh @2 :Float32;       # throttle-off edge, m/s^2
+  coastBandLow @3 :Float32;        # brake-on edge, m/s^2
+  coastBandOffset @4 :Float32;     # learnt throttle-off edge relative to the pitch coast estimate
+  coastBandWidth @5 :Float32;      # learnt throttle-off minus brake-on
+  coastBandLearnCount @6 :UInt32;  # car flag edges accepted this drive
+  coastBandHolding @7 :Bool;       # a state change is being held back right now
 }
 
 struct CarStateIC @0xfc6241ed8877b611 {
@@ -507,6 +514,8 @@ struct CarStateIC @0xfc6241ed8877b611 {
   cruiseSpeedLimit @5 :Float32;
   cruiseSpeedLimitPredicative @6 :Float32;
   cruiseSpeedLimitPredicativeType @7 :UInt8;
+  engineIdle @8 :Bool;
+  brakeRequested @9 :Bool;
 
   struct BatteryDetails {
     capacity @0 :Float32;
