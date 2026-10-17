@@ -501,6 +501,8 @@ struct CarStateIC @0xfc6241ed8877b611 {
   cruiseSpeedLimit @5 :Float32;
   cruiseSpeedLimitPredicative @6 :Float32;
   cruiseSpeedLimitPredicativeType @7 :UInt8;
+  engineIdle @8 :Bool;
+  brakeRequested @9 :Bool;
 
   struct BatteryDetails {
     capacity @0 :Float32;

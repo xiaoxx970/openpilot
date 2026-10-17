@@ -46,6 +46,19 @@ LEAD_CLOSE_FILTER_TAU = 2.
 LEAD_CLOSE_LOST_TIME = 1.
 # Track the capped target with a 4 s time constant instead of cruise's 1 s, so lead noise barely reaches the command
 LEAD_CLOSE_ACCEL_TIME = 4.
+# The car reports whether the engine delivers torque and whether ACC is braking; between the two it coasts.
+# A cruise command that flips across that band every second or two (holding a speed downhill) is felt as a
+# throttle/drag lurch each time; one that moves within the throttle side (holding a set speed on the flat) is not.
+COAST_BAND_PRIOR_WIDTH = 0.3    # m/s^2 from throttle-off down to brake-on until the car has shown both edges
+COAST_BAND_LEARN_RATE = 0.2     # blend of each observed flag edge into the band position
+COAST_BAND_MAX_OFFSET = 0.3     # m/s^2 an observed edge may sit from the pitch-based coast estimate to count
+COAST_BAND_HOLD_TIME = 5.       # s after a crossing before the opposite side may be entered again
+COAST_BAND_OVERRIDE = 0.3       # m/s^2 past the edge a blocked request is still let through: a real demand
+COAST_BAND_REST = 0.02          # m/s^2 back from the edge a blocked change rests at
+COAST_BAND_JERK = 0.5           # m/s^3 slewing onto an edge and back off it
+COAST_BAND_OVERRIDE_JERK = 2.   # m/s^3 when leaving a hold for a demand beyond COAST_BAND_OVERRIDE
+COAST_BAND_MIN_SPEED = 5.       # m/s; slower than that stopping and creeping shape the command
+COAST_BAND_FLAG_DEBOUNCE = 0.5  # s a car flag must have held its previous value for its edge to count
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
@@ -88,6 +101,85 @@ class LeadClosingLimit:
       self.v_target.x = lead.vLead + close_speed
     v_lead_cap = self.v_target.update(lead.vLead + close_speed)
     return (v_lead_cap, True) if v_lead_cap < v_cruise else (v_cruise, False)
+
+
+class CoastBandHold:
+  """Lets the set-speed command change throttle/coast/brake state at most once per COAST_BAND_HOLD_TIME.
+
+  The car coasts between its throttle-off and brake-on points. Each move between throttle, coasting and
+  braking is a felt lurch; a command that stays on one side (holding a set speed on the flat lives on
+  the throttle side) is passed through untouched. A blocked change rests the output just short of the
+  edge it tried to cross, so the car stays in the state it is in; asked to go from throttle straight to
+  braking it takes the step into coasting and holds the second. A request COAST_BAND_OVERRIDE past the
+  edge is a real demand and always passes. The band sits at the pitch-based coast estimate and is
+  corrected from the car's own flag edges, so load, grade and drag move it.
+  """
+  def __init__(self, dt):
+    self.dt = dt
+    self.coast_offset = 0.                   # throttle-off edge relative to the coast estimate
+    self.band_width = COAST_BAND_PRIOR_WIDTH  # throttle-off edge minus brake-on edge
+    self.reset()
+
+  def reset(self):
+    self.state = None                        # 1 throttle, 0 coasting, -1 braking
+    self.since_change = COAST_BAND_HOLD_TIME
+    self.output = None
+    self.holding = False
+    self.flag_prev = {'idle': None, 'brake': None}
+    self.flag_age = {'idle': 0., 'brake': 0.}
+
+  def edges(self, accel_coast):
+    hi = accel_coast + self.coast_offset
+    return hi - self.band_width, hi
+
+  def _learn(self, engine_idle, brake_requested, accel_coast):
+    # the command we had sent when a flag rose is where that edge sits
+    sent = self.output
+    for name, flag in (('idle', engine_idle), ('brake', brake_requested)):
+      prev = self.flag_prev[name]
+      if prev is not None and flag != prev:
+        if flag and sent is not None and self.flag_age[name] >= COAST_BAND_FLAG_DEBOUNCE:
+          if name == 'idle':
+            offset = sent - accel_coast
+            if abs(offset) <= COAST_BAND_MAX_OFFSET:
+              self.coast_offset += COAST_BAND_LEARN_RATE * (offset - self.coast_offset)
+          else:
+            width = accel_coast + self.coast_offset - sent
+            if 0.05 <= width <= 2. * COAST_BAND_PRIOR_WIDTH:
+              self.band_width += COAST_BAND_LEARN_RATE * (width - self.band_width)
+        self.flag_age[name] = 0.
+      else:
+        self.flag_age[name] += self.dt
+      self.flag_prev[name] = flag
+
+  def update(self, accel, accel_coast, active, engine_idle, brake_requested):
+    self._learn(engine_idle, brake_requested, accel_coast)
+    self.since_change += self.dt
+    lo, hi = self.edges(accel_coast)
+    state = 1 if accel > hi else (-1 if accel < lo else 0)
+    target = accel
+    if active and self.state is not None and state != self.state:
+      down = state < self.state
+      edge = (lo if state == -1 else hi) if down else (hi if state == 1 else lo)  # the edge crossed last
+      if self.since_change >= COAST_BAND_HOLD_TIME or abs(accel - edge) >= COAST_BAND_OVERRIDE:
+        self.since_change = 0.
+      else:
+        target = edge + (COAST_BAND_REST if down else -COAST_BAND_REST)  # rest just short of that edge
+        if self.state != 0 and state != 0:
+          state = 0  # throttle straight to brake or back: the step into coasting is taken, the second is held
+          self.since_change = 0.
+        else:
+          state = self.state
+    self.state = state
+
+    holding = target != accel
+    if self.output is None or not (active and (holding or self.holding)):
+      self.output = accel
+    else:
+      jerk = COAST_BAND_OVERRIDE_JERK if abs(target - self.output) > COAST_BAND_OVERRIDE else COAST_BAND_JERK
+      self.output = float(np.clip(target, self.output - jerk * self.dt, self.output + jerk * self.dt))
+    self.holding = holding or abs(self.output - accel) > 1e-3
+    return self.output
 
 
 def get_coast_accel(pitch):
@@ -138,6 +230,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
     self.lead_closing_limit = LeadClosingLimit(self.dt)
+    self.coast_band_hold = CoastBandHold(self.dt)
     self.output_a_target = init_a
     self.output_should_stop = False
     self.output_v_target = 0.0
@@ -227,6 +320,15 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
+
+    # only the set-speed loop flip-flops between throttle and coasting; lead and e2e requests pass untouched
+    if reset_state:
+      self.coast_band_hold.reset()
+    cs_ic = sm['carStateIC']
+    coast_gate = (self.mpc.source == LongitudinalPlanSource.cruise and v_ego > COAST_BAND_MIN_SPEED and
+                  accel_coast < ACCEL_MAX and not self.fcw and not self.output_should_stop)
+    self.output_a_target = self.coast_band_hold.update(float(self.output_a_target), accel_coast, coast_gate,
+                                                       cs_ic.engineIdle, cs_ic.brakeRequested)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
     self.output_v_target = get_speed_from_plan(self.v_desired_trajectory, CONTROL_N_T_IDX, action_t=action_t)
