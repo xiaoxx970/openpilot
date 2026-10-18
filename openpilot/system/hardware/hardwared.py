@@ -28,6 +28,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.system.statsd import statlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
+from openpilot.system.hardware.chestnut.monitoring import chestnut_state_thread
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
 from openpilot.common.version import terms_version, training_version, get_build_metadata, terms_version_sp
 
@@ -258,7 +259,7 @@ def hw_state_thread(end_event, hw_queue):
 
 
 def hardware_thread(end_event, hw_queue) -> None:
-  system_stats = LinuxSystemStats()
+  system_stats = LinuxSystemStats() if sys.platform == "linux" else None
   pm = messaging.PubMaster(['deviceState'])
   sm = messaging.SubMaster(["peripheralState", "gpsLocationExternal", "selfdriveState", "pandaStates", "chestnutState"], poll="pandaStates")
 
@@ -353,10 +354,13 @@ def hardware_thread(end_event, hw_queue) -> None:
     except queue.Empty:
       pass
 
+    memory_usage = system_stats.memory_usage_percent() if system_stats is not None else 0.
+    cpu_usage = system_stats.cpu_usage_percent() if system_stats is not None else []
+
     msg.deviceState.freeSpacePercent = get_available_percent(default=100.0)
-    msg.deviceState.memoryUsagePercent = int(round(system_stats.memory_usage_percent()))
+    msg.deviceState.memoryUsagePercent = int(round(memory_usage))
     msg.deviceState.gpuUsagePercent = int(round(HARDWARE.get_gpu_usage_percent()))
-    online_cpu_usage = [int(round(n)) for n in system_stats.cpu_usage_percent()]
+    online_cpu_usage = [int(round(n)) for n in cpu_usage]
     offline_cpu_usage = [0., ] * (len(msg.deviceState.cpuTempC) - len(online_cpu_usage))
     msg.deviceState.cpuUsagePercent = online_cpu_usage + offline_cpu_usage
 
@@ -442,8 +446,10 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     # if the temperature enters the danger zone, go offroad to cool down
     onroad_conditions["device_temp_good"] = thermal_status < ThermalStatus.critical
-    extra_text = f"{offroad_comp_temp:.1f}C"
     show_alert = (not onroad_conditions["device_temp_good"] or not startup_conditions["device_temp_engageable"]) and onroad_conditions["ignition"]
+    # the temperature is only part of the alert while it shows; passing it while hidden made every 0.1C change look
+    # like a changed alert and removed the param twice a second (a blocking /data write, 4-5 s on a busy disk)
+    extra_text = f"{offroad_comp_temp:.1f}C" if show_alert else None
     set_offroad_alert_if_changed("Offroad_TemperatureTooHigh", show_alert, extra_text=extra_text)
 
     if show_alert:
@@ -594,6 +600,7 @@ def main():
 
   if COMMA_HARDWARE:
     threads.append(threading.Thread(target=touch_thread, args=(end_event,)))
+    threads.append(threading.Thread(target=chestnut_state_thread, args=(end_event,)))
 
   for t in threads:
     t.start()

@@ -57,9 +57,6 @@ TurnDirection = custom.ModelDataV2SP.TurnDirection
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
 
-PERSONALITY_WRITE_TIMEOUT = 10.  # s, then trust the param again
-
-
 class SelfdriveD(CruiseHelper):
   def __init__(self, CP=None, CP_SP=None, CP_IC=None):
     self.params = Params()
@@ -162,9 +159,11 @@ class SelfdriveD(CruiseHelper):
       max(log.LongitudinalPersonality.schema.enumerants.values()),
       self.params
     )
+    self.personality_lock = threading.Lock()
+    self.personality_write_event = threading.Event()
+    self.personality_write_pending: int | None = None
+    self.personality_generation = 0
     self.distance_display = DistanceDisplay()
-    # changed here and maybe not on disk yet: (personality, time written or None while unwritten)
-    self.personality_pending: tuple[int, float | None] | None = None
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -480,11 +479,12 @@ class SelfdriveD(CruiseHelper):
       self.logged_comm_issue = None
 
     if not self.CP.notCar and not big_model_settling:  # localization has nothing to work with during the load
-      if not self.sm['deviceMotion'].posenetOK:
+      # the defaults of a message that was never received are not a localizer failure
+      if self.sm.seen['deviceMotion'] and not self.sm['deviceMotion'].posenetOK:
         self.events.add(EventName.posenetInvalid)
-      if not self.sm['deviceMotion'].inputsOK:
+      if self.sm.seen['deviceMotion'] and not self.sm['deviceMotion'].inputsOK:
         self.events.add(EventName.locationdTemporaryError)
-      if (not self.sm['vehicleParameters'].valid and cal_status == log.ExtrinsicsCalibration.Status.calibrated and
+      if (self.sm.seen['vehicleParameters'] and not self.sm['vehicleParameters'].valid and cal_status == log.ExtrinsicsCalibration.Status.calibrated and
           not TESTING_CLOSET and (not SIMULATION or REPLAY)):
         self.events.add(EventName.paramsdTemporaryError)
 
@@ -556,15 +556,13 @@ class SelfdriveD(CruiseHelper):
         self.experimental_mode_switched = False
       personality = min(max(personality + self.distance_display.step, 0), 2)
       if personality != self.personality:
-        self.personality_pending = (personality, None)
-        self.personality = personality
+        self._set_personality(personality)
         show_personality = True
       # Write once when the distance display closes, not on every press: each write is fsync'd, and
-      # bursts of them while driving went with multi-second disk stalls (deviceState -> commIssue)
-      pending = self.personality_pending
-      if pending is not None and pending[1] is None and not self.distance_display.is_open:
-        self.personality_pending = (pending[0], time.monotonic())
-        self.params.put('LongitudinalPersonality', pending[0])
+      # bursts of them while driving went with multi-second disk stalls (deviceState -> commIssue).
+      # Until then the pending write keeps params_thread from reading the old value back.
+      if self.personality_write_pending is not None and not self.distance_display.is_open:
+        self.personality_write_event.set()
       if show_personality:
         self.events.add(EventName.personalityChanged)
 
@@ -705,35 +703,75 @@ class SelfdriveD(CruiseHelper):
 
     self.CS_prev = CS
 
+  def _change_personality(self) -> tuple[int, int]:
+    with self.personality_lock:
+      old_personality = self.personality
+      self.personality = (self.personality - 1) % 3
+      self.personality_write_pending = self.personality
+      self.personality_generation += 1
+      self.personality_write_event.set()
+      return old_personality, self.personality
+
+  def _set_personality(self, personality: int) -> None:
+    # step() wakes personality_write_thread once the distance display has closed
+    with self.personality_lock:
+      self.personality = personality
+      self.personality_write_pending = personality
+      self.personality_generation += 1
+
   def params_thread(self, evt):
     while not evt.is_set():
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
-      # The write above is delayed and non-blocking and can take seconds on a busy disk; until it lands,
-      # reading the param back would undo the change (seen flipping back within 30 ms)
-      personality = self.params.get("LongitudinalPersonality", return_default=True)
-      pending = self.personality_pending
-      if pending is None or personality == pending[0] or \
-         (pending[1] is not None and time.monotonic() - pending[1] > PERSONALITY_WRITE_TIMEOUT):
-        self.personality_pending = None
-        self.personality = personality
+
+      with self.personality_lock:
+        personality_generation = self.personality_generation
+      personality_param = self.params.get("LongitudinalPersonality", return_default=True)
+      with self.personality_lock:
+        # A slow write must not let a stale read undo a button press.
+        if self.personality_write_pending is None and personality_generation == self.personality_generation:
+          self.personality = personality_param
 
       self.mads.read_params()
       time.sleep(0.1)
 
+  def personality_write_thread(self, evt):
+    while not evt.is_set():
+      self.personality_write_event.wait()
+      if evt.is_set():
+        break
+      with self.personality_lock:
+        selected = self.personality_write_pending
+        self.personality_write_event.clear()
+      if selected is None:
+        continue
+
+      self.params.put('LongitudinalPersonality', selected, block=True)
+      with self.personality_lock:
+        if self.personality_write_pending == selected:
+          self.personality_write_pending = None
+        else:
+          self.personality_write_event.set()
+        # Invalidate reads that began before the committed value was visible.
+        self.personality_generation += 1
+
   def run(self):
     e = threading.Event()
     t = threading.Thread(target=self.params_thread, args=(e, ))
+    personality_writer = threading.Thread(target=self.personality_write_thread, args=(e, ))
     try:
       t.start()
+      personality_writer.start()
       while True:
         self.step()
         self.rk.monitor_time()
     finally:
       e.set()
+      self.personality_write_event.set()
       t.join()
+      personality_writer.join()
 
 
 def main():
