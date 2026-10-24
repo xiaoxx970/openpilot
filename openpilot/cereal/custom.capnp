@@ -486,7 +486,9 @@ struct CustomReserved11 @0xc2243c65e0340384 {
 struct CustomReserved12 @0x9ccdc8676701b412 {
 }
 
-struct CustomReserved13 @0xcd96dafb67a082d0 {
+struct SelfdriveStateIC @0xcd96dafb67a082d0 {
+  rainLevel @0 :UInt8;   # 0 dry, 1 rain, 2 heavy rain, held a while after it stops
+  rainMode @1 :Bool;     # the rain following distance is selected
 }
 
 struct ControlsStateIC @0xb057204d7deadf3f {
@@ -517,6 +519,9 @@ struct CarStateIC @0xfc6241ed8877b611 {
   engineIdle @8 :Bool;
   brakeRequested @9 :Bool;
   driverDoorOpen @10 :Bool;
+  rainAmount @11 :Float32;       # rain sensor amount, 0-100 %
+  rainWiperRequest @12 :UInt8;   # wiper speed the rain sensor asks for, 0-7
+  wiperSwitch @13 :UInt8;        # wiper stalk: 0 off, 1 interval/auto, 2 stage 1, 3 stage 2
 
   struct BatteryDetails {
     capacity @0 :Float32;

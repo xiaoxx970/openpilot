@@ -2654,7 +2654,7 @@ struct Event {
     customReserved10 @136 :Custom.CustomReserved10;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
-    customReserved13 @139 :Custom.CustomReserved13;
+    selfdriveStateIC @139 :Custom.SelfdriveStateIC;
     controlsStateIC @140 :Custom.ControlsStateIC;
     longitudinalPlanIC @141 :Custom.LongitudinalPlanIC;
     carStateIC @142 :Custom.CarStateIC;

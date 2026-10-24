@@ -12,7 +12,8 @@ from openpilot.selfdrive.controls.lib.accel_boost import AccelBoost
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor, \
+                                                                       get_rain_T_FOLLOW, RAIN_STOP_DISTANCE_ADD
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, get_speed_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.cereal import log
@@ -80,7 +81,7 @@ class LeadClosingLimit:
     self.lead_lost_time = 0.
     self.v_target = FirstOrderFilter(0., LEAD_CLOSE_FILTER_TAU, dt)
 
-  def update(self, v_cruise, v_ego, lead, personality):
+  def update(self, v_cruise, v_ego, lead, personality, t_follow=None):
     # Returns the cruise target and whether the lead cap is what set it
     if not lead.present:
       self.lead_lost_time += self.dt
@@ -89,7 +90,9 @@ class LeadClosingLimit:
       return v_cruise, False
     self.lead_lost_time = 0.
 
-    desired_distance = get_safe_obstacle_distance(v_ego, get_T_FOLLOW(personality)) - get_stopped_equivalence_factor(lead.vLead)
+    if t_follow is None:
+      t_follow = get_T_FOLLOW(personality)
+    desired_distance = get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(lead.vLead)
     close_speed = float(np.clip((lead.dRel - desired_distance) / LEAD_CLOSE_TIME, LEAD_CLOSE_MIN_SPEED, LEAD_CLOSE_MAX_SPEED))
     if not self.active:
       self.active = True
@@ -208,6 +211,13 @@ def get_lead_distance(radarState):
   return 0
 
 
+def get_follow_distance(ss_ic, personality, v_ego):
+  # Returns the time gap and the stop distance added to the MPC's
+  if ss_ic.rainMode:
+    return get_rain_T_FOLLOW(v_ego, ss_ic.rainLevel >= 2), RAIN_STOP_DISTANCE_ADD
+  return get_T_FOLLOW(personality), 0.
+
+
 def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt, personality=log.LongitudinalPersonality.standard, lead_capped=False):
   min_accel = -get_max_decel(v_ego) * A_CRUISE_MIN_SCALE.get(personality, 1.0)
   if lead_capped:
@@ -284,7 +294,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
     else:
       self.mpc.set_cur_state(v_ego, sm['carState'].aEgo)
-    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality)
+    t_follow, stop_distance_add = get_follow_distance(sm['selfdriveStateIC'], sm['selfdriveState'].personality, v_ego)
+    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality, t_follow=t_follow, stop_distance_add=stop_distance_add)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
@@ -305,7 +316,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
-    v_cruise, lead_capped = self.lead_closing_limit.update(v_cruise, v_ego, sm['radarState'].leadOne, sm['selfdriveState'].personality)
+    v_cruise, lead_capped = self.lead_closing_limit.update(v_cruise, v_ego, sm['radarState'].leadOne, sm['selfdriveState'].personality, t_follow)
     self.a_cruise = get_cruise_accel(v_cruise, v_ego, self.a_cruise, self.dt, sm['selfdriveState'].personality, lead_capped)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 

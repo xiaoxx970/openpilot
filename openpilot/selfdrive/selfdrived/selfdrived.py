@@ -20,6 +20,7 @@ from openpilot.selfdrive.car.car_events import CarEvents
 from openpilot.selfdrive.car.distance_display import DistanceDisplay
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
+from openpilot.selfdrive.selfdrived.rain_follow import RainDetector, RainFollow
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -96,7 +97,7 @@ class SelfdriveD:
     self.big_model_ready_t = 0.
 
     # Setup sockets
-    self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents'] + ['selfdriveStateSP', 'onroadEventsSP'])
+    self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents'] + ['selfdriveStateSP', 'onroadEventsSP'] + ['selfdriveStateIC'])
 
     self.gps_location_service = get_gps_location_service(self.params)
     self.gps_packets = [self.gps_location_service]
@@ -160,6 +161,9 @@ class SelfdriveD:
     self.personality_write_pending: int | None = None
     self.personality_generation = 0
     self.distance_display = DistanceDisplay()
+    self.rain_follow_enabled = self.params.get_bool("RainFollowDistance")
+    self.rain_detector = RainDetector()
+    self.rain_follow = RainFollow()
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -540,17 +544,27 @@ class SelfdriveD:
     # distance button like stock VW: the first press only shows the distance, presses while it is
     # shown step it up (wrapping to the shortest) and +/- step it up and down
     if self.CP.openpilotLongitudinalControl:
-      self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
-      personality = self.personality
-      show_personality = self.distance_display.step != 0
-      if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
-        # the first press shows the current personality on screen too, like the cluster
-        show_personality = CS.cruiseState.available
-        if self.distance_display.cycle:
-          personality = (personality + 1) % 3
-      personality = min(max(personality + self.distance_display.step, 0), 2)
+      # rain selects its own following distance, one step past relaxed (see RainFollow)
+      cs_ic = self.sm['carStateIC']
+      rain_level = self.rain_detector.update(cs_ic.rainAmount, cs_ic.rainWiperRequest, cs_ic.wiperSwitch)
+      personality, show_personality = self.rain_follow.update(rain_level > 0, self.rain_follow_enabled, self.personality)
       if personality != self.personality:
         self._set_personality(personality)
+
+      self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
+      top = self.rain_follow.top(self.rain_follow_enabled)
+      position = new_position = self.rain_follow.position(self.personality)
+      show_personality = show_personality or self.distance_display.step != 0
+      if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
+        # the first press shows the current personality on screen too, like the cluster
+        show_personality = show_personality or CS.cruiseState.available
+        if self.distance_display.cycle:
+          new_position = (new_position + 1) % (top + 1)
+      new_position = min(max(new_position + self.distance_display.step, 0), top)
+      if new_position != position:
+        personality = self.rain_follow.select(new_position, self.personality)
+        if personality != self.personality:
+          self._set_personality(personality)
         show_personality = True
       # Write once when the distance display closes, not on every press: each write is fsync'd, and
       # bursts of them while driving went with multi-second disk stalls (deviceState -> commIssue).
@@ -616,7 +630,7 @@ class SelfdriveD:
     if self.enabled or (ET.NO_ENTRY not in (c := self.state_machine.current_alert_types) and (ET.ENABLE in c or ET.USER_DISABLE in c)):
       clear_event_types.add(ET.NO_ENTRY)
 
-    pers = LONGITUDINAL_PERSONALITY_MAP[self.personality]
+    pers = 'rain' if self.rain_follow.active else LONGITUDINAL_PERSONALITY_MAP[self.personality]
     callback_args = [self.CP, CS, self.sm, self.is_metric,
                      self.state_machine.soft_disable_timer, pers]
 
@@ -674,6 +688,14 @@ class SelfdriveD:
 
     self.pm.send('selfdriveStateSP', ss_sp_msg)
 
+    # selfdriveStateIC
+    ss_ic_msg = messaging.new_message('selfdriveStateIC')
+    ss_ic_msg.valid = True
+    ss_ic = ss_ic_msg.selfdriveStateIC
+    ss_ic.rainLevel = self.rain_detector.level
+    ss_ic.rainMode = self.rain_follow.active
+    self.pm.send('selfdriveStateIC', ss_ic_msg)
+
     # onroadEventsSP - logged every second or on change
     if (self.sm.frame % int(1. / DT_CTRL) == 0) or (self.events_sp.names != self.events_sp_prev):
       ce_send_sp = messaging.new_message('onroadEventsSP')
@@ -717,6 +739,7 @@ class SelfdriveD:
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+      self.rain_follow_enabled = self.params.get_bool("RainFollowDistance")
       with self.personality_lock:
         personality_generation = self.personality_generation
       personality_param = self.params.get("LongitudinalPersonality", return_default=True)

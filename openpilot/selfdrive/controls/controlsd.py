@@ -23,7 +23,7 @@ from openpilot.selfdrive.controls.lib.lane_line_visibility import LaneLineVisibi
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_rain_T_FOLLOW
 from openpilot.common.pt2 import PT2Filter
 
 from openpilot.sunnypilot.selfdrive.controls.controlsd_ext import ControlsExt
@@ -52,7 +52,7 @@ class Controls(ControlsExt):
 
     self.CI = interfaces[self.CP.carFingerprint](self.CP, self.CP_SP, self.CP_IC)
 
-    ic_sm_services = ['carStateIC', 'lateralCurvatureParameters', 'longitudinalPlanIC']
+    ic_sm_services = ['carStateIC', 'lateralCurvatureParameters', 'longitudinalPlanIC', 'selfdriveStateIC']
     ic_pm_services = ['carControlIC', 'controlsStateIC']
     self.sm = messaging.SubMaster(['lateralDelay', 'vehicleParameters', 'lateralTorqueParameters', 'modelV2', 'selfdriveState',
                                    'extrinsicsCalibration', 'deviceMotion', 'longitudinalPlan', 'lateralManeuverPlan', 'carState', 'carOutput',
@@ -275,8 +275,14 @@ class Controls(ControlsExt):
     hudControl.lanesVisible = CC.enabled
     hudControl.leadVisible = self.sm['longitudinalPlan'].hasLead
     CC_IC.hudLeadDistance = self.sm['longitudinalPlanIC'].leadDistance
-    hudControl.leadDistanceBars = self.sm['selfdriveState'].personality.raw + 1
-    CC_IC.hudLeadFollowTime = get_T_FOLLOW(hudControl.leadDistanceBars - 1)
+    ss_ic = self.sm['selfdriveStateIC']
+    if ss_ic.rainMode:
+      # one bar past relaxed: the fifth on a VW cluster
+      hudControl.leadDistanceBars = log.LongitudinalPersonality.relaxed + 2
+      CC_IC.hudLeadFollowTime = get_rain_T_FOLLOW(CS.vEgo, ss_ic.rainLevel >= 2)
+    else:
+      hudControl.leadDistanceBars = self.sm['selfdriveState'].personality.raw + 1
+      CC_IC.hudLeadFollowTime = get_T_FOLLOW(hudControl.leadDistanceBars - 1)
     hudControl.visualAlert = self.sm['selfdriveState'].alertHudVisual
 
     # Report a lane line to the car's HUD only while the model actually sees it, per side

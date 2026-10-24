@@ -31,6 +31,10 @@ DESCRIPTIONS = {
     "Shows trucks, two-wheelers and people as such on the cluster's lead and side lane cars. " +
     "Needs the model file in /data/yolo_lead; uses an idle CPU core, never the GPU."
   ),
+  "RainFollowDistance": tr_noop(
+    "When the rain sensor or wiper stalk says it rains, switch to a rain following distance one step past relaxed " +
+    "(1.75 s, more above 80 km/h) and back when it stops. The distance button also reaches it while it rains."
+  ),
   "EnableSpeedLimitPredicative": tr_noop(
     "Enables setting predicative speed limit"
   ),
@@ -83,6 +87,12 @@ class ICTogglesLayout(Widget):
       "VwVisionCarTypes": (
         lambda: tr("VW: Car Types on Cluster"),
         DESCRIPTIONS["VwVisionCarTypes"],
+        "chffr_wheel.png",
+        False,
+      ),
+      "RainFollowDistance": (
+        lambda: tr("VW: Rain Following Distance"),
+        DESCRIPTIONS["RainFollowDistance"],
         "chffr_wheel.png",
         False,
       ),

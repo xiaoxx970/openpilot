@@ -14,6 +14,7 @@ class ICTogglesLayoutMici(NavScroller):
     enable_long_comfort_mode    = BigParamControl("VW: Longitudinal Comfort Mode", "EnableLongComfortMode")
     enable_sl_control           = BigParamControl("VW: Speed Limit Control", "EnableSpeedLimitControl")
     enable_car_types            = BigParamControl("VW: Car Types on Cluster", "VwVisionCarTypes")
+    enable_rain_follow          = BigParamControl("VW: Rain Following Distance", "RainFollowDistance")
     enable_sl_pred_control      = BigParamControl("VW: Predicative Speed Limit (pACC)", "EnableSpeedLimitPredicative")
     enable_sl_pred_sl           = BigParamControl("VW: Predicative - Reaction to Speed Limits", "EnableSLPredReactToSL")
     enable_sl_pred_curve        = BigParamControl("VW: Predicative - Reaction to Curves", "EnableSLPredReactToCurves")
@@ -34,6 +35,7 @@ class ICTogglesLayoutMici(NavScroller):
       enable_long_comfort_mode,
       enable_sl_control,
       enable_car_types,
+      enable_rain_follow,
       enable_sl_pred_control,
       enable_sl_pred_sl,
       enable_sl_pred_curve,
@@ -52,6 +54,7 @@ class ICTogglesLayoutMici(NavScroller):
       ("EnableLongComfortMode", enable_long_comfort_mode),
       ("EnableSpeedLimitControl", enable_sl_control),
       ("VwVisionCarTypes", enable_car_types),
+      ("RainFollowDistance", enable_rain_follow),
       ("EnableSpeedLimitPredicative", enable_sl_pred_control),
       ("EnableSLPredReactToSL", enable_sl_pred_sl),
       ("EnableSLPredReactToCurves", enable_sl_pred_curve),
