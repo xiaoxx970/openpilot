@@ -67,6 +67,7 @@ class Plant:
     car_state = messaging.new_message('carState')
     model = messaging.new_message('modelV2')
     car_state_sp = messaging.new_message('carStateSP')
+    car_state_ic = messaging.new_message('carStateIC')
     live_map_data_sp = messaging.new_message('liveMapDataSP')
     gps_data = messaging.new_message('gpsLocation')
     car_control = messaging.new_message('carControl')
@@ -134,6 +135,7 @@ class Plant:
           'selfdriveState': ss.selfdriveState,
           'modelV2': model.modelV2,
           'carStateSP': car_state_sp.carStateSP,
+          'carStateIC': car_state_ic.carStateIC,
           'liveMapDataSP': live_map_data_sp.liveMapDataSP,
           'gpsLocation': gps_data.gpsLocation}
     self.planner.update(sm)
