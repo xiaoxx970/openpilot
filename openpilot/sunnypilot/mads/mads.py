@@ -37,7 +37,7 @@ class ModularAssistiveDrivingSystem:
     self.lateral_mismatch_counter = 0
     self.main_cruise_drop_while_braking = False
     self.wrong_gear_prev = True
-    self.door_open_prev = True
+    self.driver_door_open_prev = True
     self.seatbelt_unlatched_prev = True
     self.allow_always = False
     self.no_main_cruise = False
@@ -138,15 +138,16 @@ class ModularAssistiveDrivingSystem:
       self.lateral_mismatch_counter += 1
 
   def update_events(self, CS: structs.CarState):
-    # Leaving drive at any speed, or opening a door or unlatching the seatbelt at a standstill, disengages MADS
-    # with one chime instead of a soft disable countdown. Only the frame it happens on does: MADS that was
-    # paused or enabled while already in that state (main switch at P after starting) keeps waiting silently.
+    # Leaving drive at any speed, or opening the driver's door or unlatching the seatbelt at a standstill, disengages
+    # MADS with one chime instead of a soft disable countdown. Only the frame it happens on does: MADS that was paused
+    # or enabled while already in that state (main switch at P after starting) keeps waiting silently. Any other door
+    # (a passenger getting out) only pauses MADS, as upstream does.
     wrong_gear = self.events.has(EventName.wrongGear)
     left_drive = wrong_gear and not self.wrong_gear_prev
     self.wrong_gear_prev = wrong_gear
-    door_open = self.events.has(EventName.doorOpen)
-    door_opened = door_open and not self.door_open_prev and CS.standstill
-    self.door_open_prev = door_open
+    driver_door_open = self.selfdrive.sm['carStateIC'].driverDoorOpen
+    door_opened = driver_door_open and not self.driver_door_open_prev and CS.standstill
+    self.driver_door_open_prev = driver_door_open
     seatbelt_unlatched = self.events.has(EventName.seatbeltNotLatched)
     seatbelt_unlatched_now = seatbelt_unlatched and not self.seatbelt_unlatched_prev and CS.standstill
     self.seatbelt_unlatched_prev = seatbelt_unlatched

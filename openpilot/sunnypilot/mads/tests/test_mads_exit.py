@@ -9,7 +9,8 @@ EventName = log.OnroadEvent.EventName
 EventNameSP = custom.OnroadEventSP.EventName
 
 
-def step(mads, sd, cs, events=(), events_sp=()):
+def step(mads, sd, cs, events=(), events_sp=(), driver_door=False):
+  sd.sm['carStateIC'] = custom.CarStateIC.new_message(driverDoorOpen=driver_door)
   for e in events:
     sd.events.add(e)
   for e in events_sp:
@@ -60,11 +61,25 @@ class TestMadsExit(OpenpilotTestCase):
     step(mads, sd, make_car_state(standstill=True), events=[EventName.wrongGear])
     assert mads.state_machine.state == State.disabled
 
-  def test_door_opened_at_standstill_disengages(self, mocker):
+  def test_driver_door_opened_at_standstill_disengages(self, mocker):
     mads, sd = make_enabled_mads(mocker)
-    step(mads, sd, make_car_state(standstill=True), events=[EventName.doorOpen])
+    step(mads, sd, make_car_state(standstill=True), events=[EventName.doorOpen], driver_door=True)
     assert mads.state_machine.state == State.disabled
     assert user_disable_alerted(sd)
+
+  def test_passenger_door_opened_at_standstill_pauses(self, mocker):
+    mads, sd = make_enabled_mads(mocker)
+    step(mads, sd, make_car_state(standstill=True), events=[EventName.doorOpen])
+    assert mads.state_machine.state == State.paused  # a silent pause, not a disengage
+    step(mads, sd, make_car_state(standstill=True))
+    assert mads.state_machine.state == State.enabled
+
+  def test_driver_door_after_passenger_door_disengages(self, mocker):
+    mads, sd = make_enabled_mads(mocker)
+    step(mads, sd, make_car_state(standstill=True), events=[EventName.doorOpen])
+    assert mads.state_machine.state == State.paused
+    step(mads, sd, make_car_state(standstill=True), events=[EventName.doorOpen], driver_door=True)
+    assert mads.state_machine.state == State.disabled
 
   def test_seatbelt_unlatched_at_standstill_disengages(self, mocker):
     mads, sd = make_enabled_mads(mocker)
@@ -73,7 +88,7 @@ class TestMadsExit(OpenpilotTestCase):
 
   def test_door_opened_while_moving_still_soft_disables(self, mocker):
     mads, sd = make_enabled_mads(mocker)
-    step(mads, sd, make_car_state(v_ego=5.0), events=[EventName.doorOpen])
+    step(mads, sd, make_car_state(v_ego=5.0), events=[EventName.doorOpen], driver_door=True)
     assert mads.state_machine.state == State.softDisabling
 
   def test_enabled_at_park_waits_for_drive(self, mocker):
