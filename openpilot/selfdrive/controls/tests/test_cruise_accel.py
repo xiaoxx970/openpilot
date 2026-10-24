@@ -4,10 +4,10 @@ import numpy as np
 
 from opendbc.car.interfaces import ACCEL_MAX
 
-from openpilot.cereal import log
+from openpilot.cereal import log, messaging
 from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
-from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_decel, LeadClosingLimit, \
+from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_decel, LeadClosingLimit, J_CRUISE_APPROACH, \
                                                                   LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
                                                                   LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL
 
@@ -36,9 +36,38 @@ def run(limit, v_cruise, v_ego, leads, personality=Personality.relaxed):
 
 class TestCruiseAccelLimits:
   def test_accel_left_to_e2e(self):
-    # speeding up is shaped by the always-present e2e candidate, cruise only caps it at ACCEL_MAX
+    # far below the set speed, speeding up is shaped by the always-present e2e candidate, cruise only caps it at ACCEL_MAX
     for personality in (Personality.relaxed, Personality.standard, Personality.aggressive):
-      np.testing.assert_allclose(settled_cruise_accel(35., 25., personality), ACCEL_MAX, atol=1e-3)
+      np.testing.assert_allclose(settled_cruise_accel(45., 25., personality), ACCEL_MAX, atol=1e-3)
+
+  def test_approach_tapers_by_personality(self):
+    # 3 km/h below the set speed: accel already easing off, gentlest for relaxed
+    v_error = 3. * CV.KPH_TO_MS
+    accels = [settled_cruise_accel(25. + v_error, 25., p) for p in (Personality.relaxed, Personality.standard, Personality.aggressive)]
+    np.testing.assert_allclose(accels, np.sqrt(2. * np.array(J_CRUISE_APPROACH) * v_error), atol=1e-3)
+    assert accels[0] < accels[1] < accels[2] < v_error
+
+  def test_approach_ramp_jerk(self):
+    # driving up to the set speed from 15 km/h below, the command winds down at the approach jerk; where the taper hands
+    # over to the 1 s gain for the last fraction of a km/h the jerk briefly doubles, at a command of only 2 * J
+    for personality, j_approach in zip((Personality.relaxed, Personality.standard, Personality.aggressive), J_CRUISE_APPROACH, strict=True):
+      v, a, accels = 25., 0., []
+      v_cruise = v + 15. * CV.KPH_TO_MS
+      for _ in range(int(30. / DT)):
+        a = get_cruise_accel(v_cruise, v, a, DT, personality)
+        v += a * DT
+        accels.append(a)
+      falling = -np.diff(accels[np.argmax(accels):]) / DT
+      assert falling.max() < 2. * j_approach * 1.05
+      assert np.median(falling[falling > 1e-3]) < j_approach * 1.05
+      assert v_cruise - v < 0.1 and v <= v_cruise
+
+  def test_personality_from_a_message(self):
+    # the planner gets the enum read back from selfdriveState, which must hit the same values as the int constants
+    msg = messaging.new_message('selfdriveState')
+    msg.selfdriveState.personality = Personality.relaxed
+    personality = messaging.log_from_bytes(msg.to_bytes()).selfdriveState.personality
+    np.testing.assert_allclose(settled_cruise_accel(15., 25., personality), -get_max_decel(25.) * 0.75, atol=1e-3)
 
   def test_decel_scaled_by_personality(self):
     v_ego = 25.
