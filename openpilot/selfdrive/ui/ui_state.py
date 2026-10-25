@@ -58,6 +58,7 @@ class UIState(UIStateSP):
       "carControlIC",
       "carParamsIC",
       "longitudinalPlanIC",
+      "selfdriveStateIC",
     ]
     self.sm = messaging.SubMaster(
       [
