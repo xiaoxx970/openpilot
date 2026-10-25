@@ -7,6 +7,7 @@ from opendbc.car.interfaces import ACCEL_MAX
 
 from openpilot.cereal import log, messaging
 from openpilot.common.constants import CV
+from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor, \
                                                                        get_rain_T_FOLLOW
 from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_decel, LeadClosingLimit, J_CRUISE_APPROACH, \
@@ -14,7 +15,8 @@ from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_acc
                                                                   CoastBandHold, COAST_BAND_HOLD_TIME, PullAwayAssist, PULL_AWAY_JERK, \
                                                                   PULL_AWAY_RELEASE_JERK, PULL_AWAY_MAX_ACCEL, \
                                                                   LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
-                                                                  LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL
+                                                                  LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL, \
+                                                                  E2EDeadband, E2E_DEADBAND_MARGIN
 
 Personality = log.LongitudinalPersonality
 DT = 0.05
@@ -231,6 +233,82 @@ class TestPullAwayAssist(unittest.TestCase):
     assist = PullAwayAssist(DT)
     out = [assist.update(0.1, 1.5, ld, self.V, Personality.standard, t_rain) for _ in range(int(4 / DT))]
     self.assertAlmostEqual(out[-1], 0.1)
+
+
+class TestE2EDeadband(unittest.TestCase):
+  V = 22.  # m/s, 80 km/h
+  A_PLAN = 0.3  # the lead-aware plan (lower of MPC and cruise)
+
+  @classmethod
+  def model(cls, should_stop=False, hard_brake=False, lead_x=None, lat_accel=0.):
+    n = len(ModelConstants.T_IDXS)
+    return SimpleNamespace(action=SimpleNamespace(shouldStop=should_stop), meta=SimpleNamespace(hardBrakePredicted=hard_brake),
+                           leadsV3=[SimpleNamespace(prob=0.9, x=[lead_x])] if lead_x is not None else [],
+                           orientationRate=SimpleNamespace(z=[lat_accel / cls.V] * n), velocity=SimpleNamespace(x=[cls.V] * n))
+
+  @classmethod
+  def radar_lead(cls, d_rel, a_lead=0., radar=True):
+    return SimpleNamespace(present=True, radar=radar, dRel=d_rel, vLead=cls.V, aLeadK=a_lead)
+
+  def far_lead(self, personality, a_lead=0.):
+    return self.radar_lead(2. * desired_distance(self.V, personality), a_lead)
+
+  def follow(self, a_e2e, lead, model, personality, seconds=5., deadband=None):
+    deadband = deadband or E2EDeadband(DT)
+    out = a_e2e
+    for _ in range(int(seconds / DT)):
+      out = deadband.update(a_e2e, self.A_PLAN, lead, model, self.V, personality, get_T_FOLLOW(personality))
+    return out, deadband
+
+  def test_far_lead_margin_by_personality(self):
+    # the model asks 0.4 below the plan for a lead twice the following distance ahead (the 10-25 bookmark)
+    for personality, margin in zip((Personality.relaxed, Personality.standard, Personality.aggressive), E2E_DEADBAND_MARGIN, strict=True):
+      out, _ = self.follow(self.A_PLAN - 0.4, self.far_lead(personality), self.model(), personality)
+      np.testing.assert_allclose(out, self.A_PLAN - max(0., 0.4 - margin), atol=1e-2)
+
+  def test_strong_request_passes_beyond_the_margin(self):
+    out, _ = self.follow(self.A_PLAN - 1.5, self.far_lead(Personality.aggressive), self.model(), Personality.aggressive)
+    np.testing.assert_allclose(out, self.A_PLAN - 1.0, atol=1e-2)
+
+  def test_model_above_the_plan_untouched(self):
+    out, _ = self.follow(0.8, self.far_lead(Personality.aggressive), self.model(), Personality.aggressive)
+    self.assertEqual(out, 0.8)
+
+  def test_margin_fades_in(self):
+    deadband = E2EDeadband(DT)
+    lead = self.far_lead(Personality.aggressive)
+    outs = [deadband.update(-0.1, self.A_PLAN, lead, self.model(), self.V, Personality.aggressive, get_T_FOLLOW(Personality.aggressive))
+            for _ in range(int(2. / DT))]
+    self.assertLess(outs[0], -0.05)  # barely touched on the first frame
+    self.assertLess(np.abs(np.diff(outs)).max(), 0.03)  # never switched in one step
+
+  def test_stop_and_hard_brake_pass_at_once(self):
+    lead = self.far_lead(Personality.aggressive)
+    for model in (self.model(should_stop=True), self.model(hard_brake=True)):
+      _, deadband = self.follow(-0.1, lead, self.model(), Personality.aggressive)
+      out, deadband = self.follow(-0.1, lead, model, Personality.aggressive, seconds=DT, deadband=deadband)
+      self.assertEqual(out, -0.1)
+      self.assertEqual(deadband.weight, 0.)
+
+  def test_cut_in_and_curve_hand_back_to_the_model(self):
+    lead = self.far_lead(Personality.aggressive)
+    for model in (self.model(lead_x=lead.dRel / 3.), self.model(lat_accel=1.5)):
+      _, deadband = self.follow(-0.1, lead, self.model(), Personality.aggressive)
+      out, _ = self.follow(-0.1, lead, model, Personality.aggressive, seconds=1.5, deadband=deadband)
+      np.testing.assert_allclose(out, -0.1, atol=1e-2)
+
+  def test_lead_braking_near_the_following_distance(self):
+    # at the following distance a lead braking at 1 m/s^2 gets the model's early reaction; far ahead the margin stays
+    near = self.radar_lead(desired_distance(self.V, Personality.aggressive), a_lead=-1.)
+    out, _ = self.follow(-0.6, near, self.model(), Personality.aggressive)
+    np.testing.assert_allclose(out, -0.6, atol=1e-3)
+    out, _ = self.follow(-0.6, self.far_lead(Personality.aggressive, a_lead=-1.), self.model(), Personality.aggressive)
+    np.testing.assert_allclose(out, self.A_PLAN - 0.4, atol=1e-2)
+
+  def test_vision_lead_and_no_lead_left_to_the_model(self):
+    for lead in (self.radar_lead(60., radar=False), SimpleNamespace(present=False, radar=False, dRel=0., vLead=0., aLeadK=0.)):
+      out, _ = self.follow(-0.1, lead, self.model(), Personality.aggressive)
+      np.testing.assert_allclose(out, -0.1, atol=1e-9)
 
 
 class TestCoastBandHold(unittest.TestCase):
