@@ -62,6 +62,22 @@ PULL_AWAY_JERK = 1.                    # m/s^3 the allowance rises at
 PULL_AWAY_RELEASE_JERK = 1.5           # m/s^3 it falls at once the lead stops pulling away
 PULL_AWAY_MODEL_VETO = -0.2            # m/s^2; as the model asks to slow from 0 down to this, the allowance is taken away at once
 PULL_AWAY_SPEED_BP = [3., 6.]          # m/s it fades in over; launches from a stop stay with the model
+# While a radar lead is followed, the e2e candidate only counts where it asks to slow by more than a personality margin below
+# the lead-aware plan (the lower of the MPC and cruise). The model has no personality input and, since upstream dropped the
+# chill mode, is always in the min(): on 2026-10-25 (aggressive, 80 km/h) the car slowed for a lead 80 m ahead with a desired
+# distance of 30-45 m, and in steady following the command switched between the model and the MPC 40 times a minute (16 on
+# the ACC-mode planner of 10-24). The margin fades in and out instead of switching on and off.
+E2E_DEADBAND_MARGIN = (0., 0.25, 0.5)      # m/s^2, relaxed/standard/aggressive
+E2E_DEADBAND_RISE_TAU = 1.                 # s the margin fades in over while following
+E2E_DEADBAND_FALL_TAU = 0.3                # s it fades out over once not
+E2E_DEADBAND_MAX_LAT_ACCEL = 1.            # m/s^2 predicted within E2E_DEADBAND_LAT_TIME: a curve ahead, the model keeps its say
+E2E_DEADBAND_LAT_TIME = 6.                 # s
+E2E_DEADBAND_LAT_IDX = int(np.searchsorted(ModelConstants.T_IDXS, E2E_DEADBAND_LAT_TIME, side='right'))
+E2E_DEADBAND_CUT_IN_PROB = 0.5             # a model lead this likely, closer than the radar lead by the larger of
+E2E_DEADBAND_CUT_IN_DISTANCE = 10.         # this (m)
+E2E_DEADBAND_CUT_IN_SHARE = 0.3            # and this share of its distance, is a cut-in: the model keeps its say
+E2E_DEADBAND_FAR_BP = [1.2, 1.6]           # lead distance over desired distance: the margin always applies past the upper point,
+E2E_DEADBAND_LEAD_BRAKE_BP = [-0.8, -0.3]  # m/s^2 and closer in only while the radar lead brakes less than this
 # The car reports whether the engine delivers torque and whether ACC is braking; between the two it coasts.
 # A cruise command that flips across that band every second or two (holding a speed downhill) is felt as a
 # throttle/drag lurch each time; one that moves within the throttle side (holding a set speed on the flat) is not.
@@ -163,6 +179,59 @@ class PullAwayAssist:
     self.allowance = float(np.clip(target, self.allowance - jerk * self.dt, self.allowance + jerk * self.dt))
     lifted = max(a_e2e, min(a_mpc, self.allowance))
     return a_e2e + float(np.interp(a_e2e, [PULL_AWAY_MODEL_VETO, 0.], [0., 1.])) * (lifted - a_e2e)
+
+
+def get_lat_accel_ahead(model):
+  # the largest lateral acceleration the model predicts within E2E_DEADBAND_LAT_TIME
+  yaw_rate, speed = model.orientationRate.z, model.velocity.x
+  n = min(len(yaw_rate), len(speed), E2E_DEADBAND_LAT_IDX)
+  return max((abs(yaw_rate[i] * speed[i]) for i in range(n)), default=0.)
+
+
+def model_cut_in(model, lead):
+  # the model sees a car well closer than the radar lead
+  if not len(model.leadsV3) or not len(model.leadsV3[0].x):
+    return False
+  model_lead = model.leadsV3[0]
+  return bool(model_lead.prob > E2E_DEADBAND_CUT_IN_PROB and
+              model_lead.x[0] < lead.dRel - max(E2E_DEADBAND_CUT_IN_DISTANCE, E2E_DEADBAND_CUT_IN_SHARE * lead.dRel))
+
+
+class E2EDeadband:
+  """Keeps the model from slowing for a radar lead the MPC already follows, by personality.
+
+  While a radar lead is followed, only the part of the e2e request more than E2E_DEADBAND_MARGIN below the lead-aware
+  plan passes. The margin's weight rises over E2E_DEADBAND_RISE_TAU and falls over E2E_DEADBAND_FALL_TAU, so the gate never
+  switches the command in one step. It drops at once when the model asks to stop or predicts hard braking, and fades out
+  with a curve ahead or a model lead well closer than the radar lead (a cut-in). Near the following distance the margin
+  only applies while the radar lead is not braking, so a lead braking close ahead still gets the model's early reaction.
+  """
+  def __init__(self, dt):
+    self.dt = dt
+    self.weight = 0.
+    self.margin = 0.
+
+  def reset(self):
+    self.weight = 0.
+    self.margin = 0.
+
+  def update(self, a_e2e, a_ref, lead, model, v_ego, personality, t_follow):
+    if model.action.shouldStop or model.meta.hardBrakePredicted:
+      self.weight = self.margin = 0.
+      return a_e2e
+    following = bool(lead.present and lead.radar) and get_lat_accel_ahead(model) < E2E_DEADBAND_MAX_LAT_ACCEL and \
+                not model_cut_in(model, lead)
+    tau = E2E_DEADBAND_RISE_TAU if following else E2E_DEADBAND_FALL_TAU
+    self.weight += (float(following) - self.weight) * self.dt / (tau + self.dt)
+
+    desired_distance = get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(lead.vLead)
+    far = float(np.interp(lead.dRel / max(desired_distance, 1.), E2E_DEADBAND_FAR_BP, [0., 1.]))
+    calm = float(np.interp(lead.aLeadK, E2E_DEADBAND_LEAD_BRAKE_BP, [0., 1.]))
+    self.margin = personality_value(personality, E2E_DEADBAND_MARGIN) * self.weight * max(far, calm)
+    deficit = a_ref - a_e2e
+    if deficit <= 0.:
+      return a_e2e
+    return a_ref - max(0., deficit - self.margin)
 
 
 class CoastBandHold:
@@ -313,6 +382,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.a_cruise = init_a
     self.lead_closing_limit = LeadClosingLimit(self.dt)
     self.pull_away = PullAwayAssist(self.dt)
+    self.e2e_deadband = E2EDeadband(self.dt)
     self.params = Params()
     try:
       saved = self.params.get(COAST_BAND_PARAM)
@@ -351,6 +421,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.output_a_target = np.clip(sm['carState'].aEgo, ACCEL_MIN, ACCEL_MAX)
       self.a_cruise = self.output_a_target
       self.pull_away.reset()
+      self.e2e_deadband.reset()
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
@@ -393,6 +464,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     output_a_target_e2e = self.accel_boost.update(sm, output_a_target_e2e, output_a_target_mpc, self.a_cruise)
+    output_a_target_e2e = self.e2e_deadband.update(output_a_target_e2e, min(output_a_target_mpc, self.a_cruise), sm['radarState'].leadOne,
+                                                   sm['modelV2'], v_ego, sm['selfdriveState'].personality, t_follow)
     output_a_target_e2e = self.pull_away.update(output_a_target_e2e, output_a_target_mpc, sm['radarState'].leadOne, v_ego,
                                                 sm['selfdriveState'].personality, t_follow)
 
@@ -462,6 +535,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     plan_ic_send.longitudinalPlanIC.coastBandLearnCount = hold.learn_count
     plan_ic_send.longitudinalPlanIC.coastBandHolding = bool(hold.holding)
     plan_ic_send.longitudinalPlanIC.pullAwayAllowance = float(self.pull_away.allowance)
+    plan_ic_send.longitudinalPlanIC.e2eDeadbandMargin = float(self.e2e_deadband.margin)
     pm.send('longitudinalPlanIC', plan_ic_send)
 
     self.publish_longitudinal_plan_sp(sm, pm)
