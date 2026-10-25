@@ -7,10 +7,12 @@ from opendbc.car.interfaces import ACCEL_MAX
 
 from openpilot.cereal import log, messaging
 from openpilot.common.constants import CV
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor, \
+                                                                       get_rain_T_FOLLOW
 from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_decel, LeadClosingLimit, J_CRUISE_APPROACH, \
                                                                   CRUISE_APPROACH_LOOKAHEAD, \
-                                                                  CoastBandHold, COAST_BAND_HOLD_TIME, \
+                                                                  CoastBandHold, COAST_BAND_HOLD_TIME, PullAwayAssist, PULL_AWAY_JERK, \
+                                                                  PULL_AWAY_RELEASE_JERK, PULL_AWAY_MAX_ACCEL, \
                                                                   LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
                                                                   LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL
 
@@ -107,9 +109,16 @@ class TestCruiseAccelLimits(unittest.TestCase):
     for personality in (Personality.relaxed, Personality.standard, Personality.aggressive):
       np.testing.assert_allclose(settled_cruise_accel(15., 25., personality, lead_capped=True), LEAD_CLOSE_MIN_ACCEL, atol=1e-3)
 
-  def test_lead_cap_tracks_softly(self):
-    # a small speed error toward the lead cap gives a proportionally small command, not cruise's 1 s gain
-    np.testing.assert_allclose(settled_cruise_accel(25.4, 25., Personality.standard, lead_capped=True), 0.4 / LEAD_CLOSE_ACCEL_TIME, atol=1e-3)
+  def test_lead_cap_eased_toward_from_above(self):
+    # a small excess over the lead cap gives a proportionally small slow-down, not cruise's 1 s gain
+    np.testing.assert_allclose(settled_cruise_accel(24.6, 25., Personality.standard, lead_capped=True), -0.4 / LEAD_CLOSE_ACCEL_TIME, atol=1e-3)
+
+  def test_lead_cap_approached_like_a_set_speed(self):
+    # below the lead cap, which a lead pulling away keeps raising, cruise speeds up to it as it would to a set speed
+    for personality in (Personality.relaxed, Personality.standard, Personality.aggressive):
+      for v_cap in (25.4, 27., 30.):
+        np.testing.assert_allclose(settled_cruise_accel(v_cap, 25., personality, lead_capped=True),
+                                   settled_cruise_accel(v_cap, 25., personality), atol=1e-3)
 
 
 class TestLeadClosingLimit(unittest.TestCase):
@@ -152,6 +161,76 @@ class TestLeadClosingLimit(unittest.TestCase):
 
   def test_lower_set_speed_still_wins(self):
     assert run(LeadClosingLimit(DT), 20., 25., [lead(110., 24.)])[-1] == (20., False)
+
+
+def radar_lead(d_rel, v_lead, a_lead, radar=True):
+  return SimpleNamespace(present=True, radar=radar, dRel=d_rel, vLead=v_lead, aLeadK=a_lead)
+
+
+class TestPullAwayAssist(unittest.TestCase):
+  V = 15.
+  GAP = desired_distance(15., Personality.standard) + 10.  # behind the desired distance
+
+  def feed(self, assist, n, a_e2e=0.1, a_mpc=1.5, ld=None, v=V, personality=Personality.standard):
+    ld = ld or radar_lead(self.GAP, self.V + 0.5, 0.5)
+    return [assist.update(a_e2e, a_mpc, ld, v, personality) for _ in range(n)]
+
+  def test_follows_a_lead_pulling_away(self):
+    # lead 0.5 m/s faster and speeding up at 0.5: the command may reach 0.5 + 0.5 * 0.5 above a model asking 0.1
+    out = self.feed(PullAwayAssist(DT), int(4 / DT))
+    self.assertAlmostEqual(out[-1], 0.75, places=2)
+    self.assertLessEqual(max(np.diff(out)) / DT, PULL_AWAY_JERK + 1e-6)
+
+  def test_never_above_the_mpc(self):
+    self.assertAlmostEqual(self.feed(PullAwayAssist(DT), int(4 / DT), a_mpc=0.3)[-1], 0.3)
+
+  def test_model_asking_more_is_untouched(self):
+    self.assertAlmostEqual(self.feed(PullAwayAssist(DT), int(4 / DT), a_e2e=1.2)[-1], 1.2)
+
+  def test_model_slowing_vetoes_at_once(self):
+    assist = PullAwayAssist(DT)
+    self.feed(assist, int(4 / DT))
+    self.assertEqual(self.feed(assist, 1, a_e2e=-0.2)[-1], -0.2)
+    self.assertLess(self.feed(assist, 1, a_e2e=-0.1)[-1], 0.35)    # halfway to the veto, half the lift
+    self.assertGreater(self.feed(assist, 1, a_e2e=0.)[-1], 0.5)    # the allowance itself is kept for when the model lets go
+
+  def test_releases_gently_when_the_lead_stops_pulling_away(self):
+    assist = PullAwayAssist(DT)
+    self.feed(assist, int(4 / DT))
+    out = self.feed(assist, int(2 / DT), ld=radar_lead(self.GAP, self.V, 0.))
+    self.assertAlmostEqual(out[-1], 0.1)
+    self.assertLessEqual(max(-np.diff(out)) / DT, PULL_AWAY_RELEASE_JERK + 1e-6)
+
+  def test_only_while_pulling_away(self):
+    gap, v_lead = self.GAP, self.V + 0.5
+    inside = get_safe_obstacle_distance(self.V, get_T_FOLLOW(Personality.standard)) - get_stopped_equivalence_factor(v_lead) - 1.
+    cases = {
+      'lead not speeding up': {'ld': radar_lead(gap, v_lead, 0.1)},
+      'lead slower than us': {'ld': radar_lead(gap, self.V - 1., 0.5)},
+      'inside the desired distance': {'ld': radar_lead(inside, v_lead, 0.5)},
+      'vision-only lead': {'ld': radar_lead(gap, v_lead, 0.5, radar=False)},
+      'launching from a stop': {'v': 2.},
+    }
+    for name, kw in cases.items():
+      with self.subTest(name):
+        self.assertAlmostEqual(self.feed(PullAwayAssist(DT), int(4 / DT), **kw)[-1], 0.1)
+
+  def test_capped_by_personality(self):
+    for personality, cap in zip((Personality.relaxed, Personality.standard, Personality.aggressive), PULL_AWAY_MAX_ACCEL, strict=True):
+      out = self.feed(PullAwayAssist(DT), int(4 / DT), ld=radar_lead(self.GAP, self.V + 2., 2.), personality=personality)
+      self.assertAlmostEqual(out[-1], cap, places=3)
+
+  def test_rain_following_distance_moves_the_threshold(self):
+    # a lead beyond the dry desired distance but inside the rain one is only followed without the rain time gap
+    t_rain = get_rain_T_FOLLOW(self.V)
+    v_lead = self.V + 0.5
+    dry = get_safe_obstacle_distance(self.V, get_T_FOLLOW(Personality.standard)) - get_stopped_equivalence_factor(v_lead)
+    rain = get_safe_obstacle_distance(self.V, t_rain) - get_stopped_equivalence_factor(v_lead)
+    ld = radar_lead((dry + rain) / 2, v_lead, 0.5)
+    self.assertGreater(self.feed(PullAwayAssist(DT), int(4 / DT), ld=ld)[-1], 0.5)
+    assist = PullAwayAssist(DT)
+    out = [assist.update(0.1, 1.5, ld, self.V, Personality.standard, t_rain) for _ in range(int(4 / DT))]
+    self.assertAlmostEqual(out[-1], 0.1)
 
 
 class TestCoastBandHold(unittest.TestCase):
