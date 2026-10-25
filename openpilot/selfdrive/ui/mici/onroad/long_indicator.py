@@ -6,6 +6,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget
 
 HIGHLIGHT_TIME = 2.5  # seconds
+RAIN_BLUE = (64, 160, 255)
 
 
 class LongIndicator(Widget):
@@ -20,7 +21,7 @@ class LongIndicator(Widget):
     self._lead_car_filters = (FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps), FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps))
     self._distance_filters = [(FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps), FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps))
                               for _ in range(3)]
-    self._rain_filters = (FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps), FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps))
+    self._rain_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
     self._personality: int | None = None
     self._personality_changed_time = -HIGHLIGHT_TIME
     self._should_draw = False
@@ -64,7 +65,7 @@ class LongIndicator(Widget):
     sm = ui_state.sm
     now = rl.get_time()
     rain_mode = sm.alive['selfdriveStateIC'] and sm['selfdriveStateIC'].rainMode
-    # the rain distance sits one step past relaxed: all bars and a drop
+    # the rain distance sits one step past relaxed: all bars, in blue
     personality = 3 if rain_mode else sm['selfdriveState'].personality.raw
     if self._personality is not None and personality != self._personality:
       self._personality_changed_time = now
@@ -79,29 +80,17 @@ class LongIndicator(Widget):
     blink = 0.35 / 0.9 if overriding and now % 0.375 > 0.1875 else 1.0
 
     count = personality + 1
+    rain_alpha = self._rain_filter.update(float(rain_mode))
     for i, ((white, green), y, (active_f, green_f)) in enumerate(zip(self._txt_distance, (122, 136, 152), self._distance_filters, strict=True)):
       active = active_f.update(float(i < count))
       green_alpha = green_f.update(float(highlight and i == count - 1))
       # only lit bars blink on override
-      self._draw_centered(white, rect, y, (0.35 * (1 - active) + 0.9 * (active - green_alpha) * blink) * alpha)
+      lit = 0.9 * (active - green_alpha) * blink
+      self._draw_centered(white, rect, y, (0.35 * (1 - active) + lit * (1 - rain_alpha)) * alpha)
+      self._draw_centered(white, rect, y, lit * rain_alpha * alpha, RAIN_BLUE)
       self._draw_centered(green, rect, y, green_alpha * blink * alpha)
 
-    white_f, green_f = self._rain_filters
-    green_alpha = green_f.update(float(rain_mode and highlight))
-    white_alpha = white_f.update(float(rain_mode)) - green_alpha
-    self._draw_drop(rect, 172, rl.Color(255, 255, 255, round(255 * 0.9 * max(white_alpha, 0.) * blink * alpha)))
-    self._draw_drop(rect, 172, rl.Color(0, 255, 64, round(255 * green_alpha * blink * alpha)))
-
   @staticmethod
-  def _draw_drop(rect: rl.Rectangle, y: float, color: rl.Color) -> None:
-    if color.a == 0:
-      return
-    # a round bottom under a point, 12 px wide
-    cx, cy, r = rect.x + 46, rect.y + y + 3, 6.
-    rl.draw_circle_v(rl.Vector2(cx, cy), r, color)
-    rl.draw_triangle(rl.Vector2(cx, cy - 2.6 * r), rl.Vector2(cx - r * 0.95, cy - r * 0.3), rl.Vector2(cx + r * 0.95, cy - r * 0.3), color)
-
-  @staticmethod
-  def _draw_centered(texture: rl.Texture, rect: rl.Rectangle, y: float, alpha: float) -> None:
+  def _draw_centered(texture: rl.Texture, rect: rl.Rectangle, y: float, alpha: float, tint: tuple[int, int, int] = (255, 255, 255)) -> None:
     pos = rl.Vector2(rect.x + 46 - texture.width / 2, rect.y + y - texture.height / 2)
-    rl.draw_texture_ex(texture, pos, 0.0, 1.0, rl.Color(255, 255, 255, round(255 * alpha)))
+    rl.draw_texture_ex(texture, pos, 0.0, 1.0, rl.Color(*tint, round(255 * alpha)))
