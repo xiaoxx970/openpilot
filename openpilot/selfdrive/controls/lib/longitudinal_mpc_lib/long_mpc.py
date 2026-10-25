@@ -78,6 +78,17 @@ def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
+# The rain following distance, one step past relaxed: never closer than relaxed, further back the faster.
+# Kept the dry margin to a hard-braking lead for a Golf 8 on economy tyres in the wet (needs 0.4-0.6 s more
+# than in the dry at 100-120 km/h, from published wet and dry stopping distances).
+RAIN_T_FOLLOW_BP = [22.2, 27.8, 33.3]  # 80, 100, 120 km/h
+RAIN_T_FOLLOW_V = [1.75, 1.95, 2.05]
+HEAVY_RAIN_T_FOLLOW_ADD = 0.2
+RAIN_STOP_DISTANCE_ADD = 1.0
+
+def get_rain_T_FOLLOW(v_ego, heavy=False):
+  return float(np.interp(v_ego, RAIN_T_FOLLOW_BP, RAIN_T_FOLLOW_V)) + (HEAVY_RAIN_T_FOLLOW_ADD if heavy else 0.)
+
 def get_stopped_equivalence_factor(v_lead):
   return (v_lead**2) / (2 * COMFORT_BRAKE)
 
@@ -307,8 +318,10 @@ class LongitudinalMpc:
     lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
     return lead_xv
 
-  def update(self, radarstate, personality=log.LongitudinalPersonality.standard):
-    t_follow = get_T_FOLLOW(personality)
+  def update(self, radarstate, personality=log.LongitudinalPersonality.standard, t_follow=None, stop_distance_add=0.):
+    # t_follow overrides the personality's; stop_distance_add moves the obstacle closer, a longer stop distance
+    if t_follow is None:
+      t_follow = get_T_FOLLOW(personality)
 
     lead_xv_0 = self.process_lead(radarstate.leadOne)
     lead_xv_1 = self.process_lead(radarstate.leadTwo)
@@ -329,7 +342,7 @@ class LongitudinalMpc:
 
     self.params[:,0] = ACCEL_MIN
     self.params[:,1] = ACCEL_MAX
-    self.params[:,2] = np.min(x_obstacles, axis=1)
+    self.params[:,2] = np.min(x_obstacles, axis=1) - stop_distance_add
     self.params[:,3] = np.copy(self.a_prev)
     self.params[:,4] = t_follow
     self.params[:,5] = LEAD_DANGER_FACTOR

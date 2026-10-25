@@ -104,6 +104,7 @@ _services: dict[str, tuple] = {
   "carParamsIC": (True, 0.02, 1),
   "controlsStateIC": (True, 100., 10),
   "longitudinalPlanIC": (True, 20., 10),
+  "selfdriveStateIC": (True, 100., 10),
 
   # debug
   "uiDebug": (True, 0., 1),

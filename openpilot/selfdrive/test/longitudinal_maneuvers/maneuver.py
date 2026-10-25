@@ -20,6 +20,7 @@ class Maneuver:
     self.enabled = kwargs.get("enabled", True)
     self.personality = kwargs.get("personality", 0)
     self.force_decel = kwargs.get("force_decel", False)
+    self.rain_level = kwargs.get("rain_level", 0)
 
     self.duration = duration
     self.title = title
@@ -34,6 +35,7 @@ class Maneuver:
       only_radar=self.only_radar,
       personality=self.personality,
       force_decel=self.force_decel,
+      rain_level=self.rain_level,
     )
 
     valid = True

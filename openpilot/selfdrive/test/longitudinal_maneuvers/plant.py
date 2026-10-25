@@ -15,7 +15,7 @@ class Plant:
   messaging_initialized = False
 
   def __init__(self, lead_relevancy=False, speed=0.0, distance_lead=2.0,
-               enabled=True, only_lead2=False, only_radar=False, personality=0, force_decel=False):
+               enabled=True, only_lead2=False, only_radar=False, personality=0, force_decel=False, rain_level=0):
     self.rate = 1. / DT_MDL
 
     if not Plant.messaging_initialized:
@@ -40,6 +40,7 @@ class Plant:
     self.only_lead2 = only_lead2
     self.only_radar = only_radar
     self.personality = personality
+    self.rain_level = rain_level  # > 0: the rain following distance is selected
     self.force_decel = force_decel
 
     self.rk = Ratekeeper(self.rate, print_delay_threshold=100.0)
@@ -64,6 +65,7 @@ class Plant:
     radar = messaging.new_message('radarState')
     control = messaging.new_message('controlsState')
     ss = messaging.new_message('selfdriveState')
+    ss_ic = messaging.new_message('selfdriveStateIC')
     car_state = messaging.new_message('carState')
     model = messaging.new_message('modelV2')
     car_state_sp = messaging.new_message('carStateSP')
@@ -122,6 +124,8 @@ class Plant:
 
     control.controlsState.longControlState = LongCtrlState.pid if self.enabled else LongCtrlState.off
     ss.selfdriveState.personality = self.personality
+    ss_ic.selfdriveStateIC.rainLevel = self.rain_level
+    ss_ic.selfdriveStateIC.rainMode = self.rain_level > 0
     control.controlsState.forceDecel = self.force_decel
     car_state.carState.vEgo = float(self.speed)
     car_state.carState.standstill = bool(self.speed < 0.01)
@@ -133,6 +137,7 @@ class Plant:
           'carControl': car_control.carControl,
           'controlsState': control.controlsState,
           'selfdriveState': ss.selfdriveState,
+          'selfdriveStateIC': ss_ic.selfdriveStateIC,
           'modelV2': model.modelV2,
           'carStateSP': car_state_sp.carStateSP,
           'carStateIC': car_state_ic.carStateIC,
