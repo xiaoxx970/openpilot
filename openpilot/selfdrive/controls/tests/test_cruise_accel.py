@@ -1,3 +1,4 @@
+import unittest
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,6 +9,7 @@ from openpilot.cereal import log, messaging
 from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
 from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_decel, LeadClosingLimit, J_CRUISE_APPROACH, \
+                                                                  CoastBandHold, COAST_BAND_HOLD_TIME, \
                                                                   LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
                                                                   LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL
 
@@ -34,7 +36,7 @@ def run(limit, v_cruise, v_ego, leads, personality=Personality.relaxed):
   return [limit.update(v_cruise, v_ego, ld, personality) for ld in leads]
 
 
-class TestCruiseAccelLimits:
+class TestCruiseAccelLimits(unittest.TestCase):
   def test_accel_left_to_e2e(self):
     # far below the set speed, speeding up is shaped by the always-present e2e candidate, cruise only caps it at ACCEL_MAX
     for personality in (Personality.relaxed, Personality.standard, Personality.aggressive):
@@ -85,7 +87,7 @@ class TestCruiseAccelLimits:
     np.testing.assert_allclose(settled_cruise_accel(25.4, 25., Personality.standard, lead_capped=True), 0.4 / LEAD_CLOSE_ACCEL_TIME, atol=1e-3)
 
 
-class TestLeadClosingLimit:
+class TestLeadClosingLimit(unittest.TestCase):
   def test_no_lead_keeps_set_speed(self):
     assert LeadClosingLimit(DT).update(33., 24., lead(110., 24., present=False), Personality.relaxed) == (33., False)
 
@@ -125,11 +127,6 @@ class TestLeadClosingLimit:
 
   def test_lower_set_speed_still_wins(self):
     assert run(LeadClosingLimit(DT), 20., 25., [lead(110., 24.)])[-1] == (20., False)
-
-
-import unittest
-
-from openpilot.selfdrive.controls.lib.longitudinal_planner import CoastBandHold, COAST_BAND_HOLD_TIME
 
 
 class TestCoastBandHold(unittest.TestCase):
