@@ -46,8 +46,22 @@ LEAD_CLOSE_MIN_SPEED = 0.3
 # Low-pass on the capped target against radar noise, and how long a lead dropout keeps the filter state
 LEAD_CLOSE_FILTER_TAU = 2.
 LEAD_CLOSE_LOST_TIME = 1.
-# Track the capped target with a 4 s time constant instead of cruise's 1 s, so lead noise barely reaches the command
+# Above the capped target, ease toward it with a 4 s time constant instead of cruise's 1 s, so lead noise barely reaches
+# the command. Below it cruise approaches it like a set speed: a lead pulling away raises the cap, and the 4 s gain held
+# the car 7-10 km/h behind it with the gap opening
 LEAD_CLOSE_ACCEL_TIME = 4.
+# While a radar lead speeds up away from us and the gap is beyond the desired distance, the command may follow the lead's
+# own acceleration plus a share of the speed difference even when the model asks for less, never above the MPC's lead
+# plan. On 2026-10-24 the model asked a median 0.13 m/s^2 while leads pulled away at 0.27.
+PULL_AWAY_MIN_LEAD_ACCEL = 0.25        # m/s^2 of low-passed radar lead acceleration that counts as pulling away
+PULL_AWAY_LEAD_ACCEL_TAU = 0.5         # s low-pass on the lead's acceleration
+PULL_AWAY_MIN_REL_SPEED = -0.3         # m/s; a lead slower than us by more than this is not pulling away
+PULL_AWAY_REL_SPEED_GAIN = 0.5         # 1/s on how much faster than us the lead is
+PULL_AWAY_MAX_ACCEL = (0.8, 1.0, 1.2)  # m/s^2, relaxed/standard/aggressive
+PULL_AWAY_JERK = 1.                    # m/s^3 the allowance rises at
+PULL_AWAY_RELEASE_JERK = 1.5           # m/s^3 it falls at once the lead stops pulling away
+PULL_AWAY_MODEL_VETO = -0.2            # m/s^2; as the model asks to slow from 0 down to this, the allowance is taken away at once
+PULL_AWAY_SPEED_BP = [3., 6.]          # m/s it fades in over; launches from a stop stay with the model
 # The car reports whether the engine delivers torque and whether ACC is braking; between the two it coasts.
 # A cruise command that flips across that band every second or two (holding a speed downhill) is felt as a
 # throttle/drag lurch each time; one that moves within the throttle side (holding a set speed on the flat) is not.
@@ -112,6 +126,43 @@ class LeadClosingLimit:
       self.v_target.x = lead.vLead + close_speed
     v_lead_cap = self.v_target.update(lead.vLead + close_speed)
     return (v_lead_cap, True) if v_lead_cap < v_cruise else (v_cruise, False)
+
+
+class PullAwayAssist:
+  """Lets the command follow a radar lead that speeds up away from us when the model asks for less.
+
+  The always-present e2e candidate often asks for about 0.1 m/s^2 while the lead pulls away at 0.3 or more, so the car
+  falls behind and the gap opens. While the radar lead speeds up, is not slower than us, and is beyond the desired
+  distance, the e2e candidate is raised to an allowance of the lead's acceleration plus PULL_AWAY_REL_SPEED_GAIN times
+  the speed difference, never above the MPC's lead plan. The model keeps a veto: as it asks to slow, the allowance
+  is taken away at once.
+  """
+  def __init__(self, dt):
+    self.dt = dt
+    self.a_lead = FirstOrderFilter(0., PULL_AWAY_LEAD_ACCEL_TAU, dt)
+    self.allowance = 0.
+
+  def reset(self):
+    self.a_lead.x = 0.
+    self.allowance = 0.
+
+  def update(self, a_e2e, a_mpc, lead, v_ego, personality, t_follow=None):
+    target = 0.
+    if lead.present and lead.radar:
+      a_lead = self.a_lead.update(lead.aLeadK)
+      v_rel = lead.vLead - v_ego
+      if t_follow is None:
+        t_follow = get_T_FOLLOW(personality)
+      desired_distance = get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(lead.vLead)
+      if a_lead > PULL_AWAY_MIN_LEAD_ACCEL and v_rel > PULL_AWAY_MIN_REL_SPEED and lead.dRel > desired_distance:
+        target = min(a_lead + PULL_AWAY_REL_SPEED_GAIN * max(v_rel, 0.), personality_value(personality, PULL_AWAY_MAX_ACCEL))
+        target *= float(np.interp(v_ego, PULL_AWAY_SPEED_BP, [0., 1.]))
+    else:
+      self.a_lead.x = 0.
+    jerk = PULL_AWAY_JERK if target > self.allowance else PULL_AWAY_RELEASE_JERK
+    self.allowance = float(np.clip(target, self.allowance - jerk * self.dt, self.allowance + jerk * self.dt))
+    lifted = max(a_e2e, min(a_mpc, self.allowance))
+    return a_e2e + float(np.interp(a_e2e, [PULL_AWAY_MODEL_VETO, 0.], [0., 1.])) * (lifted - a_e2e)
 
 
 class CoastBandHold:
@@ -233,9 +284,10 @@ def get_follow_distance(ss_ic, personality, v_ego):
 
 def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt, personality=log.LongitudinalPersonality.standard, lead_capped=False):
   min_accel = -get_max_decel(v_ego) * personality_value(personality, A_CRUISE_MIN_SCALE)
-  if lead_capped:
+  if lead_capped and v_cruise < v_ego:
     target_accel = np.clip((v_cruise - v_ego) / LEAD_CLOSE_ACCEL_TIME, max(min_accel, LEAD_CLOSE_MIN_ACCEL), ACCEL_MAX)
   else:
+    # a set speed, or a lead cap still above us, is approached the same way
     v_error = v_cruise - v_ego
     max_accel = ACCEL_MAX
     if v_error > 0.:
@@ -260,6 +312,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
     self.lead_closing_limit = LeadClosingLimit(self.dt)
+    self.pull_away = PullAwayAssist(self.dt)
     self.params = Params()
     try:
       saved = self.params.get(COAST_BAND_PARAM)
@@ -297,6 +350,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.v_desired_filter.x = v_ego
       self.output_a_target = np.clip(sm['carState'].aEgo, ACCEL_MIN, ACCEL_MAX)
       self.a_cruise = self.output_a_target
+      self.pull_away.reset()
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
@@ -339,6 +393,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     output_a_target_e2e = self.accel_boost.update(sm, output_a_target_e2e, output_a_target_mpc, self.a_cruise)
+    output_a_target_e2e = self.pull_away.update(output_a_target_e2e, output_a_target_mpc, sm['radarState'].leadOne, v_ego,
+                                                sm['selfdriveState'].personality, t_follow)
 
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
                   (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop),
@@ -405,6 +461,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     plan_ic_send.longitudinalPlanIC.coastBandWidth = float(hold.band_width)
     plan_ic_send.longitudinalPlanIC.coastBandLearnCount = hold.learn_count
     plan_ic_send.longitudinalPlanIC.coastBandHolding = bool(hold.holding)
+    plan_ic_send.longitudinalPlanIC.pullAwayAllowance = float(self.pull_away.allowance)
     pm.send('longitudinalPlanIC', plan_ic_send)
 
     self.publish_longitudinal_plan_sp(sm, pm)
