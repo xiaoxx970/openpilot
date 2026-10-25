@@ -7,7 +7,8 @@ from opendbc.car.interfaces import ACCEL_MAX
 
 from openpilot.cereal import log, messaging
 from openpilot.common.constants import CV
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor, \
+                                                                       get_rain_T_FOLLOW
 from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_decel, LeadClosingLimit, J_CRUISE_APPROACH, \
                                                                   CoastBandHold, COAST_BAND_HOLD_TIME, PullAwayAssist, PULL_AWAY_JERK, \
                                                                   PULL_AWAY_RELEASE_JERK, PULL_AWAY_MAX_ACCEL, \
@@ -193,6 +194,18 @@ class TestPullAwayAssist(unittest.TestCase):
     for personality, cap in zip((Personality.relaxed, Personality.standard, Personality.aggressive), PULL_AWAY_MAX_ACCEL, strict=True):
       out = self.feed(PullAwayAssist(DT), int(4 / DT), ld=radar_lead(self.GAP, self.V + 2., 2.), personality=personality)
       self.assertAlmostEqual(out[-1], cap, places=3)
+
+  def test_rain_following_distance_moves_the_threshold(self):
+    # a lead beyond the dry desired distance but inside the rain one is only followed without the rain time gap
+    t_rain = get_rain_T_FOLLOW(self.V)
+    v_lead = self.V + 0.5
+    dry = get_safe_obstacle_distance(self.V, get_T_FOLLOW(Personality.standard)) - get_stopped_equivalence_factor(v_lead)
+    rain = get_safe_obstacle_distance(self.V, t_rain) - get_stopped_equivalence_factor(v_lead)
+    ld = radar_lead((dry + rain) / 2, v_lead, 0.5)
+    self.assertGreater(self.feed(PullAwayAssist(DT), int(4 / DT), ld=ld)[-1], 0.5)
+    assist = PullAwayAssist(DT)
+    out = [assist.update(0.1, 1.5, ld, self.V, Personality.standard, t_rain) for _ in range(int(4 / DT))]
+    self.assertAlmostEqual(out[-1], 0.1)
 
 
 class TestCoastBandHold(unittest.TestCase):

@@ -389,7 +389,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     output_a_target_e2e = self.accel_boost.update(sm, output_a_target_e2e, output_a_target_mpc, self.a_cruise)
     output_a_target_e2e = self.pull_away.update(output_a_target_e2e, output_a_target_mpc, sm['radarState'].leadOne, v_ego,
-                                                sm['selfdriveState'].personality)
+                                                sm['selfdriveState'].personality, t_follow)
 
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
                   (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop),
