@@ -505,6 +505,7 @@ struct LongitudinalPlanIC @0xbd443b539493bc68 {
   coastBandWidth @5 :Float32;      # learnt throttle-off minus brake-on
   coastBandLearnCount @6 :UInt32;  # car flag edges accepted this drive
   coastBandHolding @7 :Bool;       # a state change is being held back right now
+  pullAwayAllowance @8 :Float32;   # accel a radar lead pulling away lets the command reach above the model, m/s^2
 }
 
 struct CarStateIC @0xfc6241ed8877b611 {
