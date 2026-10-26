@@ -9,13 +9,13 @@ from openpilot.cereal import log, messaging
 from openpilot.common.constants import CV
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor, \
-                                                                       get_rain_T_FOLLOW
+                                                                       get_rain_T_FOLLOW, STOP_DISTANCE
 from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_decel, LeadClosingLimit, J_CRUISE_APPROACH, \
                                                                   CoastBandHold, COAST_BAND_HOLD_TIME, PullAwayAssist, PULL_AWAY_JERK, \
                                                                   PULL_AWAY_RELEASE_JERK, PULL_AWAY_MAX_ACCEL, \
                                                                   LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
                                                                   LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL, \
-                                                                  E2EDeadband, E2E_DEADBAND_MARGIN
+                                                                  LEAD_CLOSE_STOP_DECEL, LEAD_CLOSE_TIME, E2EDeadband, E2E_DEADBAND_MARGIN
 
 Personality = log.LongitudinalPersonality
 DT = 0.05
@@ -138,6 +138,25 @@ class TestLeadClosingLimit(unittest.TestCase):
 
   def test_lower_set_speed_still_wins(self):
     assert run(LeadClosingLimit(DT), 20., 25., [lead(110., 24.)])[-1] == (20., False)
+
+  def test_stopped_lead_closed_on_at_a_stoppable_speed(self):
+    # 2026-10-26 19:54: the gap law held cruise at 1-2 km/h for the last metres up to a car stopped at a red light
+    v_ego, d = 1.5, 15.
+    v_target, capped = run(LeadClosingLimit(DT), 50 * CV.KPH_TO_MS, v_ego, [lead(d, 0.)] * 200)[-1]
+    assert capped
+    np.testing.assert_allclose(v_target, np.sqrt(2 * LEAD_CLOSE_STOP_DECEL * (d - STOP_DISTANCE)), atol=1e-3)
+    assert v_target > 4 * LEAD_CLOSE_MIN_SPEED
+
+  def test_stopped_lead_at_the_stopping_point_keeps_the_floor(self):
+    v_target, _ = run(LeadClosingLimit(DT), 50 * CV.KPH_TO_MS, 0.5, [lead(STOP_DISTANCE - 0.5, 0.)] * 200)[-1]
+    np.testing.assert_allclose(v_target, LEAD_CLOSE_MIN_SPEED, atol=1e-3)
+
+  def test_moving_lead_keeps_the_gap_law(self):
+    v_ego, v_lead, d = 8., 5., 30.
+    gap = d - desired_distance(v_ego, Personality.relaxed) - (get_stopped_equivalence_factor(v_ego) - get_stopped_equivalence_factor(v_lead))
+    expected = v_lead + np.clip(gap / LEAD_CLOSE_TIME, LEAD_CLOSE_MIN_SPEED, LEAD_CLOSE_MAX_SPEED)
+    v_target, _ = run(LeadClosingLimit(DT), 50 * CV.KPH_TO_MS, v_ego, [lead(d, v_lead)] * 200)[-1]
+    np.testing.assert_allclose(v_target, expected, atol=1e-3)
 
 
 def radar_lead(d_rel, v_lead, a_lead, radar=True):

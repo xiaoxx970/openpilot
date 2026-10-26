@@ -13,7 +13,7 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor, \
-                                                                       get_rain_T_FOLLOW, RAIN_STOP_DISTANCE_ADD
+                                                                       get_rain_T_FOLLOW, RAIN_STOP_DISTANCE_ADD, STOP_DISTANCE
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, get_speed_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.cereal import log
@@ -39,6 +39,11 @@ LEAD_CLOSE_TIME = 20.
 LEAD_CLOSE_MIN_ACCEL = -0.3
 # Closing speed never drops below this, so in steady following cruise sits just above the MPC instead of fighting it
 LEAD_CLOSE_MIN_SPEED = 0.3
+# Toward a stopped lead the gap / LEAD_CLOSE_TIME law crawls the last metres in at walking pace. There cruise may instead
+# close at the speed from which this decel stops at the MPC's stopping point, fully for a lead at or below the first speed
+# (m/s), fading out by the second. It sits below LEAD_CLOSE_MIN_ACCEL so easing off at that limit can keep up with it
+LEAD_CLOSE_STOP_DECEL = 0.2
+LEAD_CLOSE_STOPPED_BP = [1., 3.]
 # Low-pass on the capped target against radar noise, and how long a lead dropout keeps the filter state
 LEAD_CLOSE_FILTER_TAU = 2.
 LEAD_CLOSE_LOST_TIME = 1.
@@ -111,8 +116,9 @@ class LeadClosingLimit:
 
   Cruise may run at most LEAD_CLOSE_MAX_SPEED faster than the lead, scaled down as the gap beyond the
   MPC's desired distance shrinks, but never below LEAD_CLOSE_MIN_SPEED. That floor keeps cruise just above
-  the MPC in steady following, so the MPC alone shapes the follow there. The target is low-passed so radar
-  noise on vLead does not reach the accel command.
+  the MPC in steady following, so the MPC alone shapes the follow there. A stopped lead may instead be closed
+  on at the speed that easing off stops from at the desired distance; stopping there is still the MPC's job.
+  The target is low-passed so radar noise on vLead does not reach the accel command.
   """
   def __init__(self, dt):
     self.dt = dt
@@ -132,7 +138,13 @@ class LeadClosingLimit:
     if t_follow is None:
       t_follow = get_T_FOLLOW(personality)
     desired_distance = get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(lead.vLead)
-    close_speed = float(np.clip((lead.dRel - desired_distance) / LEAD_CLOSE_TIME, LEAD_CLOSE_MIN_SPEED, LEAD_CLOSE_MAX_SPEED))
+    gap = lead.dRel - desired_distance
+    close_speed = float(np.clip(gap / LEAD_CLOSE_TIME, LEAD_CLOSE_MIN_SPEED, LEAD_CLOSE_MAX_SPEED))
+    # 2026-10-26 19:54: after a lane change, a car stopped 36 m ahead was crept up on at 1-2 km/h for 8 s
+    stopped = float(np.interp(lead.vLead, LEAD_CLOSE_STOPPED_BP, [1., 0.]))
+    stop_gap = lead.dRel - STOP_DISTANCE
+    if stopped > 0. and stop_gap > 0.:
+      close_speed = max(close_speed, stopped * float(np.sqrt(2. * LEAD_CLOSE_STOP_DECEL * stop_gap)))
     if not self.active:
       self.active = True
       self.v_target.x = lead.vLead + close_speed
