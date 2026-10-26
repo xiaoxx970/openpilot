@@ -202,6 +202,12 @@ class ModularAssistiveDrivingSystem:
     if selfdrive_enable_events:
       if self.pedal_pressed_non_gas_pressed(CS):
         self.events_sp.add(EventNameSP.pedalPressedAlertOnly)
+        # SET/RES with the brake pressed while moving, or just pressed: panda clears controls_allowed on every such frame,
+        # so it never sees the rising edge that grants MADS lateral, and lateral engaged here only ends in "Controls
+        # Mismatch: Lateral" 2 s later (2026-09-23, 2026-10-25). Ignore the press for MADS too, as for longitudinal.
+        if not self.enabled:
+          self.events.remove(EventName.pcmEnable)
+          self.events.remove(EventName.buttonEnable)
 
       if self.block_unified_engagement_mode():
         self.events.remove(EventName.pcmEnable)
