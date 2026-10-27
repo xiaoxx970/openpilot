@@ -4,15 +4,19 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+from collections import deque
+
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
-from openpilot.cereal import custom
+from openpilot.cereal import custom, log
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
+from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control import MIN_V
+from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.curve_speed import CurveSpeedPlanner
 
 VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.VisionState
 
@@ -50,6 +54,17 @@ CURVE_RIGHT = 1
 CURVE_S_BEND = 2
 _S_BEND_RATIO = 0.6  # both directions reach this share of the peak lateral accel ahead -> S-bend
 
+# Driver profile (CurveSpeedDriverProfile): CurveSpeedPlanner states as SCC-V states, so the logs, the onroad icon and
+# the cluster curve prompt keep working unchanged
+_PROFILE_STATES = {
+  CurveSpeedPlanner.CRUISE: VisionState.enabled,
+  CurveSpeedPlanner.APPROACH: VisionState.entering,
+  CurveSpeedPlanner.CURVE: VisionState.turning,
+  CurveSpeedPlanner.EXIT: VisionState.leaving,
+}
+# The planner was tuned on yaw rate / speed smoothed over 0.5 s (logged carState), so it gets the same here
+_PROFILE_KAPPA_SAMPLES = int(round(0.5 / DT_MDL))
+
 
 class SmartCruiseControlVision:
   v_target: float = 0
@@ -67,7 +82,16 @@ class SmartCruiseControlVision:
     self.is_enabled = False
     self.is_active = False
     self.enabled = self.params.get_bool("SmartCruiseControlVision")
+    self.driver_profile = self.params.get_bool("CurveSpeedDriverProfile")
     self.v_cruise_setpoint = 0.
+
+    # driver profile: its braking command bypasses the cruise decel floor as its own longitudinal planner candidate
+    self.profile_planner = CurveSpeedPlanner(dt=DT_MDL)
+    self.profile_kappa = deque(maxlen=_PROFILE_KAPPA_SAMPLES)
+    self.profile_path = None
+    self.profile_a_cmd = 0.
+    self.profile_active = False
+    self.profile_display_v = 0.
 
     self.state = VisionState.disabled
     self.current_lat_acc = 0.
@@ -91,14 +115,54 @@ class SmartCruiseControlVision:
     return self.a_target
 
   def get_v_target_from_control(self) -> float:
+    if self.driver_profile:
+      return V_CRUISE_UNSET  # it commands acceleration directly, see profile_a_cmd
     if self.is_active:
       return max(self.v_target, MIN_V) + self.a_target * _NO_OVERSHOOT_TIME_HORIZON
 
     return V_CRUISE_UNSET
 
+  @property
+  def published_v_target(self) -> float:
+    """Target speed for the logs and the curve prompts: with the driver profile the rate-limited target it shows."""
+    if self.driver_profile:
+      return self.profile_display_v if self.profile_active else V_CRUISE_UNSET
+    return self.output_v_target
+
   def _update_params(self) -> None:
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
       self.enabled = self.params.get_bool("SmartCruiseControlVision")
+      driver_profile = self.params.get_bool("CurveSpeedDriverProfile")
+      if driver_profile != self.driver_profile:
+        self.profile_planner.reset()
+      self.driver_profile = driver_profile
+
+  def _update_driver_profile(self, sm: messaging.SubMaster) -> None:
+    cs = sm['carState']
+    v_ego = cs.vEgo
+    self.profile_kappa.append(abs(cs.yawRate) / max(v_ego, 3.) if v_ego > 3. else 0.)
+    model = sm['modelV2']
+    if len(model.position.x) == ModelConstants.IDX_N and len(model.orientation.z) == ModelConstants.IDX_N:
+      self.profile_path = (np.array(model.position.x), np.array(model.position.y), np.array(model.orientation.z))
+    lane_change = model.meta.laneChangeState != log.LaneChangeState.off
+
+    run = self.long_enabled and self.enabled and not self.long_override and self.profile_path is not None
+    if run:
+      _, self.profile_a_cmd = self.profile_planner.update(v_ego, cs.aEgo, sum(self.profile_kappa) / len(self.profile_kappa),
+                                                         *self.profile_path, lane_change=lane_change)
+    else:
+      self.profile_planner.reset()
+      self.profile_a_cmd = 0.
+    self.profile_active = run and self.profile_planner.state != CurveSpeedPlanner.CRUISE
+    self.profile_display_v = self.profile_planner.v_display
+
+    if not self.long_enabled or not self.enabled:
+      self.state = VisionState.disabled
+    elif self.long_override:
+      self.state = VisionState.overriding
+    else:
+      self.state = _PROFILE_STATES[self.profile_planner.state]
+    self.current_lat_acc = v_ego ** 2 * self.profile_planner.kappa_f
 
   def _update_calculations(self, sm: messaging.SubMaster) -> None:
     if not self.long_enabled:
@@ -217,8 +281,14 @@ class SmartCruiseControlVision:
     self._update_params()
     self._update_calculations(sm)
 
-    self.is_enabled, self.is_active = self._update_state_machine()
-    self.a_target = self._update_solution()
+    if self.driver_profile:
+      self._update_driver_profile(sm)
+      self.is_enabled, self.is_active = self.state in ENABLED_STATES, self.state in ACTIVE_STATES
+      self.a_target = self.profile_a_cmd
+    else:
+      self.profile_active = False
+      self.is_enabled, self.is_active = self._update_state_machine()
+      self.a_target = self._update_solution()
 
     # Latch the direction for the whole slow-down so a cluster icon does not flip mid-curve
     if self.state in (VisionState.entering, VisionState.turning):

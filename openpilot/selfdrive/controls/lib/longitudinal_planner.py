@@ -479,8 +479,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
                   (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop),
                   (output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e)]
+    # Curve speed from the driver profile plans its own braking ahead of a curve, so it bypasses the cruise decel floor
+    curve = self.scc.vision
+    if curve.profile_active:
+      candidates.append((curve.profile_a_cmd, LongitudinalPlanSource.cruise, False))
 
-    output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
+    i_min = min(range(len(candidates)), key=lambda i: candidates[i][0])
+    output_a_target, self.mpc.source, _ = candidates[i_min]
+    curve_wins = i_min == 3
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
 
@@ -492,7 +498,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if reset_state:
       self.coast_band_hold.reset()
     cs_ic = sm['carStateIC']
-    coast_gate = (self.mpc.source == LongitudinalPlanSource.cruise and v_ego > COAST_BAND_MIN_SPEED and
+    coast_gate = (self.mpc.source == LongitudinalPlanSource.cruise and not curve_wins and v_ego > COAST_BAND_MIN_SPEED and
                   accel_coast < ACCEL_MAX and not self.fcw and not self.output_should_stop)
     self.output_a_target = self.coast_band_hold.update(float(self.output_a_target), accel_coast, coast_gate,
                                                        cs_ic.engineIdle, cs_ic.brakeRequested)
