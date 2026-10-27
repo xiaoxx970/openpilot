@@ -264,6 +264,36 @@ class TestVCruiseHelper(OpenpilotTestCase):
     self.v_cruise_helper.initialize_v_cruise(car.CarState(vEgo=60 * CV.KPH_TO_MS), V_CRUISE_INITIAL)
     assert self.v_cruise_helper.v_cruise_kph == 60
 
+  def test_engage_while_held(self):
+    """
+    VW engages on the press, like the radar's own ACC, while SET/RES is still held: RES restores the set speed, and neither the
+    release nor holding the key long enough for a long press steps the set speed.
+    """
+
+    def update(btn=None, pressed=False, enabled=False):
+      CS = car.CarState(vEgo=60 * CV.KPH_TO_MS, cruiseState={"available": True})
+      if btn is not None:
+        CS.buttonEvents = [ButtonEvent(type=btn, pressed=pressed)]
+      self.v_cruise_helper.update_v_cruise(CS, self.CS_IC, enabled=enabled, is_metric=True)
+
+    self.enable(80 * CV.KPH_TO_MS)
+    for btn, expected in ((ButtonType.resumeCruise, 80), (ButtonType.setCruise, 60)):
+      for hold_frames in (10, 160):
+        self.v_cruise_helper.v_cruise_kph = 80
+        update(btn, pressed=True)
+        for _ in range(3):
+          update()
+        self.v_cruise_helper.initialize_v_cruise(car.CarState(vEgo=60 * CV.KPH_TO_MS), V_CRUISE_INITIAL)
+        assert self.v_cruise_helper.v_cruise_kph == expected
+        for _ in range(hold_frames):
+          update(enabled=True)
+        update(btn, pressed=False, enabled=True)
+        assert self.v_cruise_helper.v_cruise_kph == expected, (btn, hold_frames)
+
+    # once engaged, the same keys step and long press as before
+    self.press(ButtonType.resumeCruise, enabled=True)
+    assert self.v_cruise_helper.v_cruise_kph == 61
+
   def test_initialize_v_cruise(self):
     """
     Asserts allowed cruise speeds on enabling with SET.
