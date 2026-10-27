@@ -529,6 +529,9 @@ struct CarStateIC @0xfc6241ed8877b611 {
   rainAmount @11 :Float32;       # rain sensor amount, 0-100 %
   rainWiperRequest @12 :UInt8;   # wiper speed the rain sensor asks for, 0-7
   wiperSwitch @13 :UInt8;        # wiper stalk: 0 off, 1 interval/auto, 2 stage 1, 3 stage 2
+  # the radar's own ACC on the gateway harness, which openpilot longitudinal replaces towards the car
+  radarAccStatus @14 :UInt8;     # its ACC_18.ACC_Status_ACC: 2 standby, 3 regulating, 4 override, 5 shut-off, 6/7 fault
+  radarAccFault @15 :Bool;       # its ACC has faulted, for the rest of the drive at 7
 
   struct BatteryDetails {
     capacity @0 :Float32;

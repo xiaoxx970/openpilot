@@ -54,8 +54,9 @@ class VCruiseHelper(VCruiseHelperSP):
     self.curve_speed_cap_kph = V_CRUISE_UNSET
     self.distance_display = DistanceDisplay()
     self.frame = 0
-    self.resume_released_frame = -ENABLE_BUTTON_FRAMES  # last release of RES or +
-    self.enable_released_frame = -ENABLE_BUTTON_FRAMES  # last release of any cruise button
+    # VW engages on the press, other brands on the release: track both edges
+    self.resume_button_frame = -ENABLE_BUTTON_FRAMES  # last press or release of RES or +
+    self.enable_button_frame = -ENABLE_BUTTON_FRAMES  # last press or release of any cruise button
 
   @property
   def v_cruise_initialized(self):
@@ -66,10 +67,10 @@ class VCruiseHelper(VCruiseHelperSP):
     self.frame += 1
 
     for b in CS.buttonEvents:
-      if not b.pressed and b.type in (ButtonType.setCruise, ButtonType.resumeCruise, ButtonType.accelCruise, ButtonType.decelCruise):
-        self.enable_released_frame = self.frame
+      if b.type in (ButtonType.setCruise, ButtonType.resumeCruise, ButtonType.accelCruise, ButtonType.decelCruise):
+        self.enable_button_frame = self.frame
         if b.type in (ButtonType.resumeCruise, ButtonType.accelCruise):
-          self.resume_released_frame = self.frame
+          self.resume_button_frame = self.frame
 
     self.get_minimum_set_speed(is_metric)
 
@@ -275,7 +276,7 @@ class VCruiseHelper(VCruiseHelperSP):
     # The engaging carState may be a few frames old by the time card sees carControl.enabled, so also use the
     # latest recent button: resume unless a SET came after it
     resume_pressed = any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) or \
-                     (self.frame - self.resume_released_frame < ENABLE_BUTTON_FRAMES and self.resume_released_frame == self.enable_released_frame)
+                     (self.frame - self.resume_button_frame < ENABLE_BUTTON_FRAMES and self.resume_button_frame == self.enable_button_frame)
     if resume_pressed and self.v_cruise_initialized:
       self.v_cruise_kph = self.v_cruise_kph_last
     else:

@@ -852,6 +852,16 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
 
   # also shown while disengaged, the distance can be set before engaging like on the cluster
+  # The radar's own ACC disagreed with TSK and faulted. openpilot keeps its radar leads, but the radar no longer
+  # asks for an engine restart when the lead pulls away from a stop, until ignition off.
+  EventName.radarAccFault: {
+    ET.PERMANENT: Alert(
+      "Radar ACC Fault",
+      "No auto engine restart until ignition off",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 6.),
+  },
+
   EventName.personalityChanged: {
     ET.PERMANENT: personality_changed_alert,
   },

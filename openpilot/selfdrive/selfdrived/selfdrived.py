@@ -163,6 +163,7 @@ class SelfdriveD:
     self.distance_display = DistanceDisplay()
     self.rain_follow_enabled = self.params.get_bool("RainFollowDistance")
     self.rain_detector = RainDetector()
+    self.radar_acc_fault_prev = False
     self.rain_follow = RainFollow()
     self.recalibrating_seen = False
     self.dm_lockout_set = False
@@ -320,6 +321,10 @@ class SelfdriveD:
       cs_ic = self.sm['carStateIC']
       if cs_ic.radarDisableFailed:
         self.events.add(EventName.radarDisableFailed)
+      if cs_ic.radarAccFault and not self.radar_acc_fault_prev:
+        cloudlog.event("radar ACC fault", status=cs_ic.radarAccStatus, enabled=self.enabled, error=True)
+        self.events.add(EventName.radarAccFault)
+      self.radar_acc_fault_prev = cs_ic.radarAccFault
 
     # Create events for temperature, disk space, and memory
     if self.sm['deviceState'].thermalStatus >= ThermalStatus.overheated:
