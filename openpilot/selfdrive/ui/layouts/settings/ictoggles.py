@@ -37,8 +37,8 @@ DESCRIPTIONS = {
   ),
   "CurveSpeedDriverProfile": tr_noop(
     "Curve speed from your own driving instead of Smart Cruise Control (Vision)'s fixed limit: lateral accel by speed, " +
-    "braking planned ahead of the curve, a steady target inside it and speeding up out of it at your pace. Needs " +
-    "Smart Cruise Control (Vision) on; off gives exactly the stock curve control."
+    "braking planned ahead of the curve from the camera and the offline map's road, a steady target inside it and " +
+    "speeding up out of it at your pace. Needs Smart Cruise Control (Vision) on; off gives exactly the stock curve control."
   ),
   "EnableSpeedLimitPredicative": tr_noop(
     "Enables setting predicative speed limit"

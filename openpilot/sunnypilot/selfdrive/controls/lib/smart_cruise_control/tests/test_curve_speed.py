@@ -2,7 +2,8 @@ import numpy as np
 
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.curve_speed import CurveSpeedPlanner, CurveSpeedParams
+from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.curve_speed import CurveSpeedPlanner, CurveSpeedParams, \
+  NO_REQUIREMENT
 from openpilot.common.test import OpenpilotTestCase
 
 KPH = 1 / 3.6
@@ -31,14 +32,17 @@ def model_path(s_car, v, curvature_fn):
   return x, y, heading
 
 
-def drive(curvature_fn, v0, duration, lane_change=lambda s: False, kappa_meas_fn=None):
-  """Close the loop on a point-mass car: the planner's command when it acts, else hold the speed."""
-  planner = CurveSpeedPlanner(dt=DT_MDL)
+def drive(curvature_fn, v0, duration, lane_change=lambda s: False, kappa_meas_fn=None, with_map=False, params=None):
+  """Close the loop on a point-mass car: the planner's command when it acts, else hold the speed. `with_map`: the
+  road's own curvature 5-245 m ahead as map input."""
+  planner = CurveSpeedPlanner(params, dt=DT_MDL)
   v, a, s = v0, 0., 0.
   log = []
+  map_dist = np.arange(5., 250., 10.)
   for _ in range(int(duration / DT_MDL)):
     kappa = float(kappa_meas_fn(s) if kappa_meas_fn else curvature_fn(np.array([s]))[0])
-    _, a_cmd = planner.update(v, a, kappa, *model_path(s, v, curvature_fn), lane_change=lane_change(s))
+    mk = {'map_dist': map_dist, 'map_kappa': curvature_fn(s + map_dist)} if with_map else {}
+    _, a_cmd = planner.update(v, a, kappa, *model_path(s, v, curvature_fn), lane_change=lane_change(s), **mk)
     a_des = a_cmd if planner.state != CurveSpeedPlanner.CRUISE else 0.
     a += (a_des - a) * DT_MDL / 0.35
     v = max(0., v + a * DT_MDL)
@@ -96,6 +100,47 @@ class TestCurveSpeedPlanner(OpenpilotTestCase):
     v_cap, a_cmd = planner.update(15., 0., 0., *model_path(0., 15., curvature), enabled=False)
     assert planner.state == CurveSpeedPlanner.CRUISE
     assert a_cmd == 0. and v_cap >= 100.
+
+  def test_map_brakes_for_a_curve_the_camera_cannot_see(self):
+    # straight model path, a 30 m radius on the map 120-160 m ahead at 60 km/h
+    v = 60 * KPH
+    map_dist = np.arange(5., 250., 10.)
+    map_kappa = np.where((map_dist >= 120.) & (map_dist <= 160.), 1 / 30., 0.)
+    planner = CurveSpeedPlanner(dt=DT_MDL)
+    for _ in range(10):
+      planner.update(v, 0., 0., *model_path(0., v, straight), map_dist=map_dist, map_kappa=map_kappa)
+    assert planner.state == CurveSpeedPlanner.APPROACH and planner.a_cmd < 0.
+    assert planner.map_limited
+    assert planner.a_req_map < -0.25 and planner.a_req_vision == NO_REQUIREMENT
+
+    camera_only = CurveSpeedPlanner(dt=DT_MDL)
+    for _ in range(10):
+      camera_only.update(v, 0., 0., *model_path(0., v, straight))
+    assert camera_only.state == CurveSpeedPlanner.CRUISE and not camera_only.map_limited
+    assert camera_only.a_req_map == NO_REQUIREMENT
+
+  def test_camera_sets_the_braking_when_it_asks_for_more(self):
+    # the camera sees a 40 m radius 80 m ahead; the map has only a gentle curve there
+    v = 60 * KPH
+    map_dist = np.arange(5., 250., 10.)
+    map_kappa = np.where((map_dist >= 80.) & (map_dist <= 140.), 1 / 300., 0.)
+    planner = CurveSpeedPlanner(dt=DT_MDL)
+    for _ in range(10):
+      planner.update(v, 0., 0., *model_path(0., v, one_curve(40., 80., 60.)), map_dist=map_dist, map_kappa=map_kappa)
+    assert planner.state == CurveSpeedPlanner.APPROACH
+    assert planner.a_req_vision < planner.a_req_map and not planner.map_limited
+
+  def test_exit_speeds_up_although_the_map_shows_the_next_curve(self):
+    # two 40 m radius curves 120 m apart: out of the first at the driver's rate, then slow down again for the second
+    def two_curves(s):
+      return road_curvature(s, 40., 150., 60.) + road_curvature(s, 40., 330., 60.)
+    for exit_room_time, accelerates in ((2.0, True), (0.0, False)):
+      planner, log = drive(two_curves, 45 * KPH, 45., with_map=True, params=CurveSpeedParams(exit_room_time=exit_room_time))
+      # the planner's command while it still runs the exit (this harness holds the speed once it hands back)
+      exit_cmd = max(r[3] for r in log if 200. <= r[0] <= 225.)
+      assert (exit_cmd > 0.25) == accelerates, f'exit command {exit_cmd:.2f} out of the first curve, exit_room_time {exit_room_time}'
+      entry = next(r for r in log if r[0] >= 330.)
+      assert entry[1] < float(planner.v_for_kappa(1 / 40.)) * 1.1, 'too fast into the second curve'
 
   def test_high_speed_respects_the_steering_cap(self):
     p = CurveSpeedParams()

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 
 KPH = 1 / 3.6
+NO_REQUIREMENT = 10.0   # m/s^2 reported for an input with nothing ahead to slow for
 
 
 @dataclass
@@ -62,6 +63,11 @@ class CurveSpeedParams:
   exit_share_bp: tuple = (0.6, 0.8, 0.95, 1.0)
   exit_share_v: tuple = (1.0, 0.75, 0.5, 0.0)
   apex_ratio: float = 0.97        # curvature this far below its peak: past the apex, the curve is opening
+  # the exit re-accelerates at the driver's rate while the road ahead can still be met by comfortable braking started
+  # later, using up that room over this many seconds. 0: never faster than the constant accel that meets the next curve
+  # exactly (before 2026-10-27), which held every exit back once the map showed the next curve (mountain road, mean
+  # accel 3 s after the apex 0.09 vs the driver's 0.33)
+  exit_room_time: float = 2.0
   # preview geometry
   lookahead_s: float = 7.0
   lookahead_m: float = 100.0
@@ -139,6 +145,11 @@ class CurveSpeedPlanner:
     self.v_display = 0.0        # target shown to the driver, rate limited (m/s)
     self.a_req = 0.0
     self.a_req_hard = 0.0
+    self.v_env = 1e3
+    # what each input alone asks for, and whether the map's nodes beyond the camera set the braking now
+    self.a_req_vision = NO_REQUIREMENT
+    self.a_req_map = NO_REQUIREMENT
+    self.map_limited = False
 
   # ---- helpers -------------------------------------------------------------------------------
   def lat_limit(self, v):
@@ -164,6 +175,12 @@ class CurveSpeedPlanner:
     """The driver's re-acceleration out of the curve, by speed and by how far the curve has opened."""
     share = min(self.kappa_f, max(self.k_near, 0.5 * self.kappa_f)) / max(self.kappa_peak, 1e-6)
     return float(np.interp(v_ego, self.p.exit_bp, self.p.exit_v)) * float(np.interp(share, self.p.exit_share_bp, self.p.exit_share_v))
+
+  def exit_room(self, v_ego):
+    """Accel the exit may use before the road ahead would need more than comfortable braking."""
+    if self.p.exit_room_time <= 0.0:
+      return self.a_req
+    return max(0.0, (self.v_env - v_ego) / self.p.exit_room_time)
 
   def _rate_limit(self, cur, target, rate):
     step = rate * self.dt
@@ -192,7 +209,8 @@ class CurveSpeedPlanner:
     w = float(np.interp(v_ego, p.preview_gain_speed_bp, (0.0, 1.0)))
     gain = w * np.interp(s[m], p.preview_gain_bp, p.preview_gain_v) + (1.0 - w) * np.interp(s[m], p.preview_gain_bp, p.preview_gain_slow_v)
     s_ahead, k_ahead = s[m], k[m] * gain
-    if map_dist is not None and len(map_dist):
+    n_vision = len(s_ahead)
+    if map_dist is not None and map_kappa is not None and len(map_dist):
       # the map sees past what the camera can, so it is planned against just like the preview
       mm = (map_dist >= max(p.min_preview_dist, p.map_min_dist)) & (map_dist <= max(horizon, p.map_horizon_m))
       s_ahead = np.concatenate((s_ahead, map_dist[mm]))
@@ -206,6 +224,10 @@ class CurveSpeedPlanner:
     s_eff = s_ahead - v_ego * (p.reaction_time + p.decel_comfort / (2 * p.jerk)) if len(k_ahead) else np.array([1e3])
     a_need = (v_req ** 2 - v_ego ** 2) / (2 * np.maximum(s_eff, 1.0))
     self.a_req = float(np.min(a_need)) if len(a_need) else 0.0
+    self.a_req_vision = min(float(np.min(a_need[:n_vision])), NO_REQUIREMENT) if n_vision else NO_REQUIREMENT
+    self.a_req_map = min(float(np.min(a_need[n_vision:])), NO_REQUIREMENT) if len(k_ahead) > n_vision else NO_REQUIREMENT
+    # the fastest speed from which comfortable braking still meets every point ahead
+    self.v_env = float(np.min(np.sqrt(v_req ** 2 + 2 * p.decel_comfort * np.maximum(s_eff, 0.0))))
     v_req_h = self.v_hard_for_kappa(k_ahead) if len(k_ahead) else np.array([1e3])
     a_need_h = (v_req_h ** 2 - v_ego ** 2) / (2 * np.maximum(s_eff, 1.0))
     self.a_req_hard = float(np.min(a_need_h)) if len(a_need_h) else 0.0
@@ -262,7 +284,7 @@ class CurveSpeedPlanner:
       d_hard = min(p.decel_max, float(np.interp(v_ego, p.hard_decel_bp, p.hard_decel_v)))
       a_hard = max(-d_hard, min(0.0, 1.1 * self.a_req_hard))
       a_target = min(a_comfort, a_hard)
-      v_cap_target = float(np.min(np.sqrt(v_req ** 2 + 2 * p.decel_comfort * np.maximum(s_eff, 0.0))))
+      v_cap_target = self.v_env
       self.v_cap = min(self.v_cap, max(v_cap_target, v_ego - 2.0)) if self.v_cap < 1e2 else max(v_cap_target, v_ego - 2.0)
       display = float(np.min(v_req))
     elif self.state == self.CURVE:
@@ -273,18 +295,18 @@ class CurveSpeedPlanner:
       opening = self.kappa_f < p.apex_ratio * self.kappa_peak or self.k_near < p.apex_ratio * self.kappa_f
       if opening and self.a_req >= 0.0:
         # past the apex with nothing tighter ahead: speed up at the driver's rate, never faster than the road ahead allows
-        a_target = min(self.exit_accel(v_ego), self.a_req)
+        a_target = min(self.exit_accel(v_ego), self.exit_room(v_ego))
         self.v_lock = max(self.v_lock, v_ego)
       else:
         up = float(np.interp(v_ego, p.exit_bp, p.exit_v)) * float(np.clip((lim - lat_now) / (p.exit_margin * lim), 0.0, 1.0))
         a_target = float(np.clip(0.5 * (self.v_lock - v_ego), -p.curve_decel, up))
-      if self.a_req < a_target:          # something tighter still ahead
+      if self.a_req < (a_target if p.exit_room_time <= 0.0 else min(a_target, 0.0)):   # something tighter still ahead
         d_hard = min(p.decel_max, float(np.interp(v_ego, p.hard_decel_bp, p.hard_decel_v)))
         a_target = min(max(-p.decel_comfort, 1.1 * self.a_req), max(-d_hard, 1.1 * self.a_req_hard), a_target)
       self.v_cap = self.v_lock
       display = self.v_lock
     elif self.state == self.EXIT:
-      a_exit = min(self.exit_accel(v_ego), max(self.a_req, 0.0))
+      a_exit = min(self.exit_accel(v_ego), max(self.exit_room(v_ego), 0.0))
       a_target = a_exit
       if self.kappa_f > p.tighten_ratio * self.kappa_peak:   # S-bend / second apex in the same curve
         self.state = self.CURVE
@@ -300,6 +322,8 @@ class CurveSpeedPlanner:
       a_target = 0.0
       self.v_cap = 1e3
       display = 0.0
+
+    self.map_limited = self.state != self.CRUISE and self.a_req_map < min(self.a_req_vision, p.brake_off)
 
     # jerk-limited braking command
     self.a_cmd = self._rate_limit(self.a_cmd, a_target, p.jerk)
