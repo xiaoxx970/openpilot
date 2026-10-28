@@ -16,7 +16,8 @@ from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_acc
                                                                   PULL_AWAY_RELEASE_JERK, PULL_AWAY_MAX_ACCEL, \
                                                                   LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
                                                                   LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL, \
-                                                                  LEAD_CLOSE_STOP_DECEL, LEAD_CLOSE_TIME, E2EDeadband, E2E_DEADBAND_MARGIN
+                                                                  LEAD_CLOSE_STOP_DECEL, LEAD_CLOSE_TIME, LEAD_CLOSE_RISE_TAU, \
+                                                                  LEAD_CLOSE_FILTER_TAU, E2EDeadband, E2E_DEADBAND_MARGIN
 
 Personality = log.LongitudinalPersonality
 DT = 0.05
@@ -29,8 +30,8 @@ def settled_cruise_accel(v_cruise, v_ego, personality, lead_capped=False):
   return a
 
 
-def lead(d_rel, v_lead, present=True):
-  return SimpleNamespace(present=present, dRel=d_rel, vLead=v_lead)
+def lead(d_rel, v_lead, present=True, a_lead=0.):
+  return SimpleNamespace(present=present, dRel=d_rel, vLead=v_lead, aLeadK=a_lead)
 
 
 def desired_distance(v, personality):
@@ -115,12 +116,14 @@ class TestCruiseAccelLimits(unittest.TestCase):
     # a small excess over the lead cap gives a proportionally small slow-down, not cruise's 1 s gain
     np.testing.assert_allclose(settled_cruise_accel(24.6, 25., Personality.standard, lead_capped=True), -0.4 / LEAD_CLOSE_ACCEL_TIME, atol=1e-3)
 
-  def test_lead_cap_approached_like_a_set_speed(self):
-    # below the lead cap, which a lead pulling away keeps raising, cruise speeds up to it as it would to a set speed
+  def test_lead_cap_approached_without_the_taper(self):
+    # below the lead cap, which a lead pulling away keeps raising, cruise speeds up at its 1 s gain; the set-speed taper
+    # held launches behind a lead driving off to 0.7-0.9 m/s^2 (2026-10-28 route 228)
     for personality in (Personality.relaxed, Personality.standard, Personality.aggressive):
       for v_cap in (25.4, 27., 30.):
-        np.testing.assert_allclose(settled_cruise_accel(v_cap, 25., personality, lead_capped=True),
-                                   settled_cruise_accel(v_cap, 25., personality), atol=1e-3)
+        a = settled_cruise_accel(v_cap, 25., personality, lead_capped=True)
+        np.testing.assert_allclose(a, min(v_cap - 25., ACCEL_MAX), atol=1e-3)
+        assert a > settled_cruise_accel(v_cap, 25., personality)
 
 
 class TestLeadClosingLimit(unittest.TestCase):
@@ -150,6 +153,23 @@ class TestLeadClosingLimit(unittest.TestCase):
     leads = [lead(120., v + (0.5 if k % 2 else -0.5)) for k in range(400)]
     targets = np.array([t for t, _ in run(LeadClosingLimit(DT), 33., v, leads)])
     assert np.std(targets[200:]) < 0.05
+    # and not rectified upward by the faster rise
+    assert abs(np.mean(targets[200:]) - (v + LEAD_CLOSE_MAX_SPEED)) < 0.05
+
+  def test_cap_keeps_up_with_a_lead_driving_off(self):
+    # 2026-10-28 route 228: through the 2 s low-pass the cap trailed a lead driving off from a stop by ~5 km/h
+    a_lead, t = 1.2, 3.
+    n = int(t / DT)
+    for a_lead_k, max_lag in ((a_lead, 1.1 * a_lead * LEAD_CLOSE_RISE_TAU), (0., None)):
+      leads = [lead(5., a_lead * k * DT, a_lead=a_lead_k) for k in range(n + 1)]
+      v_target, capped = run(LeadClosingLimit(DT), 50 * CV.KPH_TO_MS, 0., leads)[-1]
+      assert capped
+      lag = a_lead * t + LEAD_CLOSE_MIN_SPEED - v_target
+      if max_lag is not None:
+        assert lag < max_lag
+      else:
+        # a lead the radar does not see speeding up keeps the slow low-pass
+        assert lag > 0.7 * a_lead * LEAD_CLOSE_FILTER_TAU
 
   def test_brief_lead_dropout_keeps_cap(self):
     v = 25.

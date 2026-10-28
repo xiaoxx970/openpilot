@@ -50,10 +50,15 @@ LEAD_CLOSE_STOP_DECEL = 0.2
 LEAD_CLOSE_STOPPED_BP = [1., 3.]
 # Low-pass on the capped target against radar noise, and how long a lead dropout keeps the filter state
 LEAD_CLOSE_FILTER_TAU = 2.
+# While the lead speeds up at more than this (m/s^2), the cap rises through the shorter time constant instead: through the
+# 2 s one it trailed a lead driving off from a stop by ~5 km/h and held the launch to 0.7-0.9 m/s^2 while the MPC and model
+# asked 1.0-1.5 (2026-10-28 route 228). Below that acceleration radar noise would ride the faster rise up
+LEAD_CLOSE_RISE_MIN_ACCEL = 0.5
+LEAD_CLOSE_RISE_TAU = 0.5
 LEAD_CLOSE_LOST_TIME = 1.
 # Above the capped target, ease toward it with a 4 s time constant instead of cruise's 1 s, so lead noise barely reaches
-# the command. Below it cruise approaches it like a set speed: a lead pulling away raises the cap, and the 4 s gain held
-# the car 7-10 km/h behind it with the gap opening
+# the command. Below it cruise speeds up toward it at the 1 s gain without the set-speed taper: a lead pulling away keeps
+# raising the cap, and the 4 s gain held the car 7-10 km/h behind it with the gap opening
 LEAD_CLOSE_ACCEL_TIME = 4.
 # While a radar lead speeds up away from us and the gap is beyond the desired distance, the command may follow the lead's
 # own acceleration plus a share of the speed difference even when the model asks for less, never above the MPC's lead
@@ -122,7 +127,8 @@ class LeadClosingLimit:
   MPC's desired distance shrinks, but never below LEAD_CLOSE_MIN_SPEED. That floor keeps cruise just above
   the MPC in steady following, so the MPC alone shapes the follow there. A stopped lead may instead be closed
   on at the speed that easing off stops from at the desired distance; stopping there is still the MPC's job.
-  The target is low-passed so radar noise on vLead does not reach the accel command.
+  The target is low-passed so radar noise on vLead does not reach the accel command, except that it rises faster while
+  the lead itself speeds up.
   """
   def __init__(self, dt):
     self.dt = dt
@@ -152,7 +158,10 @@ class LeadClosingLimit:
     if not self.active:
       self.active = True
       self.v_target.x = lead.vLead + close_speed
-    v_lead_cap = self.v_target.update(lead.vLead + close_speed)
+    target = lead.vLead + close_speed
+    rising = target > self.v_target.x and lead.aLeadK > LEAD_CLOSE_RISE_MIN_ACCEL
+    self.v_target.update_alpha(LEAD_CLOSE_RISE_TAU if rising else LEAD_CLOSE_FILTER_TAU)
+    v_lead_cap = self.v_target.update(target)
     return (v_lead_cap, True) if v_lead_cap < v_cruise else (v_cruise, False)
 
 
@@ -367,8 +376,10 @@ def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt, personality=log.Longitu
   min_accel = -get_max_decel(v_ego) * personality_value(personality, A_CRUISE_MIN_SCALE)
   if lead_capped and v_cruise < v_ego:
     target_accel = np.clip((v_cruise - v_ego) / LEAD_CLOSE_ACCEL_TIME, max(min_accel, LEAD_CLOSE_MIN_ACCEL), ACCEL_MAX)
+  elif lead_capped:
+    # below the lead cap the MPC and the model shape the follow; the taper is for arriving at the driver's set speed
+    target_accel = np.clip(v_cruise - v_ego, min_accel, ACCEL_MAX)
   else:
-    # a set speed, or a lead cap still above us, is approached the same way
     v_error = v_cruise - v_ego
     max_accel = ACCEL_MAX
     if v_error > 0.:
