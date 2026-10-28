@@ -183,6 +183,7 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
 
   def test_active_to_adapting_transition(self):
     self.initialize_active_state(self.pcm_long_max_set_speed)
+    self.sla.speed_limit_prev = SPEED_LIMITS['highway']
 
     self.sla.update(True, False, SPEED_LIMITS['highway'] + 2, 0, self.pcm_long_max_set_speed, SPEED_LIMITS['highway'],
                     SPEED_LIMITS['highway'], True, 0, self.events_sp)
@@ -190,6 +191,7 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
 
   def test_adapting_to_active_transition(self):
     self.sla.state = SpeedLimitAssistState.adapting
+    self.sla.speed_limit_prev = SPEED_LIMITS['highway']
     self.sla.v_cruise_cluster_prev = self.pcm_long_max_set_speed
     self.sla.prev_v_cruise_cluster_conv = round(self.pcm_long_max_set_speed * self.speed_conv)
 
@@ -245,6 +247,7 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
 
   def test_distance_based_adapting(self):
     self.sla.state = SpeedLimitAssistState.adapting
+    self.sla.speed_limit_prev = SPEED_LIMITS['highway']
     self.sla.v_cruise_cluster_prev = self.pcm_long_max_set_speed
     self.sla.prev_v_cruise_cluster_conv = round(self.pcm_long_max_set_speed * self.speed_conv)
 
