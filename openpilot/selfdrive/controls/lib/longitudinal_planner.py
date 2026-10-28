@@ -30,7 +30,11 @@ J_CRUISE_BP = [0., 10.0, 25., 40.]
 A_CRUISE_MIN_SCALE = (0.75, 1.0, 1.25)
 # Coming up to the set speed, speeding up eases off at this jerk (m/s^3): accel is capped at sqrt(2 * J * speed error),
 # so it ramps down steadily instead of holding until ~3 km/h below the set speed and dropping within a second
-J_CRUISE_APPROACH = (0.12, 0.2, 0.35)
+J_CRUISE_APPROACH = (0.1, 0.15, 0.2)
+# The car keeps speeding up for about this long after the command eases (actuator delay plus response lag), so the speed
+# it gains meanwhile counts as gained when capping. Without it, on 2026-10-28 (aggressive, 0.35 then) the car still pulled
+# 0.9 m/s^2 two km/h below the set speed and dropped it within a second
+CRUISE_APPROACH_LOOKAHEAD = 0.5
 # With a lead ahead, cruise may close the extra gap at most this much faster than the lead,
 # and only as fast as would close that gap over LEAD_CLOSE_TIME
 LEAD_CLOSE_MAX_SPEED = 5. * CV.KPH_TO_MS
@@ -368,7 +372,8 @@ def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, dt, personality=log.Longitu
     v_error = v_cruise - v_ego
     max_accel = ACCEL_MAX
     if v_error > 0.:
-      max_accel = min(max_accel, float(np.sqrt(2. * personality_value(personality, J_CRUISE_APPROACH) * v_error)))
+      v_error_ahead = max(v_error - max(a_cruise_prev, 0.) * CRUISE_APPROACH_LOOKAHEAD, 0.)
+      max_accel = min(max_accel, float(np.sqrt(2. * personality_value(personality, J_CRUISE_APPROACH) * v_error_ahead)))
     target_accel = np.clip(v_error, min_accel, max_accel)
   j_cruise = np.interp(v_ego, J_CRUISE_BP, J_CRUISE_VALS)
   target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * dt, a_cruise_prev + j_cruise * dt))
