@@ -215,6 +215,16 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
       self.sla.update(True, False, speed_limit, 0, self.pcm_long_max_set_speed, speed_limit, speed_limit, True, 0, self.events_sp)
     assert self.sla.state in ACTIVE_STATES
 
+  def test_non_pcm_limit_change_above_cst_waits_for_confirmation(self):
+    self.sla.pcm_op_long = False
+    self.initialize_active_state(SPEED_LIMITS['freeway'])
+    self.sla.speed_limit_prev = SPEED_LIMITS['freeway']
+
+    self.sla.update(True, False, SPEED_LIMITS['freeway'], 0, SPEED_LIMITS['freeway'], SPEED_LIMITS['highway'],
+                    SPEED_LIMITS['highway'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.preActive
+    assert self.sla.output_v_target == V_CRUISE_UNSET
+
   def test_invalid_speed_limits_handling(self):
     self.initialize_active_state(self.pcm_long_max_set_speed)
 
