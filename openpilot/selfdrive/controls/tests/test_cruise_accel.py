@@ -1,13 +1,16 @@
+import unittest
 from types import SimpleNamespace
 
 import numpy as np
 
 from opendbc.car.interfaces import ACCEL_MAX
 
-from openpilot.cereal import log
+from openpilot.cereal import log, messaging
 from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW, get_safe_obstacle_distance, get_stopped_equivalence_factor
-from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_decel, LeadClosingLimit, \
+from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_accel, get_max_decel, LeadClosingLimit, J_CRUISE_APPROACH, \
+                                                                  CRUISE_APPROACH_LOOKAHEAD, \
+                                                                  CoastBandHold, COAST_BAND_HOLD_TIME, \
                                                                   LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
                                                                   LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL
 
@@ -34,11 +37,64 @@ def run(limit, v_cruise, v_ego, leads, personality=Personality.relaxed):
   return [limit.update(v_cruise, v_ego, ld, personality) for ld in leads]
 
 
-class TestCruiseAccelLimits:
+class TestCruiseAccelLimits(unittest.TestCase):
   def test_accel_left_to_e2e(self):
-    # speeding up is shaped by the always-present e2e candidate, cruise only caps it at ACCEL_MAX
+    # far below the set speed, speeding up is shaped by the always-present e2e candidate, cruise only caps it at ACCEL_MAX
     for personality in (Personality.relaxed, Personality.standard, Personality.aggressive):
-      np.testing.assert_allclose(settled_cruise_accel(35., 25., personality), ACCEL_MAX, atol=1e-3)
+      np.testing.assert_allclose(settled_cruise_accel(55., 25., personality), ACCEL_MAX, atol=1e-3)
+
+  def test_approach_tapers_by_personality(self):
+    # 3 km/h below the set speed: accel already easing off, gentlest for relaxed
+    v_error = 3. * CV.KPH_TO_MS
+    accels = [settled_cruise_accel(25. + v_error, 25., p) for p in (Personality.relaxed, Personality.standard, Personality.aggressive)]
+    # a = sqrt(2 * J * (v_error - a * lookahead)): the speed still gained through the car's lag counts as gained
+    j_lookahead = np.array(J_CRUISE_APPROACH) * CRUISE_APPROACH_LOOKAHEAD
+    np.testing.assert_allclose(accels, -j_lookahead + np.sqrt(j_lookahead ** 2 + 2. * np.array(J_CRUISE_APPROACH) * v_error), atol=1e-3)
+    assert accels[0] < accels[1] < accels[2] < v_error
+
+  def test_approach_through_the_car_lag(self):
+    # 2026-10-28 route 228: aggressive, set 40 km/h, the model asking ~0.9 m/s^2 all the way up. Through the car's 0.15 s
+    # delay and 0.3 s lag the car itself must already be easing off 2 km/h below the set speed, without a sharp drop or overshoot
+    dt, delay, lag, a_model = 0.01, 0.15, 0.3, 0.9
+    v_set = 40. * CV.KPH_TO_MS
+    v, a_car, a_cruise, a_cmd = 25. * CV.KPH_TO_MS, 0.85, 0.85, 0.85
+    sent = [a_cmd] * int(delay / dt + 1)
+    trace = []
+    for k in range(int(20. / dt)):
+      if k % int(DT / dt) == 0:
+        a_cruise = get_cruise_accel(v_set, v, a_cruise, DT, Personality.aggressive)
+        a_cmd = min(a_cruise, a_model)
+      sent.append(a_cmd)
+      a_car += (sent[-1 - int(delay / dt)] - a_car) * dt / lag
+      v += a_car * dt
+      trace.append((v, a_car))
+    v_tr, a_tr = np.array(trace).T
+    i_peak = int(np.argmax(v_tr))
+    self.assertLess(np.interp(v_set - 2. * CV.KPH_TO_MS, v_tr[:i_peak + 1], a_tr[:i_peak + 1]), 0.55)
+    self.assertLess(np.max(-np.diff(a_tr)) / dt, 0.35)
+    self.assertLess((v_tr.max() - v_set) * CV.MS_TO_KPH, 0.3)
+
+  def test_approach_ramp_jerk(self):
+    # driving up to the set speed from 15 km/h below, the command winds down at the approach jerk; where the taper hands
+    # over to the 1 s gain for the last fraction of a km/h the jerk briefly doubles, at a command of only 2 * J
+    for personality, j_approach in zip((Personality.relaxed, Personality.standard, Personality.aggressive), J_CRUISE_APPROACH, strict=True):
+      v, a, accels = 25., 0., []
+      v_cruise = v + 15. * CV.KPH_TO_MS
+      for _ in range(int(30. / DT)):
+        a = get_cruise_accel(v_cruise, v, a, DT, personality)
+        v += a * DT
+        accels.append(a)
+      falling = -np.diff(accels[np.argmax(accels):]) / DT
+      assert falling.max() < 2. * j_approach * 1.05
+      assert np.median(falling[falling > 1e-3]) < j_approach * 1.05
+      assert v_cruise - v < 0.1 and v <= v_cruise
+
+  def test_personality_from_a_message(self):
+    # the planner gets the enum read back from selfdriveState, which must hit the same values as the int constants
+    msg = messaging.new_message('selfdriveState')
+    msg.selfdriveState.personality = Personality.relaxed
+    personality = messaging.log_from_bytes(msg.to_bytes()).selfdriveState.personality
+    np.testing.assert_allclose(settled_cruise_accel(15., 25., personality), -get_max_decel(25.) * 0.75, atol=1e-3)
 
   def test_decel_scaled_by_personality(self):
     v_ego = 25.
@@ -56,7 +112,7 @@ class TestCruiseAccelLimits:
     np.testing.assert_allclose(settled_cruise_accel(25.4, 25., Personality.standard, lead_capped=True), 0.4 / LEAD_CLOSE_ACCEL_TIME, atol=1e-3)
 
 
-class TestLeadClosingLimit:
+class TestLeadClosingLimit(unittest.TestCase):
   def test_no_lead_keeps_set_speed(self):
     assert LeadClosingLimit(DT).update(33., 24., lead(110., 24., present=False), Personality.relaxed) == (33., False)
 
@@ -96,11 +152,6 @@ class TestLeadClosingLimit:
 
   def test_lower_set_speed_still_wins(self):
     assert run(LeadClosingLimit(DT), 20., 25., [lead(110., 24.)])[-1] == (20., False)
-
-
-import unittest
-
-from openpilot.selfdrive.controls.lib.longitudinal_planner import CoastBandHold, COAST_BAND_HOLD_TIME
 
 
 class TestCoastBandHold(unittest.TestCase):
