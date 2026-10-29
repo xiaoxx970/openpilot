@@ -18,7 +18,7 @@ class ICTogglesLayoutMici(NavScroller):
     enable_car_types            = BigParamControl("VW: Car Types on Cluster", "VwVisionCarTypes")
     enable_rain_follow          = BigParamControl("VW: Rain Following Distance", "RainFollowDistance")
     enable_curve_profile        = BigParamControl("VW: Curve Speed from Driver Profile", "CurveSpeedDriverProfile")
-    self._road_events           = BigMultiParamToggle("VW: Road Event Prompts", "VwRoadEventPrompts", ROAD_EVENT_PROMPTS)
+    self._road_events           = BigMultiParamToggle("VW: Road Prompts", "VwRoadEventPrompts", ROAD_EVENT_PROMPTS)
     enable_baidu_online         = BigParamControl("VW: Baidu Traffic & Speed Limits", "VwBaiduOnline")
     enable_sl_pred_control      = BigParamControl("VW: Predicative Speed Limit (pACC)", "EnableSpeedLimitPredicative")
     enable_sl_pred_sl           = BigParamControl("VW: Predicative - Reaction to Speed Limits", "EnableSLPredReactToSL")
