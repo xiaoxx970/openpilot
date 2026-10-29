@@ -310,6 +310,7 @@ class Car:
     offering = lp_sp.speedLimit.assist.state == custom.LongitudinalPlanSP.SpeedLimit.AssistState.preActive
     CC_IC_dc.hudSpeedLimitOffer = float(resolver.speedLimitLast) if offering and resolver.speedLimitLastValid else 0.
     CC_IC_dc.hudSpeedLimitOfferAhead = offering and resolver.distToSpeedLimit > 0.
+    CC_IC_dc.hudCarSpeedLimit = float(resolver.carSpeedLimit)   # the car's sign reading, a ramp's sign read from the motorway held back
 
     vision = lp_sp.smartCruiseControl.vision
     VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.VisionState

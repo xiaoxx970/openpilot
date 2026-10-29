@@ -12,6 +12,8 @@ from openpilot.selfdrive.road_events.slope import grades_ahead, slope_ahead
 
 MIN_SPEED = 5.          # m/s: below it the model path is short and the course unreliable
 ROUNDABOUT_WINDOW = (30., 300.)   # m ahead where a roundabout is announced
+RAMP_NEAR = (300., 200.)          # m ahead / behind the car a ramp junction counts for the car's sign recognition
+MAINLINE = frozenset((1, 3))      # motorway, trunk
 CROSSING_WINDOW = (50., 250.)
 FAST_ROADS = frozenset((1, 2, 3, 4))   # OSM classes with motorway jam rules: motorway, trunk and their ramps
 
@@ -42,7 +44,7 @@ class RoadEvents:
     jams_online = baidu is not None and baidu.jams_online
     out = {"event": EVENT_NONE, "distance": 0., "source": SOURCE_NONE, "grade": math.tan(pitch), "gradeAhead": 0.,
            "mapMatched": False, "roadClass": 0, "jamLength": 0., "eventSpeedLimit": 0.,
-           "baiduOnline": online or jams_online, "jamFollow": False, "jamFollowDistance": 0.}
+           "baiduOnline": online or jams_online, "jamFollow": False, "jamFollowDistance": 0., "rampNear": False}
 
     sign, dist = 0, 0.
     if path is not None and v >= MIN_SPEED:
@@ -63,6 +65,7 @@ class RoadEvents:
         out["mapMatched"] = True
         out["roadClass"] = int(self.map.way_class[m.way])
         self.road_key = (self.map.way_name[m.way] or self.map.way_ref[m.way], out["roadClass"])
+        out["rampNear"] = out["roadClass"] in MAINLINE and self.map.ramp_near(m, *RAMP_NEAR)
         roundabout, crossing = self.map.features_ahead(m)
     else:
       self.prev_way = None   # slow or no position: the road key stays, the car is still on that road
