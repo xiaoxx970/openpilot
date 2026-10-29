@@ -2,6 +2,7 @@
 import math
 
 EVENT_NONE, EVENT_CROSSING, EVENT_ROUNDABOUT, EVENT_JAM, EVENT_DOWNHILL, EVENT_UPHILL = 0, 9, 10, 12, 14, 15
+EVENT_SPEED_LIMIT_AHEAD = 4   # the cluster's "speed limit ahead", with the limit in ACC_Tempolimit
 
 HOLD = 4.0           # s a prompt stays on the cluster
 
@@ -145,6 +146,46 @@ class JamAhead:
     else:
       self.active, self.distance = True, first
     return self.active, self.distance
+
+
+class CameraPrompt:
+  """A speed camera with a limit ahead (Baidu, see baidu.py): "speed limit ahead" with its limit, LOOK_AHEAD s before it
+  (NEAR m at the least, FAR at the most), for CAMERA_HOLD s, once per camera. Baidu places the camera again in every
+  answer, a few meters off at times: one within SAME m of where the announced one is by the car's own odometer, with the
+  same limit, is that camera.
+  """
+  LOOK_AHEAD = 12.     # s
+  NEAR = 300.          # m
+  FAR = 800.           # m
+  CAMERA_HOLD = 5.     # s
+  SAME = 50.           # m
+
+  def __init__(self):
+    self.odo = 0.
+    self.t: float | None = None
+    self.fired: tuple[float, float] | None = None   # (odometer at the camera, limit) of the last announced camera
+    self.until = -math.inf
+    self.distance = self.limit = 0.
+
+  @classmethod
+  def window(cls, v: float) -> float:
+    return min(cls.FAR, max(cls.NEAR, cls.LOOK_AHEAD * v))
+
+  def update(self, t: float, v: float, distance: float, limit: float, moving: bool) -> tuple[int, float, float]:
+    """distance, limit: the next camera's (baidu.Snapshot.camera_distance / camera_limit), limit 0 for none.
+    Returns (event, distance, limit)."""
+    self.odo += v * (t - self.t) if self.t is not None else 0.
+    self.t = t
+    if limit > 0.:
+      at = self.odo + distance
+      if self.fired is not None and abs(at - self.fired[0]) < self.SAME and abs(limit - self.fired[1]) < 0.1:
+        self.fired, self.distance = (at, limit), distance   # the announced one, placed again
+      elif moving and 0. <= distance <= self.window(v):
+        self.fired, self.distance, self.limit = (at, limit), distance, limit
+        self.until = t + self.CAMERA_HOLD
+    if t < self.until:
+      return EVENT_SPEED_LIMIT_AHEAD, max(0., self.distance), self.limit
+    return EVENT_NONE, 0., 0.
 
 
 def ground_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

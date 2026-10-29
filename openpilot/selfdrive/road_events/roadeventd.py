@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Road prompts for the VW cluster (ACC_Events): uphill / downhill ahead from the model, roundabout / crossing ahead from
-mapd's offline OSM tiles, and with Baidu online data a traffic jam ahead and Baidu's speed limits for sunnypilot's speed
-limit resolver (they replace the offline map's while fresh). card shows the prompts in openpilot's ACC HUD; the resolver's
-limits only reach the cruise speed through Speed Limit Assist, which asks the driver every time. A traffic jam ahead also
-asks selfdrived for the relaxed following distance until the car reaches it (prompts.JamAhead).
+mapd's offline OSM tiles, and with Baidu online data a speed camera ("speed limit ahead" with its limit) and a traffic jam
+ahead, and Baidu's speed limits for sunnypilot's speed limit resolver (they replace the offline map's while fresh). card
+shows the prompts in openpilot's ACC HUD; the resolver's limits only reach the cruise speed through Speed Limit Assist,
+which asks the driver every time. A traffic jam ahead also asks selfdrived for the relaxed following distance until the
+car reaches it (prompts.JamAhead).
 
 Opt-in: param VwRoadEventPrompts for the prompts (1 while openpilot's ACC is on, 2 always: in ACC standby and with the main
 switch off too), VwBaiduOnline (and a key file, see baidu.py) for Baidu; the jam following distance needs both. Light:
@@ -65,6 +66,7 @@ def fill_message(ev, out: dict, snap=None) -> None:
   ev.mapMatched = out["mapMatched"]
   ev.roadClass = out["roadClass"]
   ev.jamLength = out.get("jamLength", 0.)
+  ev.eventSpeedLimit = out.get("eventSpeedLimit", 0.)
   ev.jamFollow = out.get("jamFollow", False)
   ev.jamFollowDistance = out.get("jamFollowDistance", 0.)
   if snap is not None:
@@ -76,7 +78,7 @@ def fill_message(ev, out: dict, snap=None) -> None:
 
 
 NO_PROMPT: dict[str, Any] = {"event": 0, "distance": 0., "source": 0, "grade": 0., "gradeAhead": 0., "mapMatched": False, "roadClass": 0, "roadKey": None,
-                             "jamFollow": False, "jamFollowDistance": 0.}
+                             "eventSpeedLimit": 0., "jamFollow": False, "jamFollowDistance": 0.}
 
 
 def main():
@@ -116,7 +118,7 @@ def main():
       key_t = now
       keys = baidu.load_keys()
       if keys is not None:
-        online = baidu.BaiduOnline(keys)
+        online = baidu.BaiduOnline(keys, log=cloudlog.warning)
         cloudlog.info("roadeventd: Baidu online data on")
 
     msg = messaging.recv_one_or_none(model_sock)
@@ -147,7 +149,7 @@ def main():
           map_failed = True
         road_key = out["roadKey"]
         if not prompts_on:   # Baidu's speed limits only: the map just tells it which road the car is on
-          out.update(event=0, distance=0., source=0, jamLength=0., jamFollow=False, jamFollowDistance=0.)
+          out.update(event=0, distance=0., source=0, jamLength=0., eventSpeedLimit=0., jamFollow=False, jamFollowDistance=0.)
     else:
       odo_t = None
 

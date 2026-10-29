@@ -6,8 +6,8 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from openpilot.selfdrive.road_events.osm_map import OfflineMap
-from openpilot.selfdrive.road_events.prompts import EVENT_CROSSING, EVENT_JAM, EVENT_NONE, EVENT_ROUNDABOUT, JamAhead, JamPrompt, MapPrompt, \
-  SlopePrompt
+from openpilot.selfdrive.road_events.prompts import EVENT_CROSSING, EVENT_JAM, EVENT_NONE, EVENT_ROUNDABOUT, EVENT_SPEED_LIMIT_AHEAD, CameraPrompt, \
+  JamAhead, JamPrompt, MapPrompt, SlopePrompt
 from openpilot.selfdrive.road_events.slope import grades_ahead, slope_ahead
 
 MIN_SPEED = 5.          # m/s: below it the model path is short and the course unreliable
@@ -28,6 +28,7 @@ class RoadEvents:
     self.crossing = MapPrompt(EVENT_CROSSING, *CROSSING_WINDOW)
     self.jam = JamPrompt()
     self.jam_ahead = JamAhead()
+    self.camera = CameraPrompt()
     self.prev_way: int | None = None
     self.road_key: tuple[str, int] | None = None   # (name, OSM class) of the road the car was last placed on
 
@@ -35,10 +36,11 @@ class RoadEvents:
              path: ModelPath | None, baidu=None) -> dict:
     """path: the model's (x, y, z) in the calibrated frame, or None. course: rad from north, clockwise.
     baidu: baidu.Snapshot of the road ahead (an empty one with Baidu off), or None without one for the car's position: its
-    traffic jams ahead, for the prompt and the relaxed following distance. Crossings stay the map's (the owner's call)."""
+    traffic jams ahead, for the prompt and the relaxed following distance, and its next speed camera. Crossings stay the
+    map's (the owner's call)."""
     out = {"event": EVENT_NONE, "distance": 0., "source": SOURCE_NONE, "grade": math.tan(pitch), "gradeAhead": 0.,
-           "mapMatched": False, "roadClass": 0, "jamLength": 0., "baiduOnline": bool(baidu is not None and baidu.online),
-           "jamFollow": False, "jamFollowDistance": 0.}
+           "mapMatched": False, "roadClass": 0, "jamLength": 0., "eventSpeedLimit": 0.,
+           "baiduOnline": bool(baidu is not None and baidu.online), "jamFollow": False, "jamFollowDistance": 0.}
 
     sign, dist = 0, 0.
     if path is not None and v >= MIN_SPEED:
@@ -70,13 +72,19 @@ class RoadEvents:
     if v >= MIN_SPEED:   # crawling or stopped the car is in the queue already
       jam_event, jam_distance, jam_length = self.jam.update(t, jams, fast)
     out["jamFollow"], out["jamFollowDistance"] = self.jam_ahead.update(t, jams if baidu is not None else None, fast, v >= MIN_SPEED)
+    online = baidu is not None and baidu.online
+    camera_event, camera_distance, camera_limit = self.camera.update(t, v, baidu.camera_distance if online else 0.,
+                                                                     baidu.camera_limit if online else 0., v >= MIN_SPEED)
 
-    # one prompt at a time: a jam, the map's, then the model's
-    for (event, d), source in (((jam_event, jam_distance), SOURCE_BAIDU), (self.roundabout.update(t, roundabout), SOURCE_MAP),
-                               (self.crossing.update(t, crossing), SOURCE_MAP), (slope, SOURCE_MODEL)):
+    # one prompt at a time: a speed camera, a jam, the map's, then the model's
+    for (event, d), source in (((camera_event, camera_distance), SOURCE_BAIDU), ((jam_event, jam_distance), SOURCE_BAIDU),
+                               (self.roundabout.update(t, roundabout), SOURCE_MAP), (self.crossing.update(t, crossing), SOURCE_MAP),
+                               (slope, SOURCE_MODEL)):
       if event != EVENT_NONE:
         out.update(event=event, distance=float(d), source=source)
         if event == EVENT_JAM:
           out["jamLength"] = float(jam_length)
+        elif event == EVENT_SPEED_LIMIT_AHEAD:
+          out["eventSpeedLimit"] = float(camera_limit)
         break
     return out

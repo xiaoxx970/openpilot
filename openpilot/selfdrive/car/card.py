@@ -305,6 +305,11 @@ class Car:
     CC_IC_dc.hudSpeedLimitFromMap = resolver.source in (custom.LongitudinalPlanSP.SpeedLimit.Source.map,
                                                         custom.LongitudinalPlanSP.SpeedLimit.Source.baidu)
     CC_IC_dc.hudSpeedLimitAhead = resolver.distToSpeedLimit > 0.
+    # Speed Limit Assist asking to set a limit: the cluster shows it for as long as assist asks. The limit's own prompt
+    # lasts 4 s after it changes and is long gone when assist asks after engaging or a set speed change.
+    offering = lp_sp.speedLimit.assist.state == custom.LongitudinalPlanSP.SpeedLimit.AssistState.preActive
+    CC_IC_dc.hudSpeedLimitOffer = float(resolver.speedLimitLast) if offering and resolver.speedLimitLastValid else 0.
+    CC_IC_dc.hudSpeedLimitOfferAhead = offering and resolver.distToSpeedLimit > 0.
 
     vision = lp_sp.smartCruiseControl.vision
     VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.VisionState
@@ -318,6 +323,7 @@ class Car:
     CC_IC_dc.hudRoadEvent = int(road.event) if road_fresh else 0
     CC_IC_dc.hudRoadEventDistance = float(road.distance) if road_fresh else 0.
     CC_IC_dc.hudRoadEventAlways = bool(road.promptAlways) if road_fresh else False
+    CC_IC_dc.hudRoadEventSpeedLimit = float(road.eventSpeedLimit) if road_fresh else 0.
 
   def controls_update(self, CS: car.CarState, CC: car.CarControl, CC_SP: custom.CarControlSP, CC_IC: custom.CarControlIC):
     """control update loop, driven by carControl"""
