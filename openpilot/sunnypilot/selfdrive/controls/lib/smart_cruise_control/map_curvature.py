@@ -6,6 +6,9 @@ car too), each with the unsigned curvature of the circle through it and its neig
 polyline from its GPS fix and returns the nodes ahead as distance along the road, which is what the planner plans its
 braking against. Straight-line distances, as SCC-M uses, put the curves of a winding road too close.
 
+In town mapd often publishes the road from a node ahead of the car (55-220 m ahead on 2026-10-28, Nanjing): the car is
+then placed on the first segment's line, before its first node.
+
 In hairpins mapd can publish the same road reversed for about a second while the car's bearing swings (4 times in
 15 minutes of the 2026-09-20 mountain road, replayed through mapd itself). The bearing check alone accepted that table,
 which would plan against the curves behind the car, so a new table is only used once the car is seen moving forward
@@ -47,7 +50,7 @@ class _Table:
 class MapCurvatureAhead:
   def __init__(self, max_offset: float = 25.0, max_heading_error: float = 50.0, max_track_heading_error: float = 100.0,
                min_heading_speed: float = 5.0, horizon: float = 300.0, search_back: int = 3, search_ahead: int = 60,
-               confirm_dist: float = 4.0):
+               confirm_dist: float = 4.0, lead_in: float = 300.0):
     self.max_offset = max_offset                            # m from the road polyline: further and the car is on another road
     self.max_heading_error = math.radians(max_heading_error)
     # following the road from the last match: loose enough for the bearing lag through a hairpin, still rules out its
@@ -58,6 +61,7 @@ class MapCurvatureAhead:
     self.search_back = search_back                          # segments around the last match that are searched
     self.search_ahead = search_ahead
     self.confirm_dist = confirm_dist                        # m driven to confirm that a new table runs the car's way
+    self.lead_in = lead_in                                  # m before a table's first node the car may still be placed
     self.table = _Table(None, [])
     self.previous = _Table(None, [])
     self.s_car = 0.0                                        # the car's place along the road at the last match (m)
@@ -80,7 +84,9 @@ class MapCurvatureAhead:
   def _match(self, tb: _Table, px: float, py: float, bearing: float, max_error: float | None, segs: np.ndarray):
     """Best segment among `segs` for the car at (px, py): (segment, share along it), or None. `max_error`: largest
     heading difference to the segment (rad), None to skip the check."""
-    t = np.clip(((px - tb.x[segs]) * tb.dx[segs] + (py - tb.y[segs]) * tb.dy[segs]) / tb.seg_len2[segs], 0.0, 1.0)
+    # before the first node the car is placed on the first segment's line, up to lead_in metres back
+    lo = np.where(segs == 0, -self.lead_in / np.sqrt(tb.seg_len2[segs]), 0.0)
+    t = np.clip(((px - tb.x[segs]) * tb.dx[segs] + (py - tb.y[segs]) * tb.dy[segs]) / tb.seg_len2[segs], lo, 1.0)
     offset = np.hypot(px - (tb.x[segs] + t * tb.dx[segs]), py - (tb.y[segs] + t * tb.dy[segs]))
     ok = offset <= self.max_offset
     if max_error is not None:

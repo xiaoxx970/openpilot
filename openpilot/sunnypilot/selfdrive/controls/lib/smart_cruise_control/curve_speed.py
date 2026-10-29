@@ -63,6 +63,11 @@ class CurveSpeedParams:
   exit_share_bp: tuple = (0.6, 0.8, 0.95, 1.0)
   exit_share_v: tuple = (1.0, 0.75, 0.5, 0.0)
   apex_ratio: float = 0.97        # curvature this far below its peak: past the apex, the curve is opening
+  # no speeding up in a curve until the measured curvature has stopped growing for this long (the apex): neither back up
+  # to the locked speed nor from the near preview calling the apex early. In short city turns taken slower than the lock
+  # the car was pushed +0.2-0.4 mid-turn (three times at one Nanjing junction, 2026-10-27/28). 0: as before
+  apex_hold: float = 0.2
+  peak_tol: float = 0.005         # growth below this share is the curvature levelling off, not still rising
   # the exit re-accelerates at the driver's rate while the road ahead can still be met by comfortable braking started
   # later, using up that room over this many seconds. 0: never faster than the constant accel that meets the next curve
   # exactly (before 2026-10-27), which held every exit back once the map showed the next curve (mountain road, mean
@@ -88,6 +93,16 @@ class CurveSpeedParams:
   # mountain roads it read curves of R < 150 m at 0.98-0.99 of the driven radius (p50), so it is used without a gain.
   map_gain: float = 1.0
   map_horizon_m: float = 250.0
+  # with the map ahead the camera's far gain may raise its reading only up to what the map shows around that distance,
+  # times this margin: the gain makes up for curves the model under-reads on winding roads, which the map sees too, but
+  # on ordinary roads at 60-90 km/h it read a gentle R~300 curve as R~215 (80 -> 66 km/h vs the driver's 74, 2026-10-28)
+  # while the map asked for no braking. Dropping the gain altogether with the map made mountain hairpins faster (worst
+  # 5 % apex lateral accel 3.29 -> 3.60). 0: the gain is not gated
+  map_gate_margin: float = 1.25
+  map_gate_window: float = 20.0   # m around a camera point searched for map nodes: ~20 m node spacing plus GPS error
+  # ... from these speeds on: winding roads are driven slower, and there the gate cost mountain exits (0.27 -> 0.20 on
+  # the 09-20 hairpins, where the map draws some curves wider than they are)
+  map_gate_speed_bp: tuple = (50 * KPH, 65 * KPH)
   map_min_dist: float = 4.0       # map points closer than this are left to the camera, which is accurate near the car
 
 
@@ -134,6 +149,7 @@ class CurveSpeedPlanner:
     self.kappa_f = 0.0
     self.kappa_lock = 0.0
     self.kappa_peak = 0.0
+    self.peak_age = 0.0         # s since the measured curvature last grew in this curve
     self.v_lock = 0.0
     self.tighten_t = 0.0
     self.exit_t = 0.0
@@ -176,6 +192,18 @@ class CurveSpeedPlanner:
     share = min(self.kappa_f, max(self.k_near, 0.5 * self.kappa_f)) / max(self.kappa_peak, 1e-6)
     return float(np.interp(v_ego, self.p.exit_bp, self.p.exit_v)) * float(np.interp(share, self.p.exit_share_bp, self.p.exit_share_v))
 
+  def map_curvature_near(self, s, map_dist, map_kappa):
+    """The map's tightest curvature within the gate window around each distance s: the nodes there and the profile
+    interpolated between nodes (sparse nodes on a gentle curve, or the car between two nodes). No nodes = straight."""
+    md = np.asarray(map_dist, dtype=np.float64)
+    mk = np.asarray(map_kappa, dtype=np.float64)
+    if not len(md):
+      return np.zeros(len(s))
+    w = self.p.map_gate_window
+    k = np.maximum.reduce([np.interp(s - w, md, mk), np.interp(s, md, mk), np.interp(s + w, md, mk)])
+    near = np.abs(md[None, :] - s[:, None]) <= w
+    return np.maximum(k, np.max(np.where(near, mk[None, :], 0.0), axis=1))
+
   def exit_room(self, v_ego):
     """Accel the exit may use before the road ahead would need more than comfortable braking."""
     if self.p.exit_room_time <= 0.0:
@@ -208,7 +236,13 @@ class CurveSpeedPlanner:
     m = (s >= p.min_preview_dist) & (s <= horizon)
     w = float(np.interp(v_ego, p.preview_gain_speed_bp, (0.0, 1.0)))
     gain = w * np.interp(s[m], p.preview_gain_bp, p.preview_gain_v) + (1.0 - w) * np.interp(s[m], p.preview_gain_bp, p.preview_gain_slow_v)
-    s_ahead, k_ahead = s[m], k[m] * gain
+    k_cam = k[m] * gain
+    if map_dist is not None and map_kappa is not None and p.map_gate_margin > 0.0:
+      g = float(np.interp(v_ego, p.map_gate_speed_bp, (0.0, 1.0)))
+      if g > 0.0:
+        gated = np.maximum(k[m], np.minimum(k_cam, p.map_gate_margin * p.map_gain * self.map_curvature_near(s[m], map_dist, map_kappa)))
+        k_cam = k_cam + g * (gated - k_cam)
+    s_ahead, k_ahead = s[m], k_cam
     n_vision = len(s_ahead)
     if map_dist is not None and map_kappa is not None and len(map_dist):
       # the map sees past what the camera can, so it is planned against just like the preview
@@ -246,6 +280,7 @@ class CurveSpeedPlanner:
         if self.v_display > 0.0:
           self.v_lock = min(self.v_lock, self.v_display)   # continue from the target already shown
         self.kappa_peak = self.kappa_f
+        self.peak_age = 0.0
         self.tighten_t = self.exit_t = 0.0
       elif self.state == self.CRUISE and self.a_req < p.brake_on:
         self.state = self.APPROACH
@@ -259,6 +294,10 @@ class CurveSpeedPlanner:
         self.state = self.CRUISE
 
     elif self.state == self.CURVE:
+      if self.kappa_f > self.kappa_peak * (1.0 + p.peak_tol):
+        self.peak_age = 0.0
+      else:
+        self.peak_age += dt
       self.kappa_peak = max(self.kappa_peak, self.kappa_f)
       # tightening: only lower the lock when the curve is clearly and persistently tighter
       if not lane_change and self.kappa_f > p.tighten_ratio * self.kappa_lock:
@@ -292,14 +331,17 @@ class CurveSpeedPlanner:
       # hold the locked speed; if we arrived too fast, bleed it off gently
       # hold the locked speed: bleed off gently if above it, come back up at the driver's exit rate if below it
       lim = self.lat_limit(v_ego)
-      opening = self.kappa_f < p.apex_ratio * self.kappa_peak or self.k_near < p.apex_ratio * self.kappa_f
+      levelled = self.peak_age >= p.apex_hold
+      opening = self.kappa_f < p.apex_ratio * self.kappa_peak or (levelled and self.k_near < p.apex_ratio * self.kappa_f)
       if opening and self.a_req >= 0.0:
         # past the apex with nothing tighter ahead: speed up at the driver's rate, never faster than the road ahead allows
         a_target = min(self.exit_accel(v_ego), self.exit_room(v_ego))
         self.v_lock = max(self.v_lock, v_ego)
       else:
+        # below the locked speed it comes back up at the driver's rate, but only past the apex: the driver does not speed
+        # up before it, and in city turns taken slower than the lock (traffic, the model) this was the mid-turn push
         up = float(np.interp(v_ego, p.exit_bp, p.exit_v)) * float(np.clip((lim - lat_now) / (p.exit_margin * lim), 0.0, 1.0))
-        a_target = float(np.clip(0.5 * (self.v_lock - v_ego), -p.curve_decel, up))
+        a_target = float(np.clip(0.5 * (self.v_lock - v_ego), -p.curve_decel, up if levelled else 0.0))
       if self.a_req < (a_target if p.exit_room_time <= 0.0 else min(a_target, 0.0)):   # something tighter still ahead
         d_hard = min(p.decel_max, float(np.interp(v_ego, p.hard_decel_bp, p.hard_decel_v)))
         a_target = min(max(-p.decel_comfort, 1.1 * self.a_req), max(-d_hard, 1.1 * self.a_req_hard), a_target)
@@ -311,6 +353,7 @@ class CurveSpeedPlanner:
       if self.kappa_f > p.tighten_ratio * self.kappa_peak:   # S-bend / second apex in the same curve
         self.state = self.CURVE
         self.kappa_peak = self.kappa_f
+        self.peak_age = 0.0
         self.v_lock = min(max(v_ego, self.v_lock), float(self.v_for_kappa(self.kappa_f)))
       self.v_cap = max(self.v_cap, v_ego) + a_exit * dt
       if self.a_req < p.brake_on:        # next curve already needs braking

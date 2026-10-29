@@ -22,6 +22,14 @@ def straight(s):
   return np.zeros_like(s)
 
 
+def short_turn(start, length, radius):
+  """|curvature| of a short turn that tightens to `radius` at its middle and opens again, like a city junction."""
+  def fn(s):
+    x = 1.0 - np.abs(np.asarray(s, dtype=float) - (start + length / 2)) / (length / 2)
+    return np.clip(x, 0.0, 1.0) / radius
+  return fn
+
+
 def model_path(s_car, v, curvature_fn):
   """A model path that follows the road exactly: positions and headings at the model's time samples."""
   s = s_car + max(v, 1.) * np.array(ModelConstants.T_IDXS)
@@ -141,6 +149,40 @@ class TestCurveSpeedPlanner(OpenpilotTestCase):
       assert (exit_cmd > 0.25) == accelerates, f'exit command {exit_cmd:.2f} out of the first curve, exit_room_time {exit_room_time}'
       entry = next(r for r in log if r[0] >= 330.)
       assert entry[1] < float(planner.v_for_kappa(1 / 40.)) * 1.1, 'too fast into the second curve'
+
+  def test_no_speeding_up_before_the_apex_of_a_short_turn(self):
+    # a junction turn tightening to R15 at its middle, entered at 16 km/h, slower than the planner's own target there:
+    # it used to come back up to that target from the moment the turn began
+    start, length = 40., 30.
+    apex = start + length / 2
+    for apex_hold, pushes in ((CurveSpeedParams().apex_hold, False), (0.0, True)):
+      _, log = drive(short_turn(start, length, 15.), 16 * KPH, 25., params=CurveSpeedParams(apex_hold=apex_hold))
+      before_apex = max(r[3] for r in log if start <= r[0] < apex)
+      assert (before_apex > 0.1) == pushes, f'command {before_apex:.2f} before the apex, apex_hold {apex_hold}'
+      after = max(r[3] for r in log if apex + 5. <= r[0] <= start + length + 10.)
+      assert after > 0.1, 'no speeding up out of the turn'
+
+  def test_map_keeps_the_camera_from_over_reading_a_gentle_curve(self):
+    # 80 km/h, R300 from 80 m ahead: the camera's far gain reads it as ~R170 and brakes; the map shows the real radius
+    v = 80 * KPH
+    curve = one_curve(300., 80., 150.)
+    map_dist = np.arange(5., 300., 20.)
+    camera_only, with_map = CurveSpeedPlanner(dt=DT_MDL), CurveSpeedPlanner(dt=DT_MDL)
+    for _ in range(10):
+      camera_only.update(v, 0., 0., *model_path(0., v, curve))
+      with_map.update(v, 0., 0., *model_path(0., v, curve), map_dist=map_dist, map_kappa=curve(map_dist))
+    assert camera_only.state == CurveSpeedPlanner.APPROACH and camera_only.a_cmd < -0.2
+    assert with_map.state == CurveSpeedPlanner.CRUISE and with_map.a_cmd == 0.
+
+  def test_map_gate_keeps_tight_curves(self):
+    # the same at R60, which the map shows too: the camera's gained reading stays and it brakes
+    v = 80 * KPH
+    curve = one_curve(60., 80., 60.)
+    map_dist = np.arange(5., 300., 20.)
+    planner = CurveSpeedPlanner(dt=DT_MDL)
+    for _ in range(10):
+      planner.update(v, 0., 0., *model_path(0., v, curve), map_dist=map_dist, map_kappa=curve(map_dist))
+    assert planner.state == CurveSpeedPlanner.APPROACH and planner.a_cmd < -0.2
 
   def test_high_speed_respects_the_steering_cap(self):
     p = CurveSpeedParams()

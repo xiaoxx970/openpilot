@@ -105,6 +105,22 @@ class TestMapCurvatureAhead(OpenpilotTestCase):
     # below 5 m/s the GPS bearing is noise: the place is kept near the last match whatever it says
     assert car.at(y=106., bearing=200., speed=2.) is not None
 
+  def test_table_starting_ahead_of_the_car(self):
+    # in town mapd publishes the road from a node ahead: the car is placed on the first segment's line before it
+    x, y, k = north_road(curve=(100., 140.))
+    self.m.set_points(road_json(x, y + 100., k))
+    car = Car(self.m, 3., 0., 0.)
+    car.at()
+    dist, kappa = car.at(y=6.)
+    assert abs(dist[0] - 94.) < 0.5
+    np.testing.assert_allclose(dist[kappa > 0][0], 200. - 6., atol=0.5)
+    # too far before it to tell whether the car will get there
+    far = MapCurvatureAhead()
+    far.set_points(road_json(x, y + 400., k))
+    car = Car(far, 3., 0., 0.)
+    car.at()
+    assert car.at(y=6.) is None
+
   def test_bad_table(self):
     self.m.set_points('not json')
     assert Car(self.m, 3., 100., 0.).at() is None
