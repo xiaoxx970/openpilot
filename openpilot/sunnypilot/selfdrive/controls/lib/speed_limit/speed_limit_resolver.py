@@ -12,6 +12,8 @@ from openpilot.common.constants import CV
 from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
+from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
+from openpilot.selfdrive.road_events.prompts import CameraPrompt
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD, get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import LIMIT_MAX_MAP_DATA_AGE, LIMIT_ADAPT_ACC
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Policy, OffsetType
@@ -58,6 +60,10 @@ class SpeedLimitResolver:
     }
     self.source = SpeedLimitSource.none
     self.baidu_in_use = False
+    self.baidu_camera = False   # Baidu's limit is the speed camera's (fork)
+    self.camera = False         # the resolved limit is a Baidu speed camera's (fork)
+    self._camera: tuple[float, float] | None = None   # (m to it, limit m/s) of the speed camera in use
+    self._last_before_camera = (0., 0.)              # speed_limit_last, speed_limit_final_last from before it
     for source in ALL_SOURCES:
       self._reset_limit_sources(source)
 
@@ -98,13 +104,14 @@ class SpeedLimitResolver:
       self.offset_type = self.params.get("SpeedLimitOffsetType", return_default=True)
       self.offset_value = self.params.get("SpeedLimitValueOffset", return_default=True)
 
-  def _get_speed_limit_offset(self) -> float:
+  def _get_speed_limit_offset(self, speed_limit: float | None = None) -> float:
+    speed_limit = self.speed_limit if speed_limit is None else speed_limit
     if self.offset_type == OffsetType.off:
       return 0
     elif self.offset_type == OffsetType.fixed:
       return float(self.offset_value * (CV.KPH_TO_MS if self.is_metric else CV.MPH_TO_MS))
     elif self.offset_type == OffsetType.percentage:
-      return float(self.offset_value * 0.01 * self.speed_limit)
+      return float(self.offset_value * 0.01 * speed_limit)
     else:
       raise NotImplementedError("Offset not supported")
 
@@ -155,25 +162,43 @@ class SpeedLimitResolver:
 
   def _get_from_baidu(self, sm: messaging.SubMaster) -> bool:
     """Baidu Maps' limits from roadeventd (fork): True when they stand in for the offline map's, i.e. with a fresh limit for the
-    road the car is on or a speed camera close enough to adapt to. Otherwise the offline map stays."""
+    road the car is on or a speed camera in use. Otherwise the offline map stays."""
     self._reset_limit_sources(SpeedLimitSource.baidu)
+    self.baidu_camera = False
     if 'roadEventsIC' not in getattr(sm, 'services', ()) or not sm.seen['roadEventsIC'] or \
        time.monotonic() - sm.recv_time['roadEventsIC'] > BAIDU_MAX_AGE:
+      self._camera = None
       return False
     road = sm['roadEventsIC']
     in_use = False
-    distance_ahead = max(0., road.speedLimitAheadDistance - self.v_ego * (time.monotonic() - sm.recv_time['roadEventsIC']))
     if road.speedLimitValid:
       self.limit_solutions[SpeedLimitSource.baidu] = road.speedLimit
       in_use = True
-    if 0. < road.speedLimitAhead < self.v_ego:
-      adapt_time = (road.speedLimitAhead - self.v_ego) / LIMIT_ADAPT_ACC
-      adapt_distance = self.v_ego * adapt_time + 0.5 * LIMIT_ADAPT_ACC * adapt_time ** 2
-      if distance_ahead <= adapt_distance:
-        self.limit_solutions[SpeedLimitSource.baidu] = road.speedLimitAhead
-        self.distance_solutions[SpeedLimitSource.baidu] = distance_ahead
-        in_use = True
+    camera = self._update_camera(sm, road, time.monotonic() - sm.recv_time['roadEventsIC'])
+    if camera is not None:
+      distance, self.limit_solutions[SpeedLimitSource.baidu] = camera
+      self.distance_solutions[SpeedLimitSource.baidu] = max(0., distance)
+      self.baidu_camera = in_use = True
     return in_use
+
+  def _update_camera(self, sm: messaging.SubMaster, road, age: float) -> tuple[float, float] | None:
+    """A Baidu speed camera's limit, as a limit ahead: taken up LOOK_AHEAD s before the camera (as its cluster prompt) when the
+    set speed is above it, so it never offers to speed up, and kept while that camera is reported, until 50 m past it
+    (roadeventd), with the set speed at its limit or above. Every camera is taken as a point camera."""
+    limit, distance = road.speedLimitAhead, road.speedLimitAheadDistance - self.v_ego * age
+    if limit <= 0.:
+      self._camera = None
+      return None
+    set_speed_kph = min(sm['carState'].vCruiseCluster, V_CRUISE_MAX)
+    target_kph = round((limit + self._get_speed_limit_offset(limit)) * CV.MS_TO_KPH)
+    same = self._camera is not None and abs(limit - self._camera[1]) < 0.1 and distance < self._camera[0] + CameraPrompt.SAME
+    if same and target_kph <= set_speed_kph:
+      self._camera = (distance, limit)
+    elif not same and 0. <= distance <= CameraPrompt.window(self.v_ego) and target_kph < set_speed_kph:
+      self._camera = (distance, limit)
+    else:
+      self._camera = None
+    return self._camera
 
   def _get_source_solution_according_to_policy(self) -> custom.LongitudinalPlanSP.SpeedLimit.Source:
     # Baidu replaces the offline map wherever a policy uses it
@@ -212,6 +237,13 @@ class SpeedLimitResolver:
     self.speed_limit, self.distance, self.source = self._resolve_limit_sources(sm)
     self.speed_limit_offset = self._get_speed_limit_offset()
 
+    camera = self.source == SpeedLimitSource.baidu and self.baidu_camera
+    if camera and not self.camera:
+      self._last_before_camera = (self.speed_limit_last, self.speed_limit_final_last)
     self.update_speed_limit_states()
+    if self.camera and not camera and self.speed_limit == 0.:
+      # past a speed camera with no other limit: the last limit is again the one from before it, not the camera's
+      self.speed_limit_last, self.speed_limit_final_last = self._last_before_camera
+    self.camera = camera
 
     self.frame += 1

@@ -13,6 +13,7 @@ from openpilot.cereal import custom
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import LIMIT_MAX_MAP_DATA_AGE
 
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver, ALL_SOURCES
+from openpilot.selfdrive.road_events.prompts import CameraPrompt
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Policy
 from openpilot.common.test import OpenpilotTestCase
 
@@ -147,12 +148,13 @@ class TestSpeedLimitResolverValidation(OpenpilotTestCase):
     assert resolver.distance_solutions[SpeedLimitSource.map] == 0.
 
 
-def setup_baidu_sm_mock(mocker, map_limit, car_limit=0., road=None, age=0.2):
+def setup_baidu_sm_mock(mocker, map_limit, car_limit=0., road=None, age=0.2, set_kph=100.):
   """Fork: roadeventd's Baidu limits next to the car's and the offline map's."""
   sm_mock = setup_sm_mock(mocker)
   items = {key: sm_mock[key] for key in ('carState', 'liveMapDataSP', 'carStateSP', 'gpsLocation')}
   items['liveMapDataSP'].speedLimit = map_limit
   items['carStateSP'].speedLimit = car_limit
+  items['carState'].vCruiseCluster = set_kph
   if road is not None:
     items['roadEventsIC'] = create_mock({'speedLimit': 0., 'speedLimitValid': False, 'speedLimitAhead': 0., 'speedLimitAheadDistance': 0.,
                                          **road}, mocker)
@@ -189,19 +191,79 @@ class TestSpeedLimitResolverBaidu(OpenpilotTestCase):
     resolver.update(20., sm_mock)
     assert resolver.source == SpeedLimitSource.map
 
-  def test_speed_camera_ahead(self, resolver_class, mocker):
+  def test_speed_camera_ahead_from_12_s_before_it(self, resolver_class, mocker):
     resolver = resolver_class()
     resolver.policy = Policy.map_data_only
-    v_ego = 80 / 3.6   # adapting from 80 to 60 km/h at 1 m/s^2 takes 5.6 s and 108 m
-    near = {'speedLimitAhead': self.BAIDU, 'speedLimitAheadDistance': 95.}
-    resolver.update(v_ego, setup_baidu_sm_mock(mocker, 0., road=near, age=0.2))
-    assert resolver.source == SpeedLimitSource.baidu
-    assert resolver.speed_limit == self.BAIDU
-    assert 0. < resolver.distance < 95.   # aged by the message's age
-    resolver.update(v_ego, setup_baidu_sm_mock(mocker, self.MAP, road={**near, 'speedLimitAheadDistance': 400.}))
-    assert resolver.source == SpeedLimitSource.map
-    resolver.update(self.BAIDU, setup_baidu_sm_mock(mocker, self.MAP, road=near))   # not faster than the camera
-    assert resolver.source == SpeedLimitSource.map
+    v_ego = 80 / 3.6   # 12 s = 267 m, so from 300 m
+    for distance, used in ((CameraPrompt.NEAR + 10., False), (CameraPrompt.NEAR - 5., True)):
+      resolver.update(v_ego, setup_baidu_sm_mock(mocker, self.MAP, road={'speedLimitAhead': self.BAIDU, 'speedLimitAheadDistance': distance}))
+      assert (resolver.source == SpeedLimitSource.baidu) == used
+    assert resolver.speed_limit == self.BAIDU and resolver.camera
+    assert 0. < resolver.distance < CameraPrompt.NEAR - 5.   # aged by the message's age
+    resolver = resolver_class()
+    resolver.policy = Policy.map_data_only
+    resolver.update(120 / 3.6, setup_baidu_sm_mock(mocker, self.MAP, road={'speedLimitAhead': self.BAIDU, 'speedLimitAheadDistance': 390.}))
+    assert resolver.source == SpeedLimitSource.baidu   # 12 s at 120 km/h
+
+  @parameterized.expand([(60.,), (50.,)], names=["set_kph"])
+  def test_no_speed_camera_at_or_below_the_set_speed(self, resolver_class, set_kph, mocker):
+    # it would only ask to speed up
+    resolver = resolver_class()
+    resolver.policy = Policy.combined
+    road = {'speedLimitAhead': self.BAIDU, 'speedLimitAheadDistance': 200.}
+    resolver.update(20., setup_baidu_sm_mock(mocker, self.MAP, road=road, set_kph=set_kph))
+    assert resolver.source == SpeedLimitSource.map and not resolver.camera
+
+  def test_speed_camera_kept_until_50_m_past_it(self, resolver_class, mocker):
+    # once the driver set its limit as the set speed too, and past the camera at distance 0
+    resolver = resolver_class()
+    resolver.policy = Policy.combined
+    v_ego = 60 / 3.6
+    for distance, set_kph in ((250., 80.), (150., 80.), (50., 60.), (0., 60.), (-45., 60.)):
+      resolver.update(v_ego, setup_baidu_sm_mock(mocker, 0., car_limit=self.MAP, road={'speedLimitAhead': self.BAIDU,
+                                                                                         'speedLimitAheadDistance': distance}, set_kph=set_kph))
+      assert resolver.source == SpeedLimitSource.baidu and resolver.camera
+      assert resolver.speed_limit == self.BAIDU
+      assert abs(resolver.distance - max(0., distance - v_ego * 0.2)) < 0.5
+    resolver.update(v_ego, setup_baidu_sm_mock(mocker, 0., car_limit=self.MAP, road={}, set_kph=60.))   # 50 m past it: not reported
+    assert resolver.source == SpeedLimitSource.car and not resolver.camera
+    assert resolver.speed_limit == self.MAP
+
+  def test_speed_camera_dropped_below_the_set_speed_and_for_the_next_one(self, resolver_class, mocker):
+    resolver = resolver_class()
+    resolver.policy = Policy.combined
+
+    def update(distance, limit=self.BAIDU, set_kph=80.):
+      resolver.update(20., setup_baidu_sm_mock(mocker, 0., car_limit=self.MAP, road={'speedLimitAhead': limit, 'speedLimitAheadDistance': distance},
+                                               set_kph=set_kph))
+      return resolver.camera
+
+    assert update(200.)
+    assert not update(190., set_kph=55.)   # the driver set it lower than the camera
+    assert update(180.)                    # and higher again
+    assert not update(700.)                # a jump: another camera, from 300 m only
+    assert not update(450.) and update(290.)
+    assert update(100., limit=40 / 3.6)   # another limit: another camera
+
+  def test_speed_camera_never_above_the_cars_sign_when_combined(self, resolver_class, mocker):
+    resolver = resolver_class()
+    resolver.policy = Policy.combined
+    resolver.update(20., setup_baidu_sm_mock(mocker, 0., car_limit=50 / 3.6, road={'speedLimitAhead': self.BAIDU, 'speedLimitAheadDistance': 200.}))
+    assert resolver.source == SpeedLimitSource.car and resolver.speed_limit == 50 / 3.6 and not resolver.camera
+
+  def test_last_limit_from_before_the_speed_camera(self, resolver_class, mocker):
+    # with no other limit past the camera, the last limit is not the camera's (a later engagement would offer it)
+    resolver = resolver_class()
+    resolver.policy = Policy.combined
+    camera = {'speedLimitAhead': self.BAIDU, 'speedLimitAheadDistance': 200.}
+    resolver.update(20., setup_baidu_sm_mock(mocker, 0., car_limit=self.MAP))
+    resolver.update(20., setup_baidu_sm_mock(mocker, 0.))
+    assert resolver.speed_limit_last == self.MAP and not resolver.speed_limit_valid
+    resolver.update(20., setup_baidu_sm_mock(mocker, 0., road=camera))
+    assert resolver.speed_limit_last == self.BAIDU and resolver.camera
+    resolver.update(20., setup_baidu_sm_mock(mocker, 0., road={}))
+    assert resolver.speed_limit == 0. and resolver.speed_limit_last == self.MAP
+    assert resolver.speed_limit_final_last == self.MAP
 
   def test_car_state_only_unchanged(self, resolver_class, mocker):
     resolver = resolver_class()
