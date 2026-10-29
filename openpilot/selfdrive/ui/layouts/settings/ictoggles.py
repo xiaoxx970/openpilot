@@ -44,6 +44,11 @@ DESCRIPTIONS = {
     "Shows uphill / downhill ahead from the driving model, and roundabout / crossing ahead from the offline map " +
     "(download it in the OSM settings) on the cluster while openpilot's ACC is on. Display only."
   ),
+  "VwBaiduOnline": tr_noop(
+    "Baidu Maps' live data for the road ahead: speed limits in place of the offline map's (Speed Limit Assist still asks " +
+    "before each change), and with Road Event Prompts a traffic jam ahead and traffic lights for the crossing prompt. Sends " +
+    "the car's recent positions to Baidu a few times a minute over mobile data. Needs your Baidu Maps key in /data/baidu_ak."
+  ),
   "EnableSpeedLimitPredicative": tr_noop(
     "Enables setting predicative speed limit"
   ),
@@ -114,6 +119,12 @@ class ICTogglesLayout(Widget):
       "VwRoadEventPrompts": (
         lambda: tr("VW: Road Event Prompts"),
         DESCRIPTIONS["VwRoadEventPrompts"],
+        "chffr_wheel.png",
+        False,
+      ),
+      "VwBaiduOnline": (
+        lambda: tr("VW: Baidu Traffic & Speed Limits"),
+        DESCRIPTIONS["VwBaiduOnline"],
         "chffr_wheel.png",
         False,
       ),

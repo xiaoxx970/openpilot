@@ -295,6 +295,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
       none @0;
       car @1;
       map @2;
+      baidu @3;   # Baidu Maps online data from roadeventd, replaces map (offline OSM) while fresh
     }
 
     enum AssistState {
@@ -489,20 +490,28 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   }
 }
 
-# road prompts for the VW cluster (ACC_Events) from roadeventd: the model's slope ahead and the offline OSM map. Display only.
+# road prompts for the VW cluster (ACC_Events) from roadeventd: the model's slope ahead, the offline OSM map and Baidu Maps online
+# data; also Baidu's speed limits for the speed limit resolver. The prompts are display only.
 struct RoadEventsIC @0xcb9fd56c7057593a {
-  event @0 :UInt8;            # ACC_Events value to show: 0 none, 9 crossing, 10 roundabout, 14 downhill, 15 uphill
+  event @0 :UInt8;            # ACC_Events value to show: 0 none, 9 crossing, 10 roundabout, 12 traffic jam, 14 downhill, 15 uphill
   distance @1 :Float32;       # m from the car to the event, 0 = unknown
   source @2 :Source;
   grade @3 :Float32;          # current road grade, rise over run (liveLocationKalman pitch)
   gradeAhead @4 :Float32;     # steepest predicted grade ahead (modelV2 path in world frame), rise over run
   mapMatched @5 :Bool;        # the car is placed on an offline map road
   roadClass @6 :UInt8;        # its OSM highway class, as in mapd's offline tiles (1 motorway ... 13 living street)
+  jamLength @7 :Float32;      # m, length of the jam ahead while event is 12
+  baiduOnline @8 :Bool;       # a Baidu cruise answer for the road ahead in the last minute
+  speedLimit @9 :Float32;     # m/s, Baidu's speed limit of the road the car is on (road info API), 0 = none
+  speedLimitValid @10 :Bool;  # a fresh Baidu answer for that road: then it stands in for the offline map's limit
+  speedLimitAhead @11 :Float32;          # m/s, limit of the next Baidu speed camera on the road ahead, 0 = none
+  speedLimitAheadDistance @12 :Float32;  # m to it
 
   enum Source {
     none @0;
     model @1;
     map @2;
+    baidu @3;
   }
 }
 

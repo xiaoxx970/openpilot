@@ -68,8 +68,9 @@ def vision_car_types_enabled(started: bool, params: Params, CP: car.CarParams) -
     os.path.exists("/data/yolo_lead/yolo26n.onnx")
 
 def road_events_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
-  # opt-in display only: the VW cluster's road prompts are part of openpilot's own ACC HUD
-  return started and CP.brand == "volkswagen" and CP.openpilotLongitudinalControl and params.get_bool("VwRoadEventPrompts")
+  # opt-in display only: the VW cluster's road prompts are part of openpilot's own ACC HUD; Baidu needs its key file too
+  return started and CP.brand == "volkswagen" and CP.openpilotLongitudinalControl and \
+    (params.get_bool("VwRoadEventPrompts") or (params.get_bool("VwBaiduOnline") and os.path.exists("/data/baidu_ak")))
 
 def curvatured_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   return only_onroad(started, params, CP) and params.get_bool("EnableCurvatureD")

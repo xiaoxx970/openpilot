@@ -19,6 +19,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Polic
 SpeedLimitSource = custom.LongitudinalPlanSP.SpeedLimit.Source
 
 ALL_SOURCES = tuple(SpeedLimitSource.schema.enumerants.values())
+BAIDU_MAX_AGE = 1.5  # s without a roadEventsIC message (2 Hz) before Baidu's limits are dropped
 
 
 class SpeedLimitResolver:
@@ -56,6 +57,7 @@ class SpeedLimitResolver:
       Policy.combined: [SpeedLimitSource.car, SpeedLimitSource.map],
     }
     self.source = SpeedLimitSource.none
+    self.baidu_in_use = False
     for source in ALL_SOURCES:
       self._reset_limit_sources(source)
 
@@ -151,8 +153,32 @@ class SpeedLimitResolver:
         self.limit_solutions[SpeedLimitSource.map] = next_speed_limit
         self.distance_solutions[SpeedLimitSource.map] = distance_to_speed_limit_ahead
 
+  def _get_from_baidu(self, sm: messaging.SubMaster) -> bool:
+    """Baidu Maps' limits from roadeventd (fork): True when they stand in for the offline map's, i.e. with a fresh limit for the
+    road the car is on or a speed camera close enough to adapt to. Otherwise the offline map stays."""
+    self._reset_limit_sources(SpeedLimitSource.baidu)
+    if 'roadEventsIC' not in getattr(sm, 'services', ()) or not sm.seen['roadEventsIC'] or \
+       time.monotonic() - sm.recv_time['roadEventsIC'] > BAIDU_MAX_AGE:
+      return False
+    road = sm['roadEventsIC']
+    in_use = False
+    distance_ahead = max(0., road.speedLimitAheadDistance - self.v_ego * (time.monotonic() - sm.recv_time['roadEventsIC']))
+    if road.speedLimitValid:
+      self.limit_solutions[SpeedLimitSource.baidu] = road.speedLimit
+      in_use = True
+    if 0. < road.speedLimitAhead < self.v_ego:
+      adapt_time = (road.speedLimitAhead - self.v_ego) / LIMIT_ADAPT_ACC
+      adapt_distance = self.v_ego * adapt_time + 0.5 * LIMIT_ADAPT_ACC * adapt_time ** 2
+      if distance_ahead <= adapt_distance:
+        self.limit_solutions[SpeedLimitSource.baidu] = road.speedLimitAhead
+        self.distance_solutions[SpeedLimitSource.baidu] = distance_ahead
+        in_use = True
+    return in_use
+
   def _get_source_solution_according_to_policy(self) -> custom.LongitudinalPlanSP.SpeedLimit.Source:
-    sources_for_policy = self._policy_to_sources_map[Policy(self.policy)]
+    # Baidu replaces the offline map wherever a policy uses it
+    sources_for_policy = [SpeedLimitSource.baidu if s == SpeedLimitSource.map and self.baidu_in_use else s
+                          for s in self._policy_to_sources_map[Policy(self.policy)]]
 
     if Policy(self.policy) != Policy.combined:
       # They are ordered in the order of preference, so we pick the first that's non-zero
@@ -171,6 +197,7 @@ class SpeedLimitResolver:
     """Get limit solutions from each data source"""
     self._get_from_car_state(sm)
     self._get_from_map_data(sm)
+    self.baidu_in_use = self._get_from_baidu(sm)
 
     source = self._get_source_solution_according_to_policy()
     speed_limit = self.limit_solutions[source] if source else 0.

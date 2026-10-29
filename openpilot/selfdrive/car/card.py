@@ -302,7 +302,8 @@ class Car:
     lp_sp = self.sm['longitudinalPlanSP']
     resolver = lp_sp.speedLimit.resolver
     CC_IC_dc.hudSpeedLimit = float(resolver.speedLimit) if resolver.speedLimitValid else 0.
-    CC_IC_dc.hudSpeedLimitFromMap = resolver.source == custom.LongitudinalPlanSP.SpeedLimit.Source.map
+    CC_IC_dc.hudSpeedLimitFromMap = resolver.source in (custom.LongitudinalPlanSP.SpeedLimit.Source.map,
+                                                        custom.LongitudinalPlanSP.SpeedLimit.Source.baidu)
     CC_IC_dc.hudSpeedLimitAhead = resolver.distToSpeedLimit > 0.
 
     vision = lp_sp.smartCruiseControl.vision
