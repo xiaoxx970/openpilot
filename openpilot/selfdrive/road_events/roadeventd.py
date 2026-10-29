@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Road prompts for the VW cluster (ACC_Events): uphill / downhill ahead from the model, roundabout / crossing ahead from
-mapd's offline OSM tiles, and with Baidu online data a speed camera ("speed limit ahead" with its limit) and a traffic jam
-ahead, and Baidu's speed limits for sunnypilot's speed limit resolver (they replace the offline map's while fresh). card
-shows the prompts in openpilot's ACC HUD; the resolver's limits only reach the cruise speed through Speed Limit Assist,
-which asks the driver every time. A traffic jam ahead also asks selfdrived for the relaxed following distance until the
-car reaches it (prompts.JamAhead).
+mapd's offline OSM tiles, and with Baidu online data a speed camera ("speed limit ahead" with its limit, cruise API) and a
+traffic jam ahead (route planning along the road ahead), and Baidu's speed limits for sunnypilot's speed limit resolver
+(they replace the offline map's while fresh). card shows the prompts in openpilot's ACC HUD; the resolver's limits only
+reach the cruise speed through Speed Limit Assist, which asks the driver every time. A traffic jam ahead also asks
+selfdrived for the relaxed following distance until the car reaches it (prompts.JamAhead).
 
 Opt-in: param VwRoadEventPrompts for the prompts (1 while openpilot's ACC is on, 2 always: in ACC standby and with the main
 switch off too), VwBaiduOnline (and a key file, see baidu.py) for Baidu; the jam following distance needs both. Light:
@@ -70,7 +70,7 @@ def fill_message(ev, out: dict, snap=None) -> None:
   ev.jamFollow = out.get("jamFollow", False)
   ev.jamFollowDistance = out.get("jamFollowDistance", 0.)
   if snap is not None:
-    ev.baiduOnline = snap.online
+    ev.baiduOnline = snap.online or snap.jams_online
     ev.speedLimit = snap.speed_limit
     ev.speedLimitValid = snap.speed_limit_valid
     ev.speedLimitAhead = snap.camera_limit
@@ -97,6 +97,19 @@ def main():
   pm = messaging.PubMaster(["roadEventsIC"])
   core = RoadEvents(os.path.join(Paths.mapd_root(), "offline"))
   map_failed = False
+
+  def road_ahead(lat: float, lon: float, course: float, length: float):
+    """The offline map's road ahead, for Baidu's route planning; None once the map failed."""
+    nonlocal map_failed
+    if map_failed:
+      return None
+    try:
+      return core.points_ahead(lat, lon, course, length)
+    except Exception:
+      cloudlog.exception("roadeventd: map lookup failed, map prompts off for this drive")
+      map_failed = True
+      return None
+
   model = pose = None
   model_t = pose_t = -math.inf
   prompts, baidu_on = PROMPTS_OFF, False
@@ -118,7 +131,7 @@ def main():
       key_t = now
       keys = baidu.load_keys()
       if keys is not None:
-        online = baidu.BaiduOnline(keys, log=cloudlog.warning)
+        online = baidu.BaiduOnline(keys, log=cloudlog.warning, count_file=baidu.COUNT_FILE)
         cloudlog.info("roadeventd: Baidu online data on")
 
     msg = messaging.recv_one_or_none(model_sock)
@@ -137,7 +150,7 @@ def main():
       if online is None:
         snap = baidu.Snapshot()   # Baidu off: no jam ahead, so no jam following distance either
       elif position_ok:
-        snap = online.update(odo, lat, lon, course, v, road_key)
+        snap = online.update(odo, lat, lon, course, v, road_key, road_ahead)
       out = dict(NO_PROMPT)
       if prompts_on or online is not None:
         path = model_path(model) if model is not None and now - model_t < INPUT_TIMEOUT else None

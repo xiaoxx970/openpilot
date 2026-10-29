@@ -1,19 +1,28 @@
-"""Baidu Maps online data for roadeventd: traffic jams, traffic lights and speed cameras on the road the car is predicted to
-take (passenger-car cruise API, 小客车巡航API), and the speed limit of the road the car is on (road info API, 道路信息API).
+"""Baidu Maps online data for roadeventd: speed cameras and traffic lights on the road the car is predicted to take
+(passenger-car cruise API, 小客车巡航API), the traffic on the road ahead (driving route planning, 驾车路线规划), and the
+speed limit of the road the car is on (road info API, 道路信息API).
 
 Opt-in (param VwBaiduOnline) and inert without a key file: /data/baidu_ak with the lines AK=... and SK=... of a Baidu server
 AK set to SN check. Not a Param, those can be backed up off the car. The keys stay in this module: requests are SN signed and
 no URL is ever logged.
 
 Network I/O runs in one worker thread with short timeouts. The 2 Hz loop only queues requests and picks up answers, so a slow
-or absent network never holds it up; answers picked up late are dropped, and data older than STALE from its request too.
+or absent network never holds it up; answers picked up late are dropped, and data older than its STALE from its request too.
 
-Calls, on demand: the cruise API's daily quota is small (2026-10-29: spent by 19:27). A detection when the car leaves the
-predicted route (more than OFF_ROUTE_DIST off its polyline for OFF_ROUTE_CYCLES updates) or nears its end (ROUTE_END in
-town, ROUTE_END_FAST on motorways and trunk roads), at most every CRUISE_MIN_GAP, otherwise one every CRUISE_PERIOD to keep
-the traffic fresh; parked, one in CRUISE_PARKED at most; never more than BUDGET_PER_HOUR. A road info query when the road
-changes and every ROADINFO_PERIOD. Errors and rate limits back off up to 5 min; a refused road info permission waits 30 min,
-so road info switches on by itself once the AK gets it; a spent quota waits until midnight Beijing time and is logged once.
+Quotas (the owner's AK, 2026-10-29): about 100 cruise calls a day (Beijing date), 5000 route plannings. The calls of the day
+are counted in COUNT_FILE, across drives and reboots, and stop at DAILY_BUDGET.
+- Cruise, for the speed cameras: a detection when the car leaves the predicted route (more than OFF_ROUTE_DIST off its
+  polyline for OFF_ROUTE_CYCLES updates) or nears its end (ROUTE_END in town, ROUTE_END_FAST on motorways and trunk roads),
+  at most every CRUISE_MIN_GAP; otherwise one every CRUISE_PERIOD, none of those once fewer than LOW_BUDGET are left today;
+  parked, one in CRUISE_PARKED at most; never more than BUDGET_PER_HOUR.
+- Route planning, for the traffic jams: every ROUTE_PERIOD while moving, from the car to a point ROUTE_AHEAD along the road it
+  is expected to take (the cruise route while it follows it, else the offline map's road ahead, else straight on), and at
+  once (ROUTE_MIN_GAP) when the car leaves that route or nears its end. An answer that leaves the expected road within its
+  first ROUTE_CHECK m (a detour, another carriageway) is not used.
+- Off a route its data is dropped at once, so nothing from the road the car left reaches a prompt or the speed limit.
+- A road info query when the road changes and every ROADINFO_PERIOD.
+Errors and rate limits back off up to 5 min; a refused road info permission waits 30 min, so road info switches on by itself
+once the AK gets it; a spent quota waits until midnight Beijing time; both logged once.
 
 At a tunnel portal a detection bound the car to the surface road beside and then above the tunnel, traffic lights and all.
 Positions cannot tell stacked roads apart, Baidu's link ids can: a route that does not start on a link of the route the car
@@ -22,9 +31,11 @@ is following is not taken until the car leaves that one or it ages out.
 Pure python + the standard library, no openpilot imports: tests and the offline replay drive it with recorded answers.
 """
 import collections
+import datetime
 import hashlib
 import json
 import math
+import os
 import queue
 import threading
 import time
@@ -33,21 +44,34 @@ import urllib.request
 from dataclasses import dataclass, field
 
 KEY_FILE = "/data/baidu_ak"
+COUNT_FILE = "/data/baidu_calls"   # calls made today per API, with the Beijing date: kept across drives and reboots
 HOST = "https://api.map.baidu.com"
+ROUTE_PATH = "/direction/v2/driving"
 SN_SAFE = "/:=&?#+!$,;'@()*[]"   # characters Baidu's SN rule leaves unquoted
 
 KPH_TO_MS = 1 / 3.6
-CRUISE_PERIOD = 120.       # s between routine cruise detections (tune to the AK's daily quota)
-CRUISE_MIN_GAP = 20.       # s between two detections, also when the car leaves the route or nears its end
+DAILY_BUDGET = {"cruise": 90, "route": 1500}   # calls a Beijing day: the quotas are about 100 and 5000
+LOW_BUDGET = 20            # cruise calls left today below which there are no routine detections
+BUDGET_PER_HOUR = {"cruise": 30, "route": 120, "roadinfo": 120}
+CRUISE_PERIOD = 300.       # s between routine cruise detections
+CRUISE_MIN_GAP = 60.       # s between two detections, also when the car leaves the route or nears its end
 CRUISE_PARKED = 300.       # s: below PARKED_SPEED at most one detection in this time
 PARKED_SPEED = 5. * KPH_TO_MS
+STALE = CRUISE_PARKED + 60.  # s a cruise answer is used for, from when it was asked; longer than CRUISE_PERIOD
+ROUTE_PERIOD = 60.         # s between route plannings while moving (at PARKED_SPEED or faster)
+ROUTE_MIN_GAP = 20.        # s, also when the car leaves the planned route or nears its end
+ROUTE_STALE = 150.         # s a route planning is used for
+ROUTE_AHEAD = (2000., 5000.)   # m planned ahead: at least, and at most (at speed: the jam range plus a ROUTE_PERIOD's drive)
+ROUTE_MIN = 800.           # m: a shorter expected road (cruise route nearly used up, the map ending) falls to the next source
+ROUTE_CHECK = 300.         # m of a planned route that must stay on the expected road (ROUTE_CHECK_STRAIGHT when that is
+ROUTE_CHECK_STRAIGHT = 100.  # only the course straight on)
+JAM_RANGE = (500., 1500.)  # m ahead a jam is announced in town and on fast roads, as prompts.JamPrompt
 ROADINFO_PERIOD = 60.      # s between road info queries on the same road
 ROADINFO_MIN_GAP = 10.     # s
 DENIED_RETRY = 1800.       # s before asking again after a refused permission
-STALE = CRUISE_PARKED + 60.  # s an answer is used for, from when it was asked; longer than CRUISE_PARKED for a car in a queue
 ANSWER_MAX_AGE = 10.       # s: an answer picked up later (the loop is not fed without GPS, e.g. in a tunnel) is dropped
-BUDGET_PER_HOUR = {"cruise": 45, "roadinfo": 120}   # calls; under 100 cruise detections in a two hour drive
-OFF_ROUTE_DIST = 40.       # m off the predicted route's polyline (GPS, lane and polyline errors stay below ~20 m)
+CLOCK_SET = 1735689600.    # 2025-01-01: before the clock is set there is no day to count calls against
+OFF_ROUTE_DIST = 40.       # m off a route's polyline (GPS, lane and polyline errors stay below ~20 m)
 OFF_ROUTE_CYCLES = 10      # updates in a row: 5 s at 2 Hz
 OFF_ROUTE_MIN_SPEED = 3.   # m/s: slower (car parks, a queue at the side of the road) the route is not checked
 ROUTE_END = 300.           # m before the end of the predicted route a new one is asked for
@@ -64,6 +88,7 @@ CAMERA_SPEED = 1           # camera_list type with a speed limit, the only one w
 DENIED = frozenset((240, 241, 4, 210, 211))  # service not enabled / no permission / IP or SN check failed
 QUOTA = frozenset((301, 302))                # quota spent (401 / 402, too many requests at once, back off like errors)
 NO_ROAD = 1001                               # road info: the points did not bind to a road
+BEIJING = datetime.timezone(datetime.timedelta(hours=8))
 
 
 def unix_now() -> float:
@@ -73,6 +98,54 @@ def unix_now() -> float:
 def until_beijing_midnight(now: float) -> float:
   """s from unix time now to a minute past the next midnight in Beijing (UTC+8), when Baidu's daily quota starts again."""
   return 86400. - (now + 8 * 3600.) % 86400. + 60.
+
+
+def beijing_day(now: float) -> str:
+  return datetime.datetime.fromtimestamp(now, BEIJING).date().isoformat()
+
+
+class DailyCount:
+  """Calls made today (Beijing date) per API by every drive, kept in a file. Written from a thread of its own: a /data write
+  that stalls must not hold up the 2 Hz loop. Without a file (tests, replays) the count lives as long as the object."""
+  def __init__(self, path: str | None):
+    self.path = path
+    self.day, self.counts = "", collections.Counter()
+    self.lock, self.write_lock = threading.Lock(), threading.Lock()
+    if path is not None:
+      try:
+        with open(path) as f:
+          saved = json.load(f)
+        self.day, self.counts = str(saved["day"]), collections.Counter({k: int(v) for k, v in saved["calls"].items()})
+      except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+
+  def today(self, kind: str, now: float) -> int:
+    return self.counts[kind] if self.day == beijing_day(now) else 0
+
+  def left(self, kind: str, now: float) -> int:
+    return DAILY_BUDGET[kind] - self.today(kind, now)
+
+  def add(self, kind: str, now: float) -> None:
+    day = beijing_day(now)
+    with self.lock:
+      if day != self.day:
+        self.day, self.counts = day, collections.Counter()
+      self.counts[kind] += 1
+    if self.path is not None:
+      threading.Thread(target=self._write, name="baidu-count", daemon=True).start()
+
+  def _write(self) -> None:
+    with self.write_lock:   # one at a time, each with the latest count
+      with self.lock:
+        text = json.dumps({"day": self.day, "calls": dict(self.counts)})
+      assert self.path is not None
+      try:
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+          f.write(text)
+        os.replace(tmp, self.path)
+      except OSError:
+        pass
 
 
 def load_keys(path: str = KEY_FILE) -> tuple[str, str] | None:
@@ -152,6 +225,42 @@ def project(path: Path, lat: float, lon: float, lo: float = -math.inf, hi: float
   return best
 
 
+def as_path(points: list[tuple[float, float]]) -> Path:
+  """(lat, lon) points -> (distance along, lat, lon)."""
+  path: Path = []
+  for lat, lon in points:
+    path.append((path[-1][0] + math.hypot(*ground(path[-1][1], path[-1][2], lat, lon)) if path else 0., lat, lon))
+  return path
+
+
+def ahead_of(lat: float, lon: float, course: float, distance: float) -> tuple[float, float]:
+  """The point distance m from (lat, lon) along course (rad from north, clockwise)."""
+  k = math.radians(1) * 6371000.
+  return lat + distance * math.cos(course) / k, lon + distance * math.sin(course) / (k * math.cos(math.radians(lat)))
+
+
+def leaves(path: Path, expected: list[tuple[float, float]], check: float, step: float = 20.) -> bool:
+  """Does the route (distances from the car) get more than OFF_ROUTE_DIST off the expected road within its first check m?"""
+  road = as_path(expected)
+  for (s0, la0, lo0), (s1, la1, lo1) in zip(path, path[1:], strict=False):
+    if s1 < 0.:
+      continue
+    if s0 > check:
+      break
+    for s in [max(0., s0) + k * step for k in range(int((min(s1, check) - max(0., s0)) / step) + 1)] + [min(s1, check)]:
+      u = (s - s0) / (s1 - s0) if s1 > s0 else 0.
+      on = project(road, la0 + u * (la1 - la0), lo0 + u * (lo1 - lo0))
+      if on is None or on[1] > OFF_ROUTE_DIST:
+        return True
+  return False
+
+
+def route_params(lat: float, lon: float, course: float, v: float, destination: tuple[float, float]) -> list[tuple[str, str]]:
+  """A driving route planning from the car (its course in rad, speed m/s) to destination (lat, lon), all WGS-84."""
+  return [("origin", f"{lat:.6f},{lon:.6f}"), ("destination", f"{destination[0]:.6f},{destination[1]:.6f}"), ("coord_type", "wgs84"),
+          ("ret_coordtype", "gcj02"), ("gps_direction", str(int(round(math.degrees(course))) % 360)), ("speed", f"{v:.2f}")]
+
+
 # ---- answers -------------------------------------------------------------------------------------------------------------
 @dataclass
 class CruiseRoute:
@@ -161,7 +270,7 @@ class CruiseRoute:
   length: float
   path: Path                                  # the route's polyline
   lamps: list[tuple[float, float, float]]     # (distance, lat, lon) of traffic lights
-  jams: list[tuple[float, float, int]]        # (start, length, status 2 slow / 3 congested / 4 severe)
+  jams: list[tuple[float, float, int]]        # (start, length, status 2 / 3 / 4); not used, route planning's are fresher
   cameras: list[tuple[float, float]]          # (distance, speed limit m/s) of speed cameras
   links: tuple[str, ...] = ()                 # Baidu's link ids along it, the first the one the car is on
 
@@ -194,7 +303,21 @@ def parse_cruise(resp: dict, odo: float, t: float, lat: float, lon: float) -> Cr
     return None
   s0 = start[0]
   lamps = sorted((float(lp["distance"]) - s0, *lnglat(lp["pos"])) for lp in r.get("lamps") or [] if lp.get("pos") and "distance" in lp)
-  # traffic: runs along each step, in order (their geo_cnt path segments add up to the polyline)
+  cameras = []
+  for c in r.get("camera_list") or []:
+    if c.get("type") != CAMERA_SPEED or not c.get("speed_limit") or not c.get("position"):
+      continue
+    on = project(path, *lnglat(c["position"]))
+    if on is not None and on[1] < CAMERA_OFF_PATH:
+      cameras.append((on[0] - s0, float(c["speed_limit"]) * KPH_TO_MS))
+  path = [(d - s0, la, lo) for d, la, lo in path]
+  links = tuple(x for x in str(r.get("linkids") or "").split(",") if x)
+  return CruiseRoute(odo, t, float(r.get("distance") or 0.) - s0, path, lamps, traffic_runs(steps, s0), sorted(cameras), links)
+
+
+def traffic_runs(steps: list, s0: float) -> list[tuple[float, float, int]]:
+  """(start, length, status) of the slow or worse runs of the steps' traffic, from s0 along their polyline (their geo_cnt
+  path segments add up to it), adjoining runs of a status joined."""
   jams: list[tuple[float, float, int]] = []
   s = 0.
   for step in steps:
@@ -206,16 +329,32 @@ def parse_cruise(resp: dict, odo: float, t: float, lat: float, lon: float) -> Cr
         else:
           jams.append((s - s0, d, status))
       s += d
-  cameras = []
-  for c in r.get("camera_list") or []:
-    if c.get("type") != CAMERA_SPEED or not c.get("speed_limit") or not c.get("position"):
-      continue
-    on = project(path, *lnglat(c["position"]))
-    if on is not None and on[1] < CAMERA_OFF_PATH:
-      cameras.append((on[0] - s0, float(c["speed_limit"]) * KPH_TO_MS))
-  path = [(d - s0, la, lo) for d, la, lo in path]
-  links = tuple(x for x in str(r.get("linkids") or "").split(",") if x)
-  return CruiseRoute(odo, t, float(r.get("distance") or 0.) - s0, path, lamps, jams, sorted(cameras), links)
+  return jams
+
+
+@dataclass
+class PlannedRoute:
+  """A route planning answer along the road ahead, for its traffic. Distances are along it from where the car was asked."""
+  odo: float
+  t: float
+  length: float
+  path: Path
+  jams: list[tuple[float, float, int]]        # (start, length, status 2 slow / 3 congested / 4 severe)
+
+
+def parse_route(resp: dict, odo: float, t: float, lat: float, lon: float) -> PlannedRoute | None:
+  """The first route of a driving route planning asked at (lat, lon), moved to start at the car. None without one, or when it
+  misses the car (the origin bound to another road)."""
+  routes = ((resp.get("result") or {}).get("routes") or []) if resp.get("status") == 0 else []
+  if not routes:
+    return None
+  steps = routes[0].get("steps") or []
+  path = parse_path(steps)
+  start = project(path, lat, lon)
+  if start is None or start[1] > OFF_ROUTE_DIST:
+    return None
+  s0 = start[0]
+  return PlannedRoute(odo, t, path[-1][0] - s0, [(d - s0, la, lo) for d, la, lo in path], traffic_runs(steps, s0))
 
 
 def parse_roadinfo(resp: dict) -> float | None:
@@ -231,8 +370,9 @@ def parse_roadinfo(resp: dict) -> float | None:
 
 @dataclass
 class Snapshot:
-  online: bool = False                                          # a cruise answer younger than STALE
+  online: bool = False                                          # a cruise answer younger than STALE: lamps and camera
   lamps: list = field(default_factory=list)                     # (distance ahead, lat, lon), nearest first
+  jams_online: bool = False                                     # a route planning younger than ROUTE_STALE: jams
   jams: list = field(default_factory=list)                      # (distance ahead, length, status)
   camera_limit: float = 0.                                      # m/s, next speed camera ahead, or passed less than CAMERA_PASSED ago
   camera_distance: float = 0.                                   # m to it, negative once passed
@@ -287,29 +427,39 @@ class Worker:
 
 # ---- scheduling ------------------------------------------------------------------------------------------------------------
 class BaiduOnline:
-  def __init__(self, keys: tuple[str, str], worker=None, clock=time.monotonic, log=None):
+  def __init__(self, keys: tuple[str, str], worker=None, clock=time.monotonic, log=None, count_file: str | None = None):
     self.ak, self.sk = keys
     self.worker = worker if worker is not None else Worker()
     self.clock = clock
     self.log = log if log is not None else (lambda msg: None)
-    self.quota_logged = False
+    self.logged: set[str] = set()               # one-time log lines already given
+    self.daily = DailyCount(count_file)
     self.history: collections.deque = collections.deque(maxlen=HISTORY)   # (lat, lon, v, course deg, t)
+    # cruise: the speed cameras on the route Baidu predicts
     self.route: CruiseRoute | None = None
     self.off_route = 0
     self.last_detect = -math.inf
-    self.call_times: dict[str, collections.deque] = {k: collections.deque() for k in BUDGET_PER_HOUR}
     self.want_detect = True
+    # route planning: the traffic on the road ahead
+    self.planned: PlannedRoute | None = None
+    self.off_planned = 0
+    self.last_plan = -math.inf
+    self.want_plan = True
+    self.discarded = 0                          # plannings that left the expected road
+    self.call_times: dict[str, collections.deque] = {k: collections.deque() for k in BUDGET_PER_HOUR}
     self.road_key = None
     self.roadinfo: tuple[float, object, float] | None = None   # (t, road key, limit m/s)
     self.last_roadinfo = -math.inf
     self.roadinfo_denied_until = -math.inf
-    self.backoff: dict[str, float] = {"cruise": 0., "roadinfo": 0.}
-    self.retry_at: dict[str, float] = {"cruise": -math.inf, "roadinfo": -math.inf}
+    self.backoff: dict[str, float] = dict.fromkeys(BUDGET_PER_HOUR, 0.)
+    self.retry_at: dict[str, float] = dict.fromkeys(BUDGET_PER_HOUR, -math.inf)
     self.calls: collections.Counter = collections.Counter()
 
   # -- inputs
-  def update(self, odo: float, lat: float, lon: float, course: float, v: float, road: tuple | None) -> Snapshot:
-    """odo: m driven since start; course: rad from north, clockwise; road: (name, OSM class) the car is matched to, or None."""
+  def update(self, odo: float, lat: float, lon: float, course: float, v: float, road: tuple | None, road_ahead=None) -> Snapshot:
+    """odo: m driven since start; course: rad from north, clockwise; road: (name, OSM class) the car is matched to, or None.
+    road_ahead(lat, lon, course, length): the offline map's road ahead of the car as [(lat, lon), ...], None off the map;
+    route planning asks along it when there is no cruise route to follow."""
     t = self.clock()
     self._collect(t, odo)
     if not self.history or math.hypot(*ground(self.history[-1][0], self.history[-1][1], lat, lon)) > 2.:
@@ -317,61 +467,120 @@ class BaiduOnline:
 
     self.road_key = road
     self._follow_route(odo, lat, lon, v)
+    self._follow_planned(odo, lat, lon, v)
 
-    self._schedule(t, odo, lat, lon, course, v)
+    self._schedule(t, odo, lat, lon, course, v, road_ahead)
     return self._snapshot(t, odo)
 
+  def _fast(self) -> bool:
+    return self.road_key is not None and self.road_key[1] in FAST_ROAD_CLASSES
+
+  def _route_end(self) -> float:
+    """m before the end of the predicted route from where a new one is asked for."""
+    return ROUTE_END_FAST if self._fast() else ROUTE_END
+
   def _follow_route(self, odo: float, lat: float, lon: float, v: float):
-    """Is the car still on the predicted route? Off it, the route's lights, jams and cameras are dropped at once."""
+    """Is the car still on the predicted route? Off it, the route's lights and cameras are dropped at once."""
     r = self.route
     if r is None:
       return
     if odo - r.odo > r.length - self._route_end():
       self.want_detect = True
-    if v < OFF_ROUTE_MIN_SPEED:
-      return
-    done = odo - r.odo
-    on = project(r.path, lat, lon, done - 150., done + 150.)
-    self.off_route = self.off_route + 1 if on is None or on[1] > OFF_ROUTE_DIST else 0
+    self.off_route = self._off(r.path, odo - r.odo, lat, lon, v, self.off_route)
     if self.off_route >= OFF_ROUTE_CYCLES:
       self.route, self.off_route, self.want_detect = None, 0, True
 
-  def _route_end(self) -> float:
-    """m before the end of the predicted route from where a new one is asked for."""
-    return ROUTE_END_FAST if self.road_key is not None and self.road_key[1] in FAST_ROAD_CLASSES else ROUTE_END
+  def _follow_planned(self, odo: float, lat: float, lon: float, v: float):
+    """Is the car still on the planned route? Off it, its jams are dropped at once and the road ahead is planned again."""
+    p = self.planned
+    if p is None:
+      return
+    if odo - p.odo > p.length - JAM_RANGE[self._fast()]:
+      self.want_plan = True
+    self.off_planned = self._off(p.path, odo - p.odo, lat, lon, v, self.off_planned)
+    if self.off_planned >= OFF_ROUTE_CYCLES:
+      self.planned, self.off_planned, self.want_plan = None, 0, True
 
-  def _can_call(self, kind: str, t: float) -> bool:
+  @staticmethod
+  def _off(path: Path, done: float, lat: float, lon: float, v: float, count: int) -> int:
+    """Updates in a row the car has been more than OFF_ROUTE_DIST off the path; slow, it is not checked."""
+    if v < OFF_ROUTE_MIN_SPEED:
+      return count
+    on = project(path, lat, lon, done - 150., done + 150.)
+    return count + 1 if on is None or on[1] > OFF_ROUTE_DIST else 0
+
+  def _log_once(self, key: str, msg: str):
+    if key not in self.logged:
+      self.logged.add(key)
+      self.log(msg)
+
+  def _can_call(self, kind: str, t: float, now: float) -> bool:
     times = self.call_times[kind]
     while times and t - times[0] > 3600.:
       times.popleft()
+    if kind in DAILY_BUDGET and self.daily.left(kind, now) <= 0:
+      self._log_once(f"budget {kind} {self.daily.day}",
+                     f"roadeventd: Baidu {kind} budget of {DAILY_BUDGET[kind]} calls used today, no more until midnight Beijing time")
+      return False
     return len(times) < BUDGET_PER_HOUR[kind] and t >= self.retry_at[kind]
 
-  def _submit(self, kind: str, t: float, path: str, params: list, meta) -> bool:
+  def _submit(self, kind: str, t: float, now: float, path: str, params: list, meta) -> bool:
     if not self.worker.submit(kind, signed_get(path, params, self.ak, self.sk), meta):
       return False
     self.call_times[kind].append(t)
     self.calls[kind] += 1
+    if kind in DAILY_BUDGET:
+      self.daily.add(kind, now)
     return True
 
-  def _schedule(self, t, odo, lat, lon, course, v):
-    due = t - self.last_detect >= CRUISE_PERIOD or (self.want_detect and t - self.last_detect >= CRUISE_MIN_GAP)
+  def _schedule(self, t, odo, lat, lon, course, v, road_ahead):
+    now = unix_now()
+    if now < CLOCK_SET or not self.history:   # no day to count against, and the points' times would be wrong
+      return
+
+    # cruise: the speed cameras ahead, from a small daily quota
+    routine = t - self.last_detect >= CRUISE_PERIOD and self.daily.left("cruise", now) >= LOW_BUDGET
+    asked = self.want_detect and t - self.last_detect >= CRUISE_MIN_GAP
     parked = v < PARKED_SPEED and t - self.last_detect < CRUISE_PARKED
-    if due and not parked and len(self.history) >= 2 and self._can_call("cruise", t):
+    if (routine or asked) and not parked and len(self.history) >= 2 and self._can_call("cruise", t, now):
       params = [("origin", f"{lat:.6f},{lon:.6f}"), ("gps_direction", str(int(round(math.degrees(course))) % 360)), ("speed", f"{v:.2f}"),
                 ("radius", "10"), ("point_list", self._point_list()), ("coord_type", "wgs84"), ("ret_coordtype", "gcj02"),
                 ("ext_info", str(EXT_INFO))]
-      if self._submit("cruise", t, "/api_cruise/v1/detection", params, (t, odo, lat, lon)):
+      if self._submit("cruise", t, now, "/api_cruise/v1/detection", params, (t, odo, lat, lon)):
         self.last_detect, self.want_detect = t, False
+
+    # route planning: the traffic on the road ahead, while moving
+    due = t - self.last_plan >= ROUTE_PERIOD or (self.want_plan and t - self.last_plan >= ROUTE_MIN_GAP)
+    if due and v >= PARKED_SPEED and self._can_call("route", t, now):
+      expected, check = self._road_ahead(t, odo, lat, lon, course, v, road_ahead)
+      params = route_params(lat, lon, course, v, expected[-1])
+      if self._submit("route", t, now, ROUTE_PATH, params, (t, odo, lat, lon, expected, check)):
+        self.last_plan, self.want_plan = t, False
 
     road_changed = self.roadinfo is not None and self.roadinfo[1] != self.road_key
     due = t - self.last_roadinfo >= ROADINFO_PERIOD or (road_changed and t - self.last_roadinfo >= ROADINFO_MIN_GAP)
-    if due and t >= self.roadinfo_denied_until and self.history and self._can_call("roadinfo", t):
-      now = unix_now()
+    if due and t >= self.roadinfo_denied_until and self._can_call("roadinfo", t, now):
       pts = [{"latitude": round(h[0], 6), "longitude": round(h[1], 6), "coord_type_input": "wgs84", "loc_time": int(now - (t - h[4])),
               "speed": round(h[2] * 3.6, 1), "direction": int(h[3])} for h in list(self.history)[-10:]]
       params = [("point_list", json.dumps(pts, separators=(",", ":"))), ("coord_type_output", "gcj02"), ("options", "vehicle_type:car")]
-      if self._submit("roadinfo", t, "/api_roadinfo/v1/track", params, (t, self.road_key)):
+      if self._submit("roadinfo", t, now, "/api_roadinfo/v1/track", params, (t, self.road_key)):
         self.last_roadinfo = t
+
+  def _road_ahead(self, t, odo, lat, lon, course, v, road_ahead) -> tuple[list[tuple[float, float]], float]:
+    """The road the car is expected to take, as far as a route planning goes: the cruise route while the car follows it,
+    else the offline map's road ahead, else straight on along the course; and how much of a planned route must stay on it."""
+    want = min(ROUTE_AHEAD[1], max(ROUTE_AHEAD[0], JAM_RANGE[self._fast()] + v * ROUTE_PERIOD))
+    r = self.route
+    if r is not None and t - r.t < STALE and self.off_route == 0:
+      done = odo - r.odo
+      pts = [(lat, lon)] + [(la, lo) for d, la, lo in r.path if done < d <= done + want]
+      if as_path(pts)[-1][0] >= ROUTE_MIN:
+        return pts, ROUTE_CHECK
+    if road_ahead is not None:
+      pts = road_ahead(lat, lon, course, want)
+      if pts and as_path(pts)[-1][0] >= ROUTE_MIN:
+        return pts, ROUTE_CHECK
+    return [(lat, lon), ahead_of(lat, lon, course, want)], ROUTE_CHECK_STRAIGHT
 
   def _point_list(self) -> str:
     """Far -> near, the last one the current point: lng,lat,0,0,0,speed,direction,radius,gps,outdoor,satellites,time."""
@@ -401,16 +610,15 @@ class BaiduOnline:
           self.roadinfo_denied_until = t + DENIED_RETRY   # not enabled for this AK (yet)
         elif status in QUOTA:   # spent for today: nothing more until it starts again
           self.retry_at[kind] = t + until_beijing_midnight(unix_now())
-          if not self.quota_logged:
-            self.quota_logged = True
-            self.log(f"roadeventd: Baidu {kind} quota spent (status {status}), no more requests until midnight Beijing time")
+          self._log_once(f"quota {kind}", f"roadeventd: Baidu {kind} quota spent (status {status}), no more requests until midnight Beijing time")
         else:   # network, timeouts, Baidu's own errors: again soon, then less and less often
           self.backoff[kind] = min(BACKOFF[1], max(BACKOFF[0], self.backoff[kind] * 2))
           self.retry_at[kind] = t + self.backoff[kind]
           self.want_detect = self.want_detect or kind == "cruise"
+          self.want_plan = self.want_plan or kind == "route"
         continue
       self.backoff[kind] = 0.
-      self.quota_logged = False
+      self.logged.discard(f"quota {kind}")
       if kind == "cruise":
         route = parse_cruise(resp, meta[1], meta[0], meta[2], meta[3])
         if route is None or not route.path:
@@ -419,6 +627,12 @@ class BaiduOnline:
         if r is not None and t - r.t < STALE and self.off_route == 0 and odo - r.odo < r.length - self._route_end() and not self._agrees(route):
           continue   # bound to another road: keep the followed route until the car leaves it or it ages out
         self.route, self.off_route = route, 0
+      elif kind == "route":
+        planned = parse_route(resp, meta[1], meta[0], meta[2], meta[3])
+        if planned is None or leaves(planned.path, meta[4], meta[5]):
+          self.discarded += 1   # a detour or another road: not the traffic ahead of the car
+          continue
+        self.planned, self.off_planned = planned, 0
       elif kind == "roadinfo":
         limit = parse_roadinfo(resp)
         if limit is not None:
@@ -431,10 +645,14 @@ class BaiduOnline:
       s.online = True
       done = odo - r.odo
       s.lamps = [(d - done, la, lo) for d, la, lo in r.lamps if d - done > -10.]
-      s.jams = [(start - done, length, st) for start, length, st in r.jams if start + length - done > 0.]
       ahead = next(((d - done, limit) for d, limit in r.cameras if -CAMERA_PASSED < d - done < CAMERA_RANGE), None)
       if ahead is not None:
         s.camera_distance, s.camera_limit = ahead
+    p = self.planned
+    if p is not None and t - p.t < ROUTE_STALE:
+      s.jams_online = True
+      done = odo - p.odo
+      s.jams = [(start - done, length, st) for start, length, st in p.jams if start + length - done > 0.]
     if self.roadinfo is not None and t - self.roadinfo[0] < STALE and self.roadinfo[1] == self.road_key and self.roadinfo[2] > 0.:
       s.speed_limit, s.speed_limit_valid = self.roadinfo[2], True
     return s

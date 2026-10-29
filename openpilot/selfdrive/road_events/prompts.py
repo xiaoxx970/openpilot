@@ -95,7 +95,10 @@ class JamPrompt:
     """(distance, length) of the first jam that counts starting ahead within the prompt's distance."""
     return next(((d, length) for d, length in cls.runs(jams, fast) if 0. <= d <= cls.near(fast)), None)
 
-  def update(self, t: float, jams: list, fast: bool) -> tuple[int, float, float]:
+  def update(self, t: float, jams: list, fast: bool, gone: bool = False) -> tuple[int, float, float]:
+    """gone: the jam data is gone (the car left the planned road, or it went stale): a prompt being shown ends."""
+    if gone:
+      self.until = min(self.until, t)
     found = self.nearest(jams, fast)
     if found is not None and self.armed:
       self.armed = False
@@ -171,11 +174,14 @@ class CameraPrompt:
   def window(cls, v: float) -> float:
     return min(cls.FAR, max(cls.NEAR, cls.LOOK_AHEAD * v))
 
-  def update(self, t: float, v: float, distance: float, limit: float, moving: bool) -> tuple[int, float, float]:
-    """distance, limit: the next camera's (baidu.Snapshot.camera_distance / camera_limit), limit 0 for none.
-    Returns (event, distance, limit)."""
+  def update(self, t: float, v: float, distance: float, limit: float, moving: bool, reported: bool = True) -> tuple[int, float, float]:
+    """distance, limit: the next camera's (baidu.Snapshot.camera_distance / camera_limit), limit 0 for none; reported: they
+    are Baidu's for the car's position (not a gap without GPS). A prompt being shown ends once no camera is reported (the
+    car left that road, or the data went stale). Returns (event, distance, limit)."""
     self.odo += v * (t - self.t) if self.t is not None else 0.
     self.t = t
+    if reported and limit <= 0.:
+      self.until = min(self.until, t)
     if limit > 0.:
       at = self.odo + distance
       if self.fired is not None and abs(at - self.fired[0]) < self.SAME and abs(limit - self.fired[1]) < 0.1:
