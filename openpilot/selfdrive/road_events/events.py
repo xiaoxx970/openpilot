@@ -38,9 +38,11 @@ class RoadEvents:
     baidu: baidu.Snapshot of the road ahead (an empty one with Baidu off), or None without one for the car's position: its
     traffic jams ahead, for the prompt and the relaxed following distance, and its next speed camera. Crossings stay the
     map's (the owner's call)."""
+    online = baidu is not None and baidu.online
+    jams_online = baidu is not None and baidu.jams_online
     out = {"event": EVENT_NONE, "distance": 0., "source": SOURCE_NONE, "grade": math.tan(pitch), "gradeAhead": 0.,
            "mapMatched": False, "roadClass": 0, "jamLength": 0., "eventSpeedLimit": 0.,
-           "baiduOnline": bool(baidu is not None and baidu.online), "jamFollow": False, "jamFollowDistance": 0.}
+           "baiduOnline": online or jams_online, "jamFollow": False, "jamFollowDistance": 0.}
 
     sign, dist = 0, 0.
     if path is not None and v >= MIN_SPEED:
@@ -67,14 +69,14 @@ class RoadEvents:
     out["roadKey"] = self.road_key
 
     fast = self.road_key is not None and self.road_key[1] in FAST_ROADS
-    jams = baidu.jams if baidu is not None and baidu.online else []
+    jams = baidu.jams if jams_online else []
     jam_event, jam_distance, jam_length = EVENT_NONE, 0., 0.
     if v >= MIN_SPEED:   # crawling or stopped the car is in the queue already
-      jam_event, jam_distance, jam_length = self.jam.update(t, jams, fast)
+      jam_event, jam_distance, jam_length = self.jam.update(t, jams, fast, gone=baidu is not None and not jams_online)
     out["jamFollow"], out["jamFollowDistance"] = self.jam_ahead.update(t, jams if baidu is not None else None, fast, v >= MIN_SPEED)
-    online = baidu is not None and baidu.online
     camera_event, camera_distance, camera_limit = self.camera.update(t, v, baidu.camera_distance if online else 0.,
-                                                                     baidu.camera_limit if online else 0., v >= MIN_SPEED)
+                                                                     baidu.camera_limit if online else 0., v >= MIN_SPEED,
+                                                                     reported=baidu is not None)
 
     # one prompt at a time: a speed camera, a jam, the map's, then the model's
     for (event, d), source in (((camera_event, camera_distance), SOURCE_BAIDU), ((jam_event, jam_distance), SOURCE_BAIDU),
@@ -88,3 +90,16 @@ class RoadEvents:
           out["eventSpeedLimit"] = float(camera_limit)
         break
     return out
+
+  def points_ahead(self, lat: float, lon: float, course: float, length: float) -> list[tuple[float, float]] | None:
+    """The offline map's road ahead of the car as (lat, lon) points from where it is, up to length m along the straightest
+    continuation; None off the map. Baidu's route planning asks along it."""
+    if self.map is None:
+      return None
+    m = self.map.match(lat, lon, course, self.prev_way)
+    if m is None:
+      return None
+    nodes, _ = self.map.path_ahead(m, length)
+    xy = self.map.way_xy[m.way]
+    start = xy[m.seg] + m.t * (xy[m.seg + 1] - xy[m.seg])
+    return [self.map.to_latlon(*start)] + [self.map.to_latlon(*self.map.way_xy[w][j]) for _, w, j in nodes]

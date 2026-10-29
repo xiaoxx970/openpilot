@@ -1,6 +1,8 @@
+import json
 import math
 import os
 import tempfile
+import time
 import unittest
 import urllib.parse
 from unittest import mock
@@ -123,6 +125,34 @@ def follow_long_route(pq):
   return follow_route(pq, 4000.)
 
 
+def destination(path_and_query: str) -> tuple[float, float]:
+  """(x, y) m of a route planning's destination."""
+  query = urllib.parse.parse_qs(urllib.parse.urlsplit(path_and_query).query)
+  lat, lon = (float(v) for v in query["destination"][0].split(","))
+  return (lon - LON0) * KX, (lat - LAT0) * osm_map.M_PER_DEG
+
+
+def planned(points: list[tuple[float, float]], traffic: list[tuple[float, int]]) -> dict:
+  """A driving route planning answer along the polyline points (x, y), traffic (length, status) runs from its start."""
+  length = sum(math.hypot(x2 - x1, y2 - y1) for (x1, y1), (x2, y2) in zip(points, points[1:], strict=False))
+  step = {"road_name": "Main Rd", "distance": round(length), "path": ";".join(gcj(x, y) for x, y in points),
+          "traffic_condition": [{"status": st, "geo_cnt": 1, "distance": round(d, 2)} for d, st in traffic]}
+  return {"status": 0, "message": "成功", "result": {"routes": [{"distance": round(length), "duration": 300, "steps": [step]}]}}
+
+
+def plan_straight(pq):
+  """Route planning along the straight line from the origin to the destination, with WORLD_TRAFFIC where it runs east on
+  y = 0, free flow elsewhere."""
+  (x0, y0), (x1, y1) = origin(pq), destination(pq)
+  n = max(1, int(math.hypot(x1 - x0, y1 - y0) // 40.))
+  points = [(x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(n + 1)]
+  if abs(y0) < 1. and abs(y1) < 1. and x1 > x0:
+    traffic = [(min(hi, x1) - max(lo, x0), st) for lo, hi, st in WORLD_TRAFFIC if min(hi, x1) > max(lo, x0)]
+  else:
+    traffic = [(math.hypot(x1 - x0, y1 - y0), 1)]
+  return planned(points, traffic), None
+
+
 ROADINFO_DISABLED = {"status": 240, "message": "APP 服务被禁用"}
 
 
@@ -185,12 +215,12 @@ class TestBaiduOnline(unittest.TestCase):
     self.online = baidu.BaiduOnline(("ak-test", "sk-test"), self.worker, self.clock)
     self.odo, self.prev = 0., None
 
-  def step(self, x, y=0., course=EAST, v=15., road=MAIN) -> baidu.Snapshot:
+  def step(self, x, y=0., course=EAST, v=15., road=MAIN, road_ahead=None) -> baidu.Snapshot:
     """One 2 Hz cycle of roadeventd with the car at (x, y)."""
     if self.prev is not None:
       self.odo += math.hypot(x - self.prev[0], y - self.prev[1])
     self.prev = (x, y)
-    snap = self.online.update(self.odo, *latlon(x, y), course, v, road)
+    snap = self.online.update(self.odo, *latlon(x, y), course, v, road, road_ahead)
     self.clock.t += 0.5
     return snap
 
@@ -205,36 +235,37 @@ class TestBaiduOnline(unittest.TestCase):
     self.assertEqual(len(self.sent()), 1)
     self.worker.answer("cruise", east_route(7.5, length))
 
-  def detection_times(self, cycles: int, at) -> list[float]:
+  def detection_times(self, cycles: int, at, kind="cruise") -> list[float]:
     times = []
     for i in range(cycles):
-      n = len(self.sent())
+      n = len(self.sent(kind))
       self.step(*at(i))
-      if len(self.sent()) > n:
+      if len(self.sent(kind)) > n:
         times.append(self.clock.t - 0.5)
     return times
 
+  # -- cruise: speed cameras
   def test_a_routine_detection_every_cruise_period_along_the_route(self):
     self.start({"cruise": follow_long_route, "roadinfo": lambda pq: (ROADINFO_DISABLED, None)})
-    times = self.detection_times(520, lambda i: (7.5 * i,))   # 260 s at 15 m/s, the route never near its end
+    times = self.detection_times(1240, lambda i: (2.5 * i, 0., EAST, 5.))   # 620 s at 5 m/s, the route never near its end
     self.assertEqual(times, [0.5, 0.5 + baidu.CRUISE_PERIOD, 0.5 + 2 * baidu.CRUISE_PERIOD])
-    self.assertTrue(self.step(7.5 * 520).online)
+    self.assertTrue(self.step(2.5 * 1240, v=5.).online)
     self.assertEqual(len(self.sent("roadinfo")), 1)    # not enabled for the AK: asked again only after 30 min
-    for pq in self.sent() + self.sent("roadinfo"):
+    for pq in self.sent() + self.sent("roadinfo") + self.sent("route"):
       self.assertTrue("&sn=" in pq)
       self.assertNotIn("sk-test", pq)
 
   def test_leaving_the_route_drops_it_and_asks_again(self):
-    self.begin(800.)
-    for i in range(2, 41):
-      self.assertTrue(self.step(7.5 * i).online)       # to 300 m east, 20 s
+    self.begin(2000.)
+    for i in range(2, 122):
+      self.assertTrue(self.step(7.5 * i).online)       # to 907.5 m east, 60.5 s
     self.assertEqual(len(self.sent()), 1)
     for i in range(1, 31):                             # then north, off the route
-      snap = self.step(300., 7.5 * i, course=0.)
+      snap = self.step(907.5, 7.5 * i, course=0.)
       if len(self.sent()) == 2:
         break
     self.assertEqual(i, 15)                            # 40 m off it (from 45 m, i = 6) for 5 s
-    self.assertFalse(snap.online)                      # its lights and jams are not for this road
+    self.assertFalse(snap.online)                      # its cameras are not for this road
 
   def test_a_short_jump_off_the_route_keeps_it(self):
     # a GPS jump or a parallel lane: off the route for less than 5 s
@@ -261,7 +292,7 @@ class TestBaiduOnline(unittest.TestCase):
     # the left and then right above the tunnel, with a traffic light
     self.step(0.)
     self.step(7.5)
-    self.worker.answer("cruise", line_route([(x, 0.) for x in np.arange(-32.5, 4000., 40.)], "101,102,103"))
+    self.worker.answer("cruise", line_route([(x, 0.) for x in np.arange(-32.5, 6000., 40.)], "101,102,103"))
     x = 7.5
     while len(self.sent()) < 2:                        # to the routine detection, far from the route's end
       x += 7.5
@@ -299,18 +330,18 @@ class TestBaiduOnline(unittest.TestCase):
 
   def test_not_again_within_the_min_gap(self):
     self.begin(100.)                                   # its end comes up at once
-    times = self.detection_times(80, lambda i: (7.5 + 7.5 * i,))
+    times = self.detection_times(140, lambda i: (7.5 + 7.5 * i,))
     self.assertEqual(times, [0.5 + baidu.CRUISE_MIN_GAP])
 
   def test_errors_back_off(self):
     # again soon (no closer than CRUISE_MIN_GAP), then less and less often
     self.start({"cruise": lambda pq: (None, "URLError")})
-    times = self.detection_times(800, lambda i: (3. * i, 0., EAST, 6.))
-    self.assertEqual([b - a for a, b in zip(times, times[1:], strict=False)][:6], [20., 20., 20.5, 40.5, 80.5, 160.5])
+    times = self.detection_times(1600, lambda i: (3. * i, 0., EAST, 6.))
+    self.assertEqual([b - a for a, b in zip(times, times[1:], strict=False)][:6], [60., 60., 60., 60., 80.5, 160.5])
 
   def test_rate_limit_backs_off_like_errors(self):
     self.start({"cruise": lambda pq: ({"status": 401, "message": "当前并发量已经超过约定并发配额，限制访问"}, None)})
-    times = self.detection_times(80, lambda i: (3. * i, 0., EAST, 6.))
+    times = self.detection_times(160, lambda i: (3. * i, 0., EAST, 6.))
     self.assertEqual(times[:2], [0.5, 0.5 + baidu.CRUISE_MIN_GAP])
 
   def test_spent_quota_waits_until_midnight_in_beijing_and_logs_once(self):
@@ -328,30 +359,31 @@ class TestBaiduOnline(unittest.TestCase):
       self.assertEqual(times, [0.5])
       self.assertAlmostEqual(self.online.retry_at["cruise"], midnight, delta=0.01)
       self.assertAlmostEqual(self.online.retry_at["roadinfo"], midnight, delta=0.01)
-      self.assertEqual(len(logged), 1)                 # one line for both APIs
-      self.assertNotIn("sk-test", logged[0])
-      self.assertNotIn("ak-test", logged[0])
+      self.assertEqual(len(logged), 2)                 # once for each API
+      self.assertTrue(all("sk-test" not in line and "ak-test" not in line for line in logged))
 
       self.clock.t = midnight                          # answered again the next day
       answer.update(cruise=east_route(1800., 2000.), roadinfo=ROADINFO_DISABLED)
       self.assertEqual(len(self.detection_times(4, lambda i: (1800. + 3. * i, 0., EAST, 6.))), 1)
       self.assertTrue(self.step(1812.).online)
-      self.assertEqual(len(logged), 1)
+      self.assertEqual(len(logged), 2)
       answer["cruise"] = spent                         # and spent again later that day: logged again
       self.clock.t += baidu.CRUISE_PERIOD
       self.detection_times(4, lambda i: (1900. + 3. * i, 0., EAST, 6.))
-      self.assertEqual(len(logged), 2)
+      self.assertEqual(len(logged), 3)
 
   def test_parked_at_most_one_detection_in_cruise_parked(self):
     self.start({"cruise": follow_long_route})
     self.step(0.)
     self.step(7.5)
+    plans = len(self.sent("route"))
     times = self.detection_times(1400, lambda i: (10., 0., EAST, 1.))   # 700 s at a standstill
     self.assertEqual(times, [0.5 + baidu.CRUISE_PARKED, 0.5 + 2 * baidu.CRUISE_PARKED])
     self.assertTrue(self.step(10., v=0.).online)       # its data stays until the next one
+    self.assertEqual(len(self.sent("route")), plans)   # no route planning standing still
 
   def test_hourly_budget(self):
-    # two parallel roads 100 m apart, 6 s on each: every jump leaves the route, a detection every 6 s
+    # two parallel roads 100 m apart, 6 s on each: every jump leaves the route, a detection every minute
     self.start({"cruise": follow_route})
     times = self.detection_times(int(4000 / 0.5), lambda i: (0., 100. * ((i // 12) % 2), EAST, 5.))
     most = max(sum(1 for u in times if t <= u < t + 3600.) for t in times)
@@ -359,20 +391,25 @@ class TestBaiduOnline(unittest.TestCase):
     self.assertGreater(len(times), most)                 # and on again in the next hour
 
   def test_snapshot_along_the_route(self):
+    self.start({"route": plan_straight})
     self.begin(800.)
     for i in range(2, 14):
       snap = self.step(7.5 * i)                          # 97.5 m east
     self.assertAlmostEqual(snap.lamps[0][0], 220. - 97.5, delta=1.)   # Baidu gives whole meters
     self.assertEqual(len(snap.lamps), 3)
-    (start, length, status), = snap.jams
-    self.assertEqual(status, 2)
-    self.assertLess(start, 0.)                           # the car is in it: not ahead
-    self.assertAlmostEqual(start + length, 220. - 97.5, delta=0.5)
     self.assertAlmostEqual(snap.camera_distance, 500. - 97.5, delta=0.5)
     self.assertAlmostEqual(snap.camera_limit, 60 / 3.6)
-    while self.clock.t < baidu.STALE + 1.:               # parked, its next detection is never answered
+    # the jams come from route planning
+    self.assertTrue(snap.jams_online)
+    (start, length, status), (start2, length2, status2) = snap.jams
+    self.assertEqual((status, status2), (2, 3))
+    self.assertLess(start, 0.)                           # the car is in it: not ahead
+    self.assertAlmostEqual(start + length, 220. - 97.5, delta=1.)
+    self.assertAlmostEqual(start2, 1000. - 97.5, delta=1.)
+    while self.clock.t < baidu.STALE + 1.:               # parked, its next detection and plannings are never answered
+      self.worker.auto.clear()
       snap = self.step(97.5, v=0.)
-    self.assertFalse(snap.online)
+    self.assertFalse(snap.online or snap.jams_online)
     self.assertEqual(len(self.sent()), 2)
 
   def test_a_speed_camera_is_reported_until_it_is_50_m_behind(self):
@@ -400,6 +437,141 @@ class TestBaiduOnline(unittest.TestCase):
     self.worker.answer("roadinfo", {"status": 1001, "message": "绑路失败"})
     self.step(15., road=("Other Rd", 5))
     self.assertIsNone(self.online.roadinfo)
+
+  # -- daily budget
+  def test_daily_budget_kept_across_drives_until_the_next_day(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      path = os.path.join(tmp, "baidu_calls")
+      day = 1793241600.   # 2026-10-29 10:40 in Beijing
+      with mock.patch.object(baidu, "unix_now", lambda: day + self.clock.t):
+        count = baidu.DailyCount(path)
+        for _ in range(3):
+          count.add("cruise", day)
+        count.add("route", day)
+        for _ in range(100):                           # its writes run in threads of their own
+          if os.path.exists(path) and json.load(open(path))["calls"] == {"cruise": 3, "route": 1}:
+            break
+          time.sleep(0.01)
+        again = baidu.DailyCount(path)                 # the next drive
+        self.assertEqual((again.today("cruise", day), again.today("route", day)), (3, 1))
+        self.assertEqual(again.left("cruise", day), baidu.DAILY_BUDGET["cruise"] - 3)
+        midnight = day + baidu.until_beijing_midnight(day)
+        self.assertEqual(again.today("cruise", midnight), 0)
+        self.assertEqual(again.left("cruise", midnight), baidu.DAILY_BUDGET["cruise"])
+      with open(path, "w") as f:
+        f.write("not json")
+      self.assertEqual(baidu.DailyCount(path).today("cruise", day), 0)
+
+  def test_no_routine_detections_when_the_budget_runs_low(self):
+    self.start({"cruise": follow_long_route})
+    self.online.daily.day = baidu.beijing_day(baidu.unix_now())
+    self.online.daily.counts["cruise"] = baidu.DAILY_BUDGET["cruise"] - baidu.LOW_BUDGET - 1
+    times = self.detection_times(700, lambda i: (2.5 * i, 0., EAST, 5.))
+    self.assertEqual(times, [0.5, 0.5 + baidu.CRUISE_PERIOD])   # the first one, and a routine one with 20 left
+    times = self.detection_times(700, lambda i: (1750. + 2.5 * i, 0., EAST, 5.))   # 19 left: only when the route asks
+    self.assertEqual(times, [])
+    for i in range(1, 30):                             # off it
+      self.step(3497.5, 7.5 * i, course=0.)
+    self.assertEqual(len(self.sent()), 3)
+
+  def test_budget_used_up_stops_and_logs_once(self):
+    logged: list[str] = []
+    self.online = baidu.BaiduOnline(("ak-test", "sk-test"), self.worker, self.clock, logged.append)
+    self.online.daily.day = baidu.beijing_day(baidu.unix_now())
+    self.online.daily.counts["cruise"] = baidu.DAILY_BUDGET["cruise"]
+    for i in range(400):
+      self.step(7.5 * i)
+    self.assertEqual(self.sent(), [])
+    self.assertEqual(len([line for line in logged if "cruise" in line]), 1)
+
+  def test_no_calls_before_the_clock_is_set(self):
+    with mock.patch.object(baidu, "unix_now", lambda: 1e6):
+      for i in range(40):
+        self.step(7.5 * i)
+    self.assertEqual(self.worker.sent, [])
+
+  # -- route planning: the traffic ahead
+  def test_route_planning_every_minute_while_moving(self):
+    self.start({"route": plan_straight})
+    times = self.detection_times(300, lambda i: (7.5 * i,), "route")   # 150 s at 15 m/s
+    self.assertEqual(times, [0., baidu.ROUTE_PERIOD, 2 * baidu.ROUTE_PERIOD])
+    x, y = destination(self.sent("route")[0])
+    self.assertAlmostEqual(x, baidu.ROUTE_AHEAD[0], delta=1.)   # straight on, without a cruise route or the map
+    self.assertAlmostEqual(y, 0., delta=1.)
+    snap = self.step(7.5 * 300)
+    self.assertTrue(snap.jams_online)
+    self.assertEqual(self.online.discarded, 0)
+
+  def test_route_planning_asks_along_the_road_ahead(self):
+    # the cruise route while the car follows it, else the map's road ahead, else straight on; farther at speed on fast roads
+    self.start({"route": plan_straight})
+    self.begin(4000.)
+    self.step(15.)
+    self.clock.t += baidu.ROUTE_PERIOD
+    self.step(22.5, v=30., road=("G2503", 1))
+    x, y = destination(self.sent("route")[-1])
+    self.assertAlmostEqual(x - 22.5, baidu.JAM_RANGE[1] + 30. * baidu.ROUTE_PERIOD, delta=40.)
+    curve = [latlon(30. + 10. * k, 0.2 * k * k) for k in range(300)]   # the map's road bends north
+    self.start({"route": plan_straight})
+    self.step(0., road_ahead=lambda *a: curve)
+    x, y = destination(self.sent("route")[-1])
+    self.assertAlmostEqual(y, 0.2 * 299 ** 2, delta=1.)
+
+  def test_a_planned_route_off_the_road_ahead_is_not_used(self):
+    # a detour, the other carriageway, the road above: it leaves the expected road within its first 300 m (100 m when only
+    # the course straight on is known)
+    def detour(turn):
+      def answer(pq):
+        (x0, y0), (x1, y1) = origin(pq), destination(pq)
+        return planned([(x0, y0), (x0 + turn, y0), (x0 + turn, y0 + 200.), (x1, y1 + 200.), (x1, y1)], [(5000., 4)]), None
+      return answer
+    for turn, along_the_road, used in ((40., False, False), (150., False, True), (150., True, False)):
+      self.start({"route": detour(turn)})
+      road = [latlon(10. * k, 0.) for k in range(300)]
+      self.step(0., road_ahead=(lambda *a, road=road: road) if along_the_road else None)
+      snap = self.step(7.5)
+      self.assertEqual(snap.jams_online, used)
+      self.assertEqual(self.online.discarded, 0 if used else 1)
+      if not used:
+        self.assertEqual(snap.jams, [])
+
+  def test_no_route_planning_while_stopped(self):
+    self.start({"route": plan_straight})
+    for _ in range(400):
+      self.step(0., v=1.)
+    self.assertEqual(self.sent("route"), [])
+
+  def test_leaving_the_road_drops_cameras_and_jams_at_once(self):
+    # turned off at 30 s: 5 s after the car is 40 m off, the cameras and jams of the road it left are gone; route planning
+    # asks at once for the new road (20 s gap), the cruise API after its 60 s gap
+    self.start({"cruise": follow_long_route, "route": plan_straight})
+    for i in range(61):                                # 30 s east at 15 m/s, to x = 450
+      snap = self.step(7.5 * i)
+    self.assertTrue(snap.online and snap.jams_online)
+    self.assertGreater(snap.camera_limit, 0.)
+    self.assertTrue(snap.jams)
+    plans, detections = len(self.sent("route")), len(self.sent())
+    for k in range(1, 40):                             # north
+      snap = self.step(450., 7.5 * k, course=0.)
+      if not snap.online:
+        break
+    self.assertEqual(k, 15)                            # 45 m off from k = 6, for 10 cycles
+    self.assertEqual((snap.camera_limit, snap.jams), (0., []))
+    self.assertFalse(snap.jams_online)
+    self.assertEqual(len(self.sent("route")), plans + 1)   # at once
+    self.assertEqual(len(self.sent()), detections)        # the cruise API only 60 s after its last detection
+    snap = self.step(450., 7.5 * 16, course=0.)
+    self.assertTrue(snap.jams_online)                  # the new road's traffic, a cycle later
+    self.assertEqual(snap.jams, [])
+    t_off, y = self.clock.t, 7.5 * 16
+    while len(self.sent()) == detections:
+      y += 7.5
+      snap = self.step(450., y, course=0.)
+    self.assertAlmostEqual(self.clock.t - 0.5, 0.5 + baidu.CRUISE_MIN_GAP, delta=0.01)
+    self.assertLess(self.clock.t - t_off, baidu.CRUISE_MIN_GAP)
+
+  def test_jam_range_as_the_prompt(self):
+    self.assertEqual(baidu.JAM_RANGE, (JamPrompt.NEAR, JamPrompt.NEAR_FAST))
 
 
 class TestJamPrompt(unittest.TestCase):
@@ -429,6 +601,14 @@ class TestJamPrompt(unittest.TestCase):
     for i in range(int(JamPrompt.REARM / 0.5) + 1):
       p.update(50. + i * 0.5, [], False)
     self.assertEqual(p.update(81., jam, False)[0], EVENT_JAM)
+
+
+  def test_a_prompt_ends_once_the_jam_data_is_gone(self):
+    p, jam = JamPrompt(), [(400., 200., 3)]
+    self.assertEqual(p.update(0., jam, False)[0], EVENT_JAM)
+    self.assertEqual(p.update(0.5, [], False)[0], EVENT_JAM)              # in the hold without it, e.g. a GPS gap
+    self.assertEqual(p.update(1., [], False, gone=True)[0], EVENT_NONE)   # the car left the planned road
+    self.assertEqual(p.update(1.5, jam, False)[0], EVENT_NONE)            # once per jam
 
 
 class TestJamAhead(unittest.TestCase):
@@ -502,6 +682,14 @@ class TestCameraPrompt(unittest.TestCase):
     starts = [(i, round(limit * 3.6)) for k, (i, _, _, limit) in enumerate(shown) if k == 0 or shown[k - 1][0] != i - 1]
     self.assertEqual([kph for _, kph in starts], [60, 80, 80])
 
+  def test_a_prompt_ends_once_its_camera_is_no_longer_reported(self):
+    # the car left the road (its cruise route dropped) or the data went stale; not in a gap without GPS
+    for reported, shown in ((True, 2), (False, int(CameraPrompt.CAMERA_HOLD / 0.5))):
+      p = CameraPrompt()
+      events = [p.update(i * 0.5, 15., 290. - 7.5 * i, 60 / 3.6, True)[0] for i in range(2)]
+      events += [p.update(i * 0.5, 15., 0., 0., True, reported=reported)[0] for i in range(2, 12)]
+      self.assertEqual(sum(e == EVENT_SPEED_LIMIT_AHEAD for e in events), shown)
+
   def test_not_while_stopped(self):
     # first reported while the car stands in a queue 100 m before it: the prompt comes once the car moves again
     p = CameraPrompt()
@@ -546,7 +734,7 @@ class TestBaiduPrompts(unittest.TestCase):
     core = RoadEvents(self.tmp.name)
 
     def jam(x):
-      return baidu.Snapshot(online=True, lamps=[(150. - x, *latlon(150., 0.))], jams=[(200. - x, 200., 3)])
+      return baidu.Snapshot(online=True, jams_online=True, lamps=[(150. - x, *latlon(150., 0.))], jams=[(200. - x, 200., 3)])
     out = None
     for i, x in enumerate(self.xs[:50]):
       out = core.update(i * 0.5, 15., 0., 0., EAST, *latlon(x, 1.), True, FLAT, jam(x))
@@ -560,7 +748,7 @@ class TestBaiduPrompts(unittest.TestCase):
     core = RoadEvents(self.tmp.name)
     out = None
     for i, x in enumerate(self.xs[:50]):
-      snap = baidu.Snapshot(online=True, jams=[(200. - x, 200., 3)], camera_limit=60 / 3.6, camera_distance=-100. - x)
+      snap = baidu.Snapshot(online=True, jams_online=True, jams=[(200. - x, 200., 3)], camera_limit=60 / 3.6, camera_distance=-100. - x)
       out = core.update(i * 0.5, 15., 0., 0., EAST, *latlon(x, 1.), True, FLAT, snap)
       if out["event"] != EVENT_NONE:
         break
@@ -576,7 +764,7 @@ class TestBaiduPrompts(unittest.TestCase):
 
   def test_no_jam_prompt_in_the_queue(self):
     core = RoadEvents(self.tmp.name)
-    snap = baidu.Snapshot(online=True, jams=[(300., 200., 3)])
+    snap = baidu.Snapshot(online=True, jams_online=True, jams=[(300., 200., 3)])
     out = [core.update(i * 0.5, 2., 0., 0., EAST, *latlon(-300., 1.), True, FLAT, snap)["event"] for i in range(10)]
     self.assertEqual(set(out), {EVENT_NONE})
     self.assertEqual(core.update(5., 15., 0., 0., EAST, *latlon(-300., 1.), True, FLAT, snap)["event"], EVENT_JAM)
@@ -585,7 +773,7 @@ class TestBaiduPrompts(unittest.TestCase):
     core = RoadEvents(self.tmp.name)
     on = []
     for i, x in enumerate(-400. + 7.5 * i for i in range(90)):   # to x = 267.5, a jam from x = 200
-      snap = baidu.Snapshot(online=True, jams=[(200. - x, 300., 3)])
+      snap = baidu.Snapshot(online=True, jams_online=True, jams=[(200. - x, 300., 3)])
       out = core.update(i * 0.5, 15., 0., 0., EAST, *latlon(x, 1.), True, FLAT, snap)
       if out["jamFollow"]:
         on.append(x)
@@ -596,14 +784,14 @@ class TestBaiduPrompts(unittest.TestCase):
 
   def test_relaxed_distance_held_without_a_position_not_with_baidu_off(self):
     core = RoadEvents(self.tmp.name)
-    jam = baidu.Snapshot(online=True, jams=[(400., 300., 3)])
+    jam = baidu.Snapshot(online=True, jams_online=True, jams=[(400., 300., 3)])
     self.assertTrue(core.update(0., 15., 0., 0., EAST, *latlon(-300., 1.), True, FLAT, jam)["jamFollow"])
     self.assertTrue(core.update(10., 15., 0., 0., EAST, *latlon(-150., 1.), False, FLAT, None)["jamFollow"])
     self.assertFalse(core.update(10.5, 15., 0., 0., EAST, *latlon(-142., 1.), True, FLAT, baidu.Snapshot())["jamFollow"])
 
   def test_slow_traffic_counts_on_fast_roads(self):
     def slow(x):
-      return baidu.Snapshot(online=True, jams=[(1000., 300., 2)])
+      return baidu.Snapshot(online=True, jams_online=True, jams=[(1000., 300., 2)])
 
     starts = drive(RoadEvents(self.tmp.name), self.xs[:10], slow)
     self.assertEqual(starts, [])
