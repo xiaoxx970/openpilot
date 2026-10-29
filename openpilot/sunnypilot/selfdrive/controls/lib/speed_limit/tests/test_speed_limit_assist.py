@@ -31,6 +31,7 @@ from openpilot.common.test import OpenpilotTestCase
 
 ButtonEvent = car.CarState.ButtonEvent
 ButtonType = car.CarState.ButtonEvent.Type
+EventNameSP = custom.OnroadEventSP.EventName
 
 SpeedLimitAssistState = custom.LongitudinalPlanSP.SpeedLimit.AssistState
 
@@ -305,6 +306,60 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
         assert self.sla.state in [SpeedLimitAssistState.preActive, SpeedLimitAssistState.active]
       elif initial_state in ACTIVE_STATES:
         assert self.sla.state in ACTIVE_STATES
+
+
+  def _past_a_speed_camera(self, confirm: bool, after: float):
+    """Fork: a 60 km/h Baidu speed camera on an 80 km/h road, set speed 80, as on the VW (not PCM): asked ahead of it,
+    confirmed or not, then 50 m past it the limit is `after`. Returns the states and events from there on."""
+    self.sla.pcm_op_long = False
+    road, camera = 80 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS
+    self.initialize_active_state(road)
+    self.sla.speed_limit_prev = road
+    set_speed = road
+
+    def update(limit, is_camera, frames=1):
+      for _ in range(frames):
+        self.events_sp.clear()
+        self.sla.update(True, False, road, 0, set_speed, limit, limit if limit else camera, True, 100. if is_camera else 0., self.events_sp,
+                        camera=is_camera)
+      return self.sla.state, set(self.events_sp.names)
+
+    assert update(road, False)[0] in ACTIVE_STATES
+    assert update(camera, True) == (SpeedLimitAssistState.preActive, {EventNameSP.speedLimitPreActive})
+    if confirm:
+      set_speed = camera
+    update(camera, True, int(PRE_ACTIVE_GUARD_PERIOD[False] / DT_MDL) + 1)
+    assert self.sla.state == (SpeedLimitAssistState.active if confirm else SpeedLimitAssistState.inactive)
+    return [update(after, False) for _ in range(int(10. / DT_MDL))]
+
+  @parameterized.expand([(True,), (False,)], names=["confirm"])
+  def test_no_offer_to_go_back_up_past_a_speed_camera(self, confirm):
+    seq = self._past_a_speed_camera(confirm, 80 * CV.KPH_TO_MS)
+    assert all(not events for _, events in seq)
+    if confirm:   # at the camera's limit until the driver sets it higher
+      assert {state for state, _ in seq} == {SpeedLimitAssistState.inactive}
+      assert self.sla.output_v_target == V_CRUISE_UNSET
+    else:         # the set speed already is the road's limit: back to active, quietly
+      assert seq[-1][0] == SpeedLimitAssistState.active
+    seq = self._past_a_speed_camera(confirm, 0.)   # no other limit
+    assert all(not events for _, events in seq)
+    assert SpeedLimitAssistState.preActive not in {state for state, _ in seq}
+
+  @parameterized.expand([(SpeedLimitAssistState.active,), (SpeedLimitAssistState.inactive,)], names=["state"])
+  def test_non_pcm_no_ask_for_a_limit_the_set_speed_already_is(self, state):
+    # fork: e.g. the car's sign recognition dropping out and back while the set speed is the limit
+    self.sla.pcm_op_long = False
+    limit = 60 * CV.KPH_TO_MS
+    self.initialize_active_state(limit)
+    self.sla.state = state
+    self.sla.speed_limit_prev = 50 * CV.KPH_TO_MS
+    self.sla.update(True, False, limit, 0, limit, limit, limit, True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.active
+    assert not self.events_sp.has(EventNameSP.speedLimitPreActive)
+
+  def test_a_lower_limit_past_a_speed_camera_is_asked_for(self):
+    seq = self._past_a_speed_camera(True, 50 * CV.KPH_TO_MS)
+    assert seq[0] == (SpeedLimitAssistState.preActive, {EventNameSP.speedLimitPreActive})
 
 
 class TestButtonStateTrackerSLAIntegration(OpenpilotTestCase):

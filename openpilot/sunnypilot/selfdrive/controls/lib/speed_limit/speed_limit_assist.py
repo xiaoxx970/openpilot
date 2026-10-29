@@ -88,6 +88,7 @@ class SpeedLimitAssist:
     self.speed_limit_final_last_conv = 0
     self.prev_speed_limit_final_last_conv = 0
     self._distance = 0.
+    self._camera_prev = False
     self.state = SpeedLimitAssistState.disabled
     self._state_prev = SpeedLimitAssistState.disabled
     self.pcm_op_long = CP.openpilotLongitudinalControl and CP.pcmCruise
@@ -323,7 +324,8 @@ class SpeedLimitAssist:
           if self.v_cruise_cluster_changed:
             self.state = SpeedLimitAssistState.inactive
 
-          elif self.speed_limit_changed and self.apply_confirm_speed_threshold:
+          # fork: a new limit the set speed already is needs no confirmation (it was a one frame ask with a chime)
+          elif self.speed_limit_changed and self.apply_confirm_speed_threshold and not self.target_set_speed_confirmed:
             self.state = SpeedLimitAssistState.preActive
             self.pre_active_timer = int(PRE_ACTIVE_GUARD_PERIOD[self.pcm_op_long] / DT_MDL)
 
@@ -337,7 +339,7 @@ class SpeedLimitAssist:
 
         # INACTIVE
         elif self.state == SpeedLimitAssistState.inactive:
-          if self.speed_limit_changed:
+          if self.speed_limit_changed and not self.target_set_speed_confirmed:
             self.state = SpeedLimitAssistState.preActive
             self.pre_active_timer = int(PRE_ACTIVE_GUARD_PERIOD[self.pcm_op_long] / DT_MDL)
           elif self._update_non_pcm_long_confirmed_state():
@@ -381,7 +383,8 @@ class SpeedLimitAssist:
         self.update_active_event(events_sp)
 
   def update(self, long_enabled: bool, long_override: bool, v_ego: float, a_ego: float, v_cruise_cluster: float, speed_limit: float,
-             speed_limit_final_last: float, has_speed_limit: bool, distance: float, events_sp: EventsSP) -> None:
+             speed_limit_final_last: float, has_speed_limit: bool, distance: float, events_sp: EventsSP, camera: bool = False) -> None:
+    """camera: the speed limit is a Baidu speed camera's (fork, SpeedLimitResolver.camera)."""
     self.long_enabled = long_enabled
     self.v_ego = v_ego
     self.a_ego = a_ego
@@ -399,6 +402,14 @@ class SpeedLimitAssist:
       self.is_enabled, self.is_active = self.update_state_machine_pcm_op_long()
     else:
       self.is_enabled, self.is_active = self.update_state_machine_non_pcm_long()
+
+    # fork: past a speed camera (50 m on) its limit ends; going back up is not offered, the set speed stays as the driver
+    # left it until the next limit change or the driver sets it
+    if self._camera_prev and not camera and self.state != SpeedLimitAssistState.disabled and \
+       (speed_limit <= 0. or speed_limit > self.speed_limit_prev):
+      self.state = SpeedLimitAssistState.inactive
+      self.is_enabled = self.is_active = False
+    self._camera_prev = camera
 
     self.update_events(events_sp)
 
