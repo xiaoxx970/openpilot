@@ -385,19 +385,12 @@ class TestBaiduPrompts(unittest.TestCase):
   def tearDown(self):
     self.tmp.cleanup()
 
-  def test_traffic_lights_stand_in_for_the_maps_crossings(self):
-    starts = drive(RoadEvents(self.tmp.name), self.xs, lights(-120., 150.))
-    self.assertEqual([(e, s) for _, e, s in starts], [(EVENT_CROSSING, SOURCE_BAIDU), (EVENT_CROSSING, SOURCE_BAIDU), (EVENT_ROUNDABOUT, SOURCE_MAP)])
-    self.assertAlmostEqual(starts[0][0], -370., delta=8.)
-    self.assertAlmostEqual(starts[1][0], -100., delta=8.)
-
-  def test_no_lights_no_crossing_prompt(self):
-    starts = drive(RoadEvents(self.tmp.name), self.xs, lights())
-    self.assertEqual([e for _, e, _ in starts], [EVENT_ROUNDABOUT])
-
-  def test_offline_the_map_stays(self):
-    starts = drive(RoadEvents(self.tmp.name), self.xs, lambda x: baidu.Snapshot(online=False))
-    self.assertEqual([(e, s) for _, e, s in starts], [(EVENT_CROSSING, SOURCE_MAP), (EVENT_ROUNDABOUT, SOURCE_MAP)])
+  def test_crossings_stay_with_the_map(self):
+    # Baidu's lights do not make crossing prompts, with or without lights on the road ahead
+    for snapshot in (lights(-120., 150.), lights(), lambda x: baidu.Snapshot(online=False)):
+      starts = drive(RoadEvents(self.tmp.name), self.xs, snapshot)
+      self.assertEqual([(e, s) for _, e, s in starts], [(EVENT_CROSSING, SOURCE_MAP), (EVENT_ROUNDABOUT, SOURCE_MAP)])
+      self.assertAlmostEqual(starts[0][0], -100., delta=8.)   # the map's Cross Rd at x = 150
 
   def test_a_jam_comes_first(self):
     core = RoadEvents(self.tmp.name)
@@ -412,12 +405,6 @@ class TestBaiduPrompts(unittest.TestCase):
     assert out is not None
     self.assertEqual((out["event"], out["source"], out["jamLength"]), (EVENT_JAM, SOURCE_BAIDU, 200.))
     self.assertAlmostEqual(x, -300., delta=8.)   # 500 m before it in town
-
-  def test_no_light_prompt_while_stopped(self):
-    core = RoadEvents(self.tmp.name)
-    snap = lights(-200.)(-400.)                      # waiting at a red light, the next one 200 m on
-    out = [core.update(i * 0.5, 0., 0., 0., EAST, *latlon(-400., 1.), True, FLAT, snap)["event"] for i in range(10)]
-    self.assertEqual(set(out), {EVENT_NONE})
 
   def test_no_jam_prompt_in_the_queue(self):
     core = RoadEvents(self.tmp.name)

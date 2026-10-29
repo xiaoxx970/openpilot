@@ -46,8 +46,8 @@ DESCRIPTIONS = {
   ),
   "VwBaiduOnline": tr_noop(
     "Baidu Maps' live data for the road ahead: speed limits in place of the offline map's (Speed Limit Assist still asks " +
-    "before each change), and with Road Event Prompts a traffic jam ahead and traffic lights for the crossing prompt. Sends " +
-    "the car's recent positions to Baidu a few times a minute over mobile data. Needs your Baidu Maps key in /data/baidu_ak."
+    "before each change), and with Road Event Prompts a traffic jam ahead. Sends the car's recent positions to Baidu a few " +
+    "times a minute over mobile data. Needs your Baidu Maps key in /data/baidu_ak."
   ),
   "EnableSpeedLimitPredicative": tr_noop(
     "Enables setting predicative speed limit"

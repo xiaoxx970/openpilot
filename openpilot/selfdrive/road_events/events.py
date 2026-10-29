@@ -5,7 +5,7 @@ import math
 import numpy as np
 from numpy.typing import ArrayLike
 
-from openpilot.selfdrive.road_events.osm_map import Feature, OfflineMap
+from openpilot.selfdrive.road_events.osm_map import OfflineMap
 from openpilot.selfdrive.road_events.prompts import EVENT_CROSSING, EVENT_JAM, EVENT_NONE, EVENT_ROUNDABOUT, JamPrompt, MapPrompt, SlopePrompt
 from openpilot.selfdrive.road_events.slope import grades_ahead, slope_ahead
 
@@ -32,7 +32,7 @@ class RoadEvents:
   def update(self, t: float, v: float, roll: float, pitch: float, course: float, lat: float, lon: float, position_ok: bool,
              path: ModelPath | None, baidu=None) -> dict:
     """path: the model's (x, y, z) in the calibrated frame, or None. course: rad from north, clockwise.
-    baidu: baidu.Snapshot of the road ahead, or None: its traffic lights then stand in for the map's crossings."""
+    baidu: baidu.Snapshot of the road ahead, or None: its traffic jams ahead. Crossings stay the map's (the owner's call)."""
     out = {"event": EVENT_NONE, "distance": 0., "source": SOURCE_NONE, "grade": math.tan(pitch), "gradeAhead": 0.,
            "mapMatched": False, "roadClass": 0, "jamLength": 0., "baiduOnline": bool(baidu is not None and baidu.online)}
 
@@ -60,12 +60,6 @@ class RoadEvents:
       self.prev_way = None   # slow or no position: the road key stays, the car is still on that road
     out["roadKey"] = self.road_key
 
-    crossing_source = SOURCE_MAP
-    if out["baiduOnline"]:
-      # signaled junctions on the road Baidu predicts beat the map's same-class guess; like the map's, not while stopped
-      lamp = next((x for x in baidu.lamps if x[0] > 0.), None) if v >= MIN_SPEED else None
-      crossing = Feature(*lamp) if lamp is not None else None
-      crossing_source = SOURCE_BAIDU
     fast = self.road_key is not None and self.road_key[1] in FAST_ROADS
     jam_event, jam_distance, jam_length = EVENT_NONE, 0., 0.
     if v >= MIN_SPEED:   # crawling or stopped the car is in the queue already
@@ -73,7 +67,7 @@ class RoadEvents:
 
     # one prompt at a time: a jam, the map's, then the model's
     for (event, d), source in (((jam_event, jam_distance), SOURCE_BAIDU), (self.roundabout.update(t, roundabout), SOURCE_MAP),
-                               (self.crossing.update(t, crossing), crossing_source), (slope, SOURCE_MODEL)):
+                               (self.crossing.update(t, crossing), SOURCE_MAP), (slope, SOURCE_MODEL)):
       if event != EVENT_NONE:
         out.update(event=event, distance=float(d), source=source)
         if event == EVENT_JAM:

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Road prompts for the VW cluster (ACC_Events): uphill / downhill ahead from the model, roundabout / crossing ahead from
-mapd's offline OSM tiles, and with Baidu online data a traffic jam ahead, traffic lights for the crossings and Baidu's speed
-limits for sunnypilot's speed limit resolver (they replace the offline map's while fresh). card shows the prompts in openpilot's
-ACC HUD; the resolver's limits only reach the cruise speed through Speed Limit Assist, which asks the driver every time.
+mapd's offline OSM tiles, and with Baidu online data a traffic jam ahead and Baidu's speed limits for sunnypilot's speed
+limit resolver (they replace the offline map's while fresh). card shows the prompts in openpilot's ACC HUD; the resolver's
+limits only reach the cruise speed through Speed Limit Assist, which asks the driver every time.
 
 Opt-in: param VwRoadEventPrompts for the prompts, VwBaiduOnline (and a key file, see baidu.py) for Baidu. Light: 2 Hz, the
 latest modelV2 / liveLocationKalman only (conflated sockets), nice 10 on the little cores, away from card/selfdrived/controlsd
