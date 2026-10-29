@@ -486,7 +486,8 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
 # road prompts for the VW cluster (ACC_Events) from roadeventd: the model's slope ahead, the offline OSM map and Baidu Maps online
 # data; also Baidu's speed limits for the speed limit resolver. The prompts are display only.
 struct RoadEventsIC @0xcb9fd56c7057593a {
-  event @0 :UInt8;            # ACC_Events value to show: 0 none, 9 crossing, 10 roundabout, 12 traffic jam, 14 downhill, 15 uphill
+  event @0 :UInt8;            # ACC_Events value to show: 0 none, 4 speed limit ahead (a speed camera), 9 crossing, 10 roundabout,
+                              # 12 traffic jam, 14 downhill, 15 uphill
   distance @1 :Float32;       # m from the car to the event, 0 = unknown
   source @2 :Source;
   grade @3 :Float32;          # current road grade, rise over run (liveLocationKalman pitch)
@@ -494,14 +495,15 @@ struct RoadEventsIC @0xcb9fd56c7057593a {
   mapMatched @5 :Bool;        # the car is placed on an offline map road
   roadClass @6 :UInt8;        # its OSM highway class, as in mapd's offline tiles (1 motorway ... 13 living street)
   jamLength @7 :Float32;      # m, length of the jam ahead while event is 12
-  baiduOnline @8 :Bool;       # a Baidu cruise answer for the road ahead in the last minute
+  baiduOnline @8 :Bool;       # a fresh Baidu cruise answer for the road ahead (asked less than baidu.STALE ago)
   speedLimit @9 :Float32;     # m/s, Baidu's speed limit of the road the car is on (road info API), 0 = none
   speedLimitValid @10 :Bool;  # a fresh Baidu answer for that road: then it stands in for the offline map's limit
   speedLimitAhead @11 :Float32;          # m/s, limit of the next Baidu speed camera on the road ahead, 0 = none
-  speedLimitAheadDistance @12 :Float32;  # m to it
+  speedLimitAheadDistance @12 :Float32;  # m to it, negative once passed (reported until 50 m behind)
   jamFollow @13 :Bool;           # a traffic jam ahead asks for the relaxed following distance (Baidu, see prompts.JamAhead)
   jamFollowDistance @14 :Float32;  # m to the start of that jam
   promptAlways @15 :Bool;        # show the prompts in ACC standby and with the main switch off too (VwRoadEventPrompts 2)
+  eventSpeedLimit @16 :Float32;  # m/s, the limit of a speed limit ahead prompt (event 4), 0 = none
 
   enum Source {
     none @0;
@@ -590,9 +592,13 @@ struct CarControlIC @0xa30662f84033036c {
   hudSpeedLimitAhead @14 :Bool;
   hudCurveSpeed @15 :Float32; # m/s, vision curve control target speed while slowing for a curve, 0 = none
   hudCurveDirection @16 :Int8; # direction of that curve: 0 = none, -1 = left, 1 = right, 2 = S-bend
-  hudRoadEvent @17 :UInt8; # road prompt (ACC_Events value) from roadeventd: 0 = none, 9 crossing, 10 roundabout, 14 downhill, 15 uphill
+  hudRoadEvent @17 :UInt8; # road prompt (ACC_Events value) from roadeventd: 0 = none, 4 speed limit ahead, 9 crossing, 10 roundabout,
+                           # 12 traffic jam, 14 downhill, 15 uphill
   hudRoadEventDistance @18 :Float32; # m to that road event, 0 = unknown
   hudRoadEventAlways @19 :Bool; # show hudRoadEvent in ACC standby and with the main switch off too
+  hudSpeedLimitOffer @20 :Float32; # m/s, the limit Speed Limit Assist is asking to set (preActive), 0 = none
+  hudSpeedLimitOfferAhead @21 :Bool; # that limit lies ahead
+  hudRoadEventSpeedLimit @22 :Float32; # m/s, the limit of a speed limit ahead road prompt (hudRoadEvent 4), 0 = none
 }
 
 struct CarParamsIC @0xc86a3d38d13eb3ef {

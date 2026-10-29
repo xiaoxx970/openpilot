@@ -63,10 +63,11 @@ def speed_limit_pre_active_alert(CP: car.CarParams, CS: car.CarState, sm: messag
       # confirmation logic uses decide the direction. Comparing it against speed_conv-scaled
       # values here would scale the set speed twice and flip the prompt.
       req_plus, req_minus = compare_cluster_target(set_speed * CV.KPH_TO_MS, speed_limit_final_last, metric)
+      speed_unit = "km/h" if metric else "mph"
       if req_plus:
-        alert_1_str = "Press + to confirm speed limit"
+        alert_1_str = f"Press + to confirm {speed_limit_final_last_conv} {speed_unit}"
       elif req_minus:
-        alert_1_str = "Press - to confirm speed limit"
+        alert_1_str = f"Press - to confirm {speed_limit_final_last_conv} {speed_unit}"
     else:
       alert_size = AlertSize.none
 
