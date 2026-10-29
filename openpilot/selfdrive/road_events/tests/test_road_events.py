@@ -113,10 +113,11 @@ class TestMapPrompt(unittest.TestCase):
     self.assertEqual(p.update(0., (40., LAT0, LON0))[0], EVENT_NONE)
 
 
-def build_tile(root, stacked=False, main_class=5, dual_crossing=False):
+def build_tile(root, stacked=False, main_class=5, dual_crossing=False, slip_class=6):
   """A town east of (LAT0, LON0): Main Rd (primary) west to east with a crossing primary at x=150, a residential side
   street at x=80, a slip road at x=200, a roundabout of radius 20 m centered at x=300 in four one-way quarters, and Main Rd
-  on beyond it. stacked: an elevated trunk 4 m north of Main Rd. main_class: highway class of Main Rd and Cross Rd.
+  on beyond it. stacked: an elevated trunk 4 m north of Main Rd. main_class: highway class of Main Rd and Cross Rd;
+  slip_class: of the slip road.
   dual_crossing: two dual carriageways crossing at (600, 300), their four one-way pieces inside the junction ways of their
   own, as often mapped."""
   from openpilot.selfdrive.road_events.osm_map import _offline_schema
@@ -141,7 +142,7 @@ def build_tile(root, stacked=False, main_class=5, dual_crossing=False):
   way([(x, 0.) for x in xs], main_class, "Main Rd")
   way([(150., y) for y in np.arange(-200., 201., 20.)], main_class, "Cross Rd")
   way([(80., y) for y in np.arange(0., 151., 25.)], 12, "Side St")
-  way([(200., 0.), (215., 30.), (230., 60.)], 6)
+  way([(200., 0.), (215., 30.), (230., 60.)], slip_class)
   quarter = [np.radians(np.linspace(a, a + 90., 7)) for a in (180., 270., 360., 450.)]
   for q in quarter:
     way([(300. + 20. * math.cos(a), 20. * math.sin(a)) for a in q], 5, "", "", True)
@@ -166,6 +167,17 @@ def build_tile(root, stacked=False, main_class=5, dual_crossing=False):
   os.makedirs(os.path.dirname(path), exist_ok=True)
   with open(path, "wb") as f:
     f.write(msg.to_bytes_packed())
+
+
+class TestRampNear(unittest.TestCase):
+  def test_a_ramp_junction_on_the_motorway_300_m_ahead_200_m_behind(self):
+    # Main Rd a motorway, its slip road at x = 200 a motorway link; a primary road gets nothing
+    for main_class, want in ((1, {-200.: False, -50.: True, 150.: True, 250.: True}), (5, dict.fromkeys((-200., -50., 150., 250.), False))):
+      with tempfile.TemporaryDirectory() as tmp:
+        build_tile(tmp, main_class=main_class, slip_class=2)
+        core = RoadEvents(tmp)
+        near = {x: core.update(0., 25., 0., 0., EAST, *latlon(x, 0.), True, None)["rampNear"] for x in want}
+        self.assertEqual(near, want)
 
 
 class TestOfflineMap(unittest.TestCase):

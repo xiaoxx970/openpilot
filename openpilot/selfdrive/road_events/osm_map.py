@@ -32,6 +32,7 @@ MAX_TURN = math.radians(100)   # the road is not followed through sharper turns
 
 # mapd's highway classes (offline.capnp). Rank: lower is more important.
 LINKS = frozenset((2, 4, 6, 8, 10))
+RAMPS = frozenset((2, 4))      # motorway and trunk links
 RANK = {1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2, 7: 3, 8: 3, 9: 4, 10: 4, 11: 5, 12: 6, 13: 7}
 CROSSING_ROADS = (1, 4)        # ranks of the car's road that get crossing prompts: trunk to tertiary. Motorways have
                                # none, and on minor roads every junction is one of equal class
@@ -331,6 +332,15 @@ class OfflineMap:
     if best is None or best[1] > MAX_TURN:
       return None
     return best[2], best[3], best[4]
+
+  def ramp_near(self, m: Match, ahead: float, behind: float) -> bool:
+    """Does a motorway or trunk link leave or join the car's road within ahead m in front of it or behind m after it?"""
+    for match, length in ((m, ahead), (m._replace(direction=-m.direction), behind)):
+      nodes, _ = self.path_ahead(match, length)
+      for _, w, j in nodes:
+        if any(w2 != w and int(self.way_class[w2]) in RAMPS for w2, _ in self.junction(int(self.way_keys[w][j]))):
+          return True
+    return False
 
   # ---- features ahead -----------------------------------------------------------------------------------------------
   def features_ahead(self, m: Match) -> tuple[Feature | None, Feature | None]:

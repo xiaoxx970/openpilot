@@ -281,6 +281,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
       speedLimitFinalLast @6 :Float32;
       speedLimitValid @7 :Bool;
       speedLimitLastValid @8 :Bool;
+      carSpeedLimit @9 :Float32;  # fork: m/s, the car's sign reading in use: a ramp's sign read from the mainline held back, 0 = none
     }
 
     struct Assist {
@@ -504,6 +505,7 @@ struct RoadEventsIC @0xcb9fd56c7057593a {
   jamFollowDistance @14 :Float32;  # m to the start of that jam
   promptAlways @15 :Bool;        # show the prompts in ACC standby and with the main switch off too (VwRoadEventPrompts 2)
   eventSpeedLimit @16 :Float32;  # m/s, the limit of a speed limit ahead prompt (event 4), 0 = none
+  rampNear @17 :Bool;            # on a motorway or trunk, a link leaves or joins it within 300 m ahead or 200 m behind (OSM)
 
   enum Source {
     none @0;
@@ -599,6 +601,7 @@ struct CarControlIC @0xa30662f84033036c {
   hudSpeedLimitOffer @20 :Float32; # m/s, the limit Speed Limit Assist is asking to set (preActive), 0 = none
   hudSpeedLimitOfferAhead @21 :Bool; # that limit lies ahead
   hudRoadEventSpeedLimit @22 :Float32; # m/s, the limit of a speed limit ahead road prompt (hudRoadEvent 4), 0 = none
+  hudCarSpeedLimit @23 :Float32; # m/s, the car's sign reading as openpilot uses it (a ramp's sign read from the motorway held back), 0 = none
 }
 
 struct CarParamsIC @0xc86a3d38d13eb3ef {

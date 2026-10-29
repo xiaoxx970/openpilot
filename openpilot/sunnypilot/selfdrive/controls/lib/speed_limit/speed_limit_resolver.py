@@ -17,6 +17,7 @@ from openpilot.selfdrive.road_events.prompts import CameraPrompt
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD, get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import LIMIT_MAX_MAP_DATA_AGE, LIMIT_ADAPT_ACC
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Policy, OffsetType
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.ramp_sign_filter import RampSignFilter
 
 SpeedLimitSource = custom.LongitudinalPlanSP.SpeedLimit.Source
 
@@ -64,6 +65,7 @@ class SpeedLimitResolver:
     self.camera = False         # the resolved limit is a Baidu speed camera's (fork)
     self._camera: tuple[float, float] | None = None   # (m to it, limit m/s) of the speed camera in use
     self._last_before_camera = (0., 0.)              # speed_limit_last, speed_limit_final_last from before it
+    self.ramp_filter = RampSignFilter()   # the car's readings of ramp signs from a motorway mainline (fork)
     for source in ALL_SOURCES:
       self._reset_limit_sources(source)
 
@@ -121,7 +123,7 @@ class SpeedLimitResolver:
 
   def _get_from_car_state(self, sm: messaging.SubMaster) -> None:
     self._reset_limit_sources(SpeedLimitSource.car)
-    self.limit_solutions[SpeedLimitSource.car] = sm['carStateSP'].speedLimit
+    self.limit_solutions[SpeedLimitSource.car] = self.ramp_filter.update(sm, self.v_ego)
     self.distance_solutions[SpeedLimitSource.car] = 0.
 
   def _get_from_map_data(self, sm: messaging.SubMaster) -> None:

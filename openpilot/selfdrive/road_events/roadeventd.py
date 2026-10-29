@@ -69,6 +69,7 @@ def fill_message(ev, out: dict, snap=None) -> None:
   ev.eventSpeedLimit = out.get("eventSpeedLimit", 0.)
   ev.jamFollow = out.get("jamFollow", False)
   ev.jamFollowDistance = out.get("jamFollowDistance", 0.)
+  ev.rampNear = out.get("rampNear", False)
   if snap is not None:
     ev.baiduOnline = snap.online or snap.jams_online
     ev.speedLimit = snap.speed_limit
@@ -78,7 +79,7 @@ def fill_message(ev, out: dict, snap=None) -> None:
 
 
 NO_PROMPT: dict[str, Any] = {"event": 0, "distance": 0., "source": 0, "grade": 0., "gradeAhead": 0., "mapMatched": False, "roadClass": 0, "roadKey": None,
-                             "eventSpeedLimit": 0., "jamFollow": False, "jamFollowDistance": 0.}
+                             "eventSpeedLimit": 0., "jamFollow": False, "jamFollowDistance": 0., "rampNear": False}
 
 
 def main():
