@@ -134,6 +134,21 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
     assert self.sla.state == SpeedLimitAssistState.preActive
     assert self.sla.is_enabled and not self.sla.is_active
 
+  @parameterized.expand([True, False], names=["pcm_op_long"])
+  def test_no_offer_in_a_car_park_after_engaging(self, pcm_op_long):
+    # fork: engaged in an underground car park, the car's sign recognition still reports the last sign from outside
+    self.sla.pcm_op_long = pcm_op_long
+    limit, set_speed, garage, road = 60 * CV.KPH_TO_MS, 40 * CV.KPH_TO_MS, 24 * CV.KPH_TO_MS, 35 * CV.KPH_TO_MS
+    for _ in range(int(3. / DT_MDL)):
+      self.sla.update(True, False, garage, 0, set_speed, limit, limit, True, 0, self.events_sp)
+      assert self.sla.state == SpeedLimitAssistState.disabled
+    # out on the road it is offered, once
+    self.sla.update(True, False, road, 0, set_speed, limit, limit, True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.preActive
+    for _ in range(int(PRE_ACTIVE_GUARD_PERIOD[pcm_op_long] / DT_MDL) + 1):
+      self.sla.update(True, False, road, 0, set_speed, limit, limit, True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.inactive
+
   def test_transition_disabled_to_pending_no_speed_limit_not_max_initial_set_speed(self):
     for _ in range(int(3. / DT_MDL)):
       self.sla.update(True, False, SPEED_LIMITS['highway'], 0, SPEED_LIMITS['city'], 0, 0, False, 0, self.events_sp)
