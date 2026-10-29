@@ -1,9 +1,11 @@
 from openpilot.system.ui.widgets.scroller import NavScroller
-from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigParamControl
+from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigMultiParamToggle, BigParamControl
 from openpilot.selfdrive.ui.mici.layouts.settings.icfingerprint import FingerprintLayoutMici
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.multilang import tr
+
+ROAD_EVENT_PROMPTS = ["off", "when engaged", "always"]  # VwRoadEventPrompts
 
 
 class ICTogglesLayoutMici(NavScroller):
@@ -16,7 +18,7 @@ class ICTogglesLayoutMici(NavScroller):
     enable_car_types            = BigParamControl("VW: Car Types on Cluster", "VwVisionCarTypes")
     enable_rain_follow          = BigParamControl("VW: Rain Following Distance", "RainFollowDistance")
     enable_curve_profile        = BigParamControl("VW: Curve Speed from Driver Profile", "CurveSpeedDriverProfile")
-    enable_road_events          = BigParamControl("VW: Road Event Prompts", "VwRoadEventPrompts")
+    self._road_events           = BigMultiParamToggle("VW: Road Event Prompts", "VwRoadEventPrompts", ROAD_EVENT_PROMPTS)
     enable_baidu_online         = BigParamControl("VW: Baidu Traffic & Speed Limits", "VwBaiduOnline")
     enable_sl_pred_control      = BigParamControl("VW: Predicative Speed Limit (pACC)", "EnableSpeedLimitPredicative")
     enable_sl_pred_sl           = BigParamControl("VW: Predicative - Reaction to Speed Limits", "EnableSLPredReactToSL")
@@ -40,7 +42,7 @@ class ICTogglesLayoutMici(NavScroller):
       enable_car_types,
       enable_rain_follow,
       enable_curve_profile,
-      enable_road_events,
+      self._road_events,
       enable_baidu_online,
       enable_sl_pred_control,
       enable_sl_pred_sl,
@@ -62,7 +64,6 @@ class ICTogglesLayoutMici(NavScroller):
       ("VwVisionCarTypes", enable_car_types),
       ("RainFollowDistance", enable_rain_follow),
       ("CurveSpeedDriverProfile", enable_curve_profile),
-      ("VwRoadEventPrompts", enable_road_events),
       ("VwBaiduOnline", enable_baidu_online),
       ("EnableSpeedLimitPredicative", enable_sl_pred_control),
       ("EnableSLPredReactToSL", enable_sl_pred_sl),
@@ -98,3 +99,5 @@ class ICTogglesLayoutMici(NavScroller):
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
       item.set_checked(ui_state.params.get_bool(key))
+    prompts = int(ui_state.params.get("VwRoadEventPrompts", return_default=True) or 0)
+    self._road_events.set_value(ROAD_EVENT_PROMPTS[min(max(prompts, 0), len(ROAD_EVENT_PROMPTS) - 1)])

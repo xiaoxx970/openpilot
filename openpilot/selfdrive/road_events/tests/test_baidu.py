@@ -8,7 +8,7 @@ import numpy as np
 
 from openpilot.selfdrive.road_events import baidu, osm_map
 from openpilot.selfdrive.road_events.events import SOURCE_BAIDU, SOURCE_MAP, RoadEvents
-from openpilot.selfdrive.road_events.prompts import EVENT_CROSSING, EVENT_JAM, EVENT_NONE, EVENT_ROUNDABOUT, HOLD, JamPrompt
+from openpilot.selfdrive.road_events.prompts import EVENT_CROSSING, EVENT_JAM, EVENT_NONE, EVENT_ROUNDABOUT, HOLD, JamAhead, JamPrompt
 from openpilot.selfdrive.road_events.tests.test_road_events import EAST, KX, LAT0, LON0, T_IDXS, build_tile, latlon
 
 MAIN = ("Main Rd", 5)
@@ -361,6 +361,41 @@ class TestJamPrompt(unittest.TestCase):
     self.assertEqual(p.update(81., jam, False)[0], EVENT_JAM)
 
 
+class TestJamAhead(unittest.TestCase):
+  def test_on_for_the_jams_the_prompt_announces(self):
+    self.assertEqual(JamAhead().update(0., [(400., 150., 3)], False, True), (True, 400.))
+    self.assertEqual(JamAhead().update(0., [(1400., 200., 2)], True, True), (True, 1400.))
+    for jams, fast in (([(400., 150., 2)], False), ([(600., 150., 3)], False), ([(400., 80., 4)], False), ([(1600., 200., 3)], True)):
+      self.assertEqual(JamAhead().update(0., jams, fast, True), (False, 0.))
+
+  def test_comes_on_only_while_moving(self):
+    a, jam = JamAhead(), [(400., 150., 3)]
+    self.assertFalse(a.update(0., jam, False, False)[0])
+    self.assertTrue(a.update(0.5, jam, False, True)[0])
+    self.assertTrue(a.update(1., [(380., 150., 3)], False, False)[0])   # slowing down on the approach keeps it
+
+  def test_a_jam_start_moving_back_a_little_keeps_it(self):
+    a = JamAhead()
+    a.update(0., [(480., 150., 3)], False, True)
+    self.assertEqual(a.update(30., [(700., 150., 3)], False, True), (True, 700.))   # within KEEP times 500 m
+    self.assertEqual(a.update(60., [(800., 150., 3)], False, True), (False, 0.))
+    self.assertFalse(a.update(60.5, [(700., 150., 3)], False, True)[0])            # on again only within 500 m
+
+  def test_off_once_in_the_jam(self):
+    a = JamAhead()
+    a.update(0., [(100., 300., 3)], False, True)
+    self.assertEqual(a.update(10., [(-5., 300., 3), (450., 200., 3)], False, True), (False, 0.))   # a next one too
+    self.assertEqual(a.update(40., [(150., 200., 3)], False, True), (True, 150.))   # out of it, the next one ahead
+
+  def test_off_without_jams_held_without_data(self):
+    a, jam = JamAhead(), [(400., 150., 3)]
+    a.update(0., jam, False, True)
+    self.assertEqual(a.update(JamAhead.NO_DATA_HOLD - 1., None, False, True), (True, 400.))   # no GPS in a tunnel
+    self.assertEqual(a.update(JamAhead.NO_DATA_HOLD + 0.5, None, False, True), (False, 0.))
+    a.update(40., jam, False, True)
+    self.assertEqual(a.update(40.5, [], False, True), (False, 0.))   # Baidu off, stale or the jam gone
+
+
 def drive(core: RoadEvents, xs, snapshot, y=1.):
   """Prompt starts (x, event, source) driving east at 15 m/s; snapshot(x) is Baidu's data there."""
   starts, last = [], EVENT_NONE
@@ -412,6 +447,26 @@ class TestBaiduPrompts(unittest.TestCase):
     out = [core.update(i * 0.5, 2., 0., 0., EAST, *latlon(-300., 1.), True, FLAT, snap)["event"] for i in range(10)]
     self.assertEqual(set(out), {EVENT_NONE})
     self.assertEqual(core.update(5., 15., 0., 0., EAST, *latlon(-300., 1.), True, FLAT, snap)["event"], EVENT_JAM)
+
+  def test_relaxed_distance_for_the_approach(self):
+    core = RoadEvents(self.tmp.name)
+    on = []
+    for i, x in enumerate(-400. + 7.5 * i for i in range(90)):   # to x = 267.5, a jam from x = 200
+      snap = baidu.Snapshot(online=True, jams=[(200. - x, 300., 3)])
+      out = core.update(i * 0.5, 15., 0., 0., EAST, *latlon(x, 1.), True, FLAT, snap)
+      if out["jamFollow"]:
+        on.append(x)
+        self.assertAlmostEqual(out["jamFollowDistance"], 200. - x, delta=0.1)
+    self.assertAlmostEqual(on[0], -300., delta=8.)   # with the prompt, 500 m before it in town
+    self.assertAlmostEqual(on[-1], 200., delta=8.)   # until the car reaches it
+    self.assertEqual(len(on), 67)                    # without a gap
+
+  def test_relaxed_distance_held_without_a_position_not_with_baidu_off(self):
+    core = RoadEvents(self.tmp.name)
+    jam = baidu.Snapshot(online=True, jams=[(400., 300., 3)])
+    self.assertTrue(core.update(0., 15., 0., 0., EAST, *latlon(-300., 1.), True, FLAT, jam)["jamFollow"])
+    self.assertTrue(core.update(10., 15., 0., 0., EAST, *latlon(-150., 1.), False, FLAT, None)["jamFollow"])
+    self.assertFalse(core.update(10.5, 15., 0., 0., EAST, *latlon(-142., 1.), True, FLAT, baidu.Snapshot())["jamFollow"])
 
   def test_slow_traffic_counts_on_fast_roads(self):
     def slow(x):
