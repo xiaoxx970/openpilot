@@ -235,6 +235,11 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
       enabled @5 :Bool;
       active @6 :Bool;
       curveDirection @7 :Int8; # turn being slowed for: 0 = none, -1 = left, 1 = right, 2 = S-bend
+      # curve speed from the driver profile (CurveSpeedDriverProfile) only
+      mapValid @8 :Bool; # mapd's curvature ahead is in use: the car is on its road, heading along it, with a recent GPS fix
+      mapLimited @9 :Bool; # the map's curvature ahead, not the camera's, sets the braking now
+      mapAccelRequired @10 :Float32; # m/s^2 the map's curvature ahead alone asks for (10 = nothing to slow for)
+      visionAccelRequired @11 :Float32; # m/s^2 the camera's preview alone asks for (10 = nothing to slow for)
     }
 
     struct Map {

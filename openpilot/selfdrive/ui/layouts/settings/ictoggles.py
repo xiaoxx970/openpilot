@@ -35,6 +35,11 @@ DESCRIPTIONS = {
     "When the rain sensor or wiper stalk says it rains, switch to a rain following distance one step past relaxed " +
     "(1.75 s, more above 80 km/h) and back when it stops. The distance button also reaches it while it rains."
   ),
+  "CurveSpeedDriverProfile": tr_noop(
+    "Curve speed from your own driving instead of Smart Cruise Control (Vision)'s fixed limit: lateral accel by speed, " +
+    "braking planned ahead of the curve from the camera and the offline map's road, a steady target inside it and " +
+    "speeding up out of it at your pace. Needs Smart Cruise Control (Vision) on; off gives exactly the stock curve control."
+  ),
   "EnableSpeedLimitPredicative": tr_noop(
     "Enables setting predicative speed limit"
   ),
@@ -93,6 +98,12 @@ class ICTogglesLayout(Widget):
       "RainFollowDistance": (
         lambda: tr("VW: Rain Following Distance"),
         DESCRIPTIONS["RainFollowDistance"],
+        "chffr_wheel.png",
+        False,
+      ),
+      "CurveSpeedDriverProfile": (
+        lambda: tr("VW: Curve Speed from Driver Profile"),
+        DESCRIPTIONS["CurveSpeedDriverProfile"],
         "chffr_wheel.png",
         False,
       ),
