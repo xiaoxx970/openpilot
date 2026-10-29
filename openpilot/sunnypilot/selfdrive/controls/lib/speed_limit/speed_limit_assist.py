@@ -28,6 +28,9 @@ ACTIVE_STATES = (SpeedLimitAssistState.active, SpeedLimitAssistState.adapting)
 ENABLED_STATES = (SpeedLimitAssistState.preActive, SpeedLimitAssistState.pending, *ACTIVE_STATES)
 
 DISABLED_GUARD_PERIOD = 0.5  # secs.
+# m/s. After engaging, a speed limit is offered only from this speed (fork): in an underground car park the car's sign
+# recognition still reports the last sign from outside, offering that there only nags (one car park: up to 24 km/h).
+ENGAGE_OFFER_MIN_SPEED = 30. * CV.KPH_TO_MS
 # secs. Time to wait after activation before considering temp deactivation signal.
 PRE_ACTIVE_GUARD_PERIOD = {
   True: 15,
@@ -198,14 +201,9 @@ class SpeedLimitAssist:
 
   @property
   def apply_confirm_speed_threshold(self) -> bool:
-    # below CST: always require user confirmation
-    if self.v_cruise_cluster_below_confirm_speed_threshold:
-      return True
-
-    # at/above CST:
-    # - new speed limit >= CST: auto change
-    # - new speed limit < CST: user confirmation required
-    return bool(self.speed_limit_final_last_conv < CONFIRM_SPEED_THRESHOLD[self.is_metric])
+    # Every new limit waits for a +/- press, also at/above CST, so the set speed never changes on its own
+    # (upstream changes it without asking when both the set speed and the new limit are at/above CST)
+    return True
 
   def get_current_acceleration_as_target(self) -> float:
     return self.a_ego
@@ -296,7 +294,7 @@ class SpeedLimitAssist:
         if not self.long_enabled_prev or self.v_cruise_cluster_changed:
           self.long_engaged_timer = int(DISABLED_GUARD_PERIOD / DT_MDL)
 
-        elif self.long_engaged_timer <= 0:
+        elif self.long_engaged_timer <= 0 and self.v_ego >= ENGAGE_OFFER_MIN_SPEED:
           if self.target_set_speed_confirmed:
             self._update_confirmed_state()
           elif self._has_speed_limit:
@@ -352,7 +350,7 @@ class SpeedLimitAssist:
         if not self.long_enabled_prev or self.v_cruise_cluster_changed:
           self.long_engaged_timer = int(DISABLED_GUARD_PERIOD / DT_MDL)
 
-        elif self.long_engaged_timer <= 0:
+        elif self.long_engaged_timer <= 0 and self.v_ego >= ENGAGE_OFFER_MIN_SPEED:
           if self._update_non_pcm_long_confirmed_state():
             self.state = SpeedLimitAssistState.active
           elif self._has_speed_limit:
