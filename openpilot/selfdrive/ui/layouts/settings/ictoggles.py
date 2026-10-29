@@ -40,6 +40,10 @@ DESCRIPTIONS = {
     "braking planned ahead of the curve from the camera and the offline map's road, a steady target inside it and " +
     "speeding up out of it at your pace. Needs Smart Cruise Control (Vision) on; off gives exactly the stock curve control."
   ),
+  "VwRoadEventPrompts": tr_noop(
+    "Shows uphill / downhill ahead from the driving model, and roundabout / crossing ahead from the offline map " +
+    "(download it in the OSM settings) on the cluster while openpilot's ACC is on. Display only."
+  ),
   "EnableSpeedLimitPredicative": tr_noop(
     "Enables setting predicative speed limit"
   ),
@@ -104,6 +108,12 @@ class ICTogglesLayout(Widget):
       "CurveSpeedDriverProfile": (
         lambda: tr("VW: Curve Speed from Driver Profile"),
         DESCRIPTIONS["CurveSpeedDriverProfile"],
+        "chffr_wheel.png",
+        False,
+      ),
+      "VwRoadEventPrompts": (
+        lambda: tr("VW: Road Event Prompts"),
+        DESCRIPTIONS["VwRoadEventPrompts"],
         "chffr_wheel.png",
         False,
       ),
