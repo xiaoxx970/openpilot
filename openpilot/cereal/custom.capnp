@@ -482,7 +482,21 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   }
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+# road prompts for the VW cluster (ACC_Events) from roadeventd: the model's slope ahead and the offline OSM map. Display only.
+struct RoadEventsIC @0xcb9fd56c7057593a {
+  event @0 :UInt8;            # ACC_Events value to show: 0 none, 9 crossing, 10 roundabout, 14 downhill, 15 uphill
+  distance @1 :Float32;       # m from the car to the event, 0 = unknown
+  source @2 :Source;
+  grade @3 :Float32;          # current road grade, rise over run (liveLocationKalman pitch)
+  gradeAhead @4 :Float32;     # steepest predicted grade ahead (modelV2 path in world frame), rise over run
+  mapMatched @5 :Bool;        # the car is placed on an offline map road
+  roadClass @6 :UInt8;        # its OSM highway class, as in mapd's offline tiles (1 motorway ... 13 living street)
+
+  enum Source {
+    none @0;
+    model @1;
+    map @2;
+  }
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {
@@ -563,6 +577,8 @@ struct CarControlIC @0xa30662f84033036c {
   hudSpeedLimitAhead @14 :Bool;
   hudCurveSpeed @15 :Float32; # m/s, vision curve control target speed while slowing for a curve, 0 = none
   hudCurveDirection @16 :Int8; # direction of that curve: 0 = none, -1 = left, 1 = right, 2 = S-bend
+  hudRoadEvent @17 :UInt8; # road prompt (ACC_Events value) from roadeventd: 0 = none, 9 crossing, 10 roundabout, 14 downhill, 15 uphill
+  hudRoadEventDistance @18 :Float32; # m to that road event, 0 = unknown
 }
 
 struct CarParamsIC @0xc86a3d38d13eb3ef {

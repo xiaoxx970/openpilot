@@ -26,6 +26,7 @@ from openpilot.sunnypilot.mads.helpers import set_alternative_experience, set_ca
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
 
 REPLAY = "REPLAY" in os.environ
+ROAD_EVENTS_TIMEOUT = 1.5  # s without a roadEventsIC message before its prompt is dropped
 
 EventName = log.OnroadEvent.EventName
 
@@ -73,9 +74,11 @@ class Car:
 
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
-    ic_sm_services = ['carControlIC']
+    ic_sm_services = ['carControlIC', 'roadEventsIC']
     ic_pm_services = ['carParamsIC', 'carStateIC']
-    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'] + ['carControlSP', 'longitudinalPlanSP'] + ic_sm_services)
+    # roadeventd is opt-in and display only: never part of any check here
+    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'] + ['carControlSP', 'longitudinalPlanSP'] + ic_sm_services,
+                                  ignore_alive=['roadEventsIC'], ignore_avg_freq=['roadEventsIC'], ignore_valid=['roadEventsIC'])
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks'] + ['carParamsSP', 'carStateSP'] + ic_pm_services)
 
     self.can_rcv_cum_timeout_counter = 0
@@ -307,6 +310,12 @@ class Car:
     slowing_for_curve = vision.active and vision.state in (VisionState.entering, VisionState.turning)
     CC_IC_dc.hudCurveSpeed = float(vision.vTarget) if slowing_for_curve else 0.
     CC_IC_dc.hudCurveDirection = int(vision.curveDirection) if slowing_for_curve else 0
+
+    # road prompts from roadeventd (2 Hz); missing or stale means none
+    road_fresh = self.sm.seen['roadEventsIC'] and time.monotonic() - self.sm.recv_time['roadEventsIC'] < ROAD_EVENTS_TIMEOUT
+    road = self.sm['roadEventsIC']
+    CC_IC_dc.hudRoadEvent = int(road.event) if road_fresh else 0
+    CC_IC_dc.hudRoadEventDistance = float(road.distance) if road_fresh else 0.
 
   def controls_update(self, CS: car.CarState, CC: car.CarControl, CC_SP: custom.CarControlSP, CC_IC: custom.CarControlIC):
     """control update loop, driven by carControl"""
