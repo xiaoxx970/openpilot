@@ -17,6 +17,7 @@ class ICTogglesLayoutMici(NavScroller):
     enable_rain_follow          = BigParamControl("VW: Rain Following Distance", "RainFollowDistance")
     enable_curve_profile        = BigParamControl("VW: Curve Speed from Driver Profile", "CurveSpeedDriverProfile")
     enable_road_events          = BigParamControl("VW: Road Event Prompts", "VwRoadEventPrompts")
+    enable_baidu_online         = BigParamControl("VW: Baidu Traffic & Speed Limits", "VwBaiduOnline")
     enable_sl_pred_control      = BigParamControl("VW: Predicative Speed Limit (pACC)", "EnableSpeedLimitPredicative")
     enable_sl_pred_sl           = BigParamControl("VW: Predicative - Reaction to Speed Limits", "EnableSLPredReactToSL")
     enable_sl_pred_curve        = BigParamControl("VW: Predicative - Reaction to Curves", "EnableSLPredReactToCurves")
@@ -40,6 +41,7 @@ class ICTogglesLayoutMici(NavScroller):
       enable_rain_follow,
       enable_curve_profile,
       enable_road_events,
+      enable_baidu_online,
       enable_sl_pred_control,
       enable_sl_pred_sl,
       enable_sl_pred_curve,
@@ -61,6 +63,7 @@ class ICTogglesLayoutMici(NavScroller):
       ("RainFollowDistance", enable_rain_follow),
       ("CurveSpeedDriverProfile", enable_curve_profile),
       ("VwRoadEventPrompts", enable_road_events),
+      ("VwBaiduOnline", enable_baidu_online),
       ("EnableSpeedLimitPredicative", enable_sl_pred_control),
       ("EnableSLPredReactToSL", enable_sl_pred_sl),
       ("EnableSLPredReactToCurves", enable_sl_pred_curve),

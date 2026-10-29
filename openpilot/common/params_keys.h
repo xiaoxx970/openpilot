@@ -159,6 +159,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RainFollowDistance", {PERSISTENT, BOOL, "0"}},
     {"CurveSpeedDriverProfile", {PERSISTENT, BOOL, "0"}},
     {"VwRoadEventPrompts", {PERSISTENT, BOOL, "0"}},
+    {"VwBaiduOnline", {PERSISTENT, BOOL, "0"}},
     {"CoastBandCalibration", {PERSISTENT, JSON}},
     {"EnableSpeedLimitPredicative", {PERSISTENT, BOOL}},
 	{"EnableSLPredReactToSL", {PERSISTENT, BOOL}},

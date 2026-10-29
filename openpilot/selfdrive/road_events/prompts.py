@@ -1,7 +1,7 @@
 """When a road event becomes a cluster prompt. Pure python, so the offline replay runs the same code."""
 import math
 
-EVENT_NONE, EVENT_CROSSING, EVENT_ROUNDABOUT, EVENT_DOWNHILL, EVENT_UPHILL = 0, 9, 10, 14, 15
+EVENT_NONE, EVENT_CROSSING, EVENT_ROUNDABOUT, EVENT_JAM, EVENT_DOWNHILL, EVENT_UPHILL = 0, 9, 10, 12, 14, 15
 
 HOLD = 4.0           # s a prompt stays on the cluster
 
@@ -50,6 +50,56 @@ class SlopePrompt:
       else:
         self.flat_since = None
     return EVENT_NONE, 0.
+
+
+class JamPrompt:
+  """A traffic jam on the road ahead (Baidu's live traffic along the route it predicts, so in the car's direction).
+
+  Congested or worse (slow too on motorways and trunk roads) starting within NEAR m (NEAR_FAST m on fast roads) and at least
+  MIN_LENGTH long, adjoining stretches joined. No exception before traffic lights (the owner's call): a queue Baidu marks
+  congested is worth the prompt there too. Once per jam: again only after REARM s with none ahead.
+  """
+  NEAR = 500.          # m
+  NEAR_FAST = 1500.    # m
+  MIN_LENGTH = 100.    # m
+  REARM = 30.          # s
+
+  def __init__(self):
+    self.armed = True
+    self.until = -math.inf
+    self.distance = self.length = 0.
+    self.clear_since: float | None = None
+
+  @classmethod
+  def nearest(cls, jams: list, fast: bool) -> tuple[float, float] | None:
+    """(distance, length) of the first jam that counts; jams: (distance ahead, length, status) in route order."""
+    min_status, near = (2, cls.NEAR_FAST) if fast else (3, cls.NEAR)
+    runs: list[list[float]] = []
+    for d, length, status in jams:
+      if status < min_status:
+        continue
+      if runs and abs(runs[-1][0] + runs[-1][1] - d) < 1.:
+        runs[-1][1] += length
+      else:
+        runs.append([d, length])
+    return next(((d, length) for d, length in runs if 0. <= d <= near and length >= cls.MIN_LENGTH), None)
+
+  def update(self, t: float, jams: list, fast: bool) -> tuple[int, float, float]:
+    found = self.nearest(jams, fast)
+    if found is not None and self.armed:
+      self.armed = False
+      self.until = t + HOLD
+    if found is not None:
+      self.clear_since = None
+    elif self.clear_since is None:
+      self.clear_since = t
+    if t < self.until:
+      if found is not None:
+        self.distance, self.length = found
+      return EVENT_JAM, self.distance, self.length
+    if not self.armed and self.clear_since is not None and t - self.clear_since >= self.REARM - 1e-6:
+      self.armed = True
+    return EVENT_NONE, 0., 0.
 
 
 def ground_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
