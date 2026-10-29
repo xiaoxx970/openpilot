@@ -20,7 +20,8 @@ from openpilot.selfdrive.car.car_events import CarEvents
 from openpilot.selfdrive.car.distance_display import DistanceDisplay
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
-from openpilot.selfdrive.selfdrived.rain_follow import RainDetector, RainFollow
+from openpilot.selfdrive.selfdrived.follow_distance import FollowDistance
+from openpilot.selfdrive.selfdrived.rain_follow import RainDetector
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -40,6 +41,7 @@ SIMULATION = "SIMULATION" in os.environ
 TESTING_CLOSET = "TESTING_CLOSET" in os.environ
 
 LONGITUDINAL_PERSONALITY_MAP = {v: k for k, v in log.LongitudinalPersonality.schema.enumerants.items()}
+ROAD_EVENTS_TIMEOUT = 1.5  # s without a roadEventsIC message before its traffic jam following distance is dropped
 
 ThermalStatus = log.DeviceState.ThermalStatus
 State = log.SelfdriveState.OpenpilotState
@@ -107,7 +109,8 @@ class SelfdriveD:
     # TODO: de-couple selfdrived with card/conflate on carState without introducing controls mismatches
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
-    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan'] + ['modelDataV2SP', 'longitudinalPlanSP']
+    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan'] + ['modelDataV2SP', 'longitudinalPlanSP'] + \
+             ['roadEventsIC']
     if not Params().get_bool("EnableCurvatureD"):
       ignore += ['lateralCurvatureParameters']
     if SIMULATION:
@@ -119,7 +122,7 @@ class SelfdriveD:
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'deviceMotion', 'lateralDelay',
                                    'managerState', 'vehicleParameters', 'radarState', 'lateralTorqueParameters', 'lateralCurvatureParameters',
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark',
-                                   'lateralManeuverPlan', 'modelDataV2SP', 'longitudinalPlanSP', 'carStateIC'] + \
+                                   'lateralManeuverPlan', 'modelDataV2SP', 'longitudinalPlanSP', 'carStateIC', 'roadEventsIC'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
                                   ignore_valid=ignore, frequency=int(1/DT_CTRL))
@@ -164,7 +167,7 @@ class SelfdriveD:
     self.rain_follow_enabled = self.params.get_bool("RainFollowDistance")
     self.rain_detector = RainDetector()
     self.radar_acc_fault_prev = False
-    self.rain_follow = RainFollow()
+    self.follow = FollowDistance()
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -549,16 +552,18 @@ class SelfdriveD:
     # distance button like stock VW: the first press only shows the distance, presses while it is
     # shown step it up (wrapping to the shortest) and +/- step it up and down
     if self.CP.openpilotLongitudinalControl:
-      # rain selects its own following distance, one step past relaxed (see RainFollow)
+      # rain selects its own following distance, one step past relaxed, and a traffic jam ahead relaxed (see FollowDistance)
       cs_ic = self.sm['carStateIC']
       rain_level = self.rain_detector.update(cs_ic.rainAmount, cs_ic.rainWiperRequest, cs_ic.wiperSwitch)
-      personality, show_personality = self.rain_follow.update(rain_level > 0, self.rain_follow_enabled, self.personality)
+      road_fresh = self.sm.seen['roadEventsIC'] and (self.sm.frame - self.sm.recv_frame['roadEventsIC']) * DT_CTRL < ROAD_EVENTS_TIMEOUT
+      jam_ahead = road_fresh and self.sm['roadEventsIC'].jamFollow
+      personality, show_personality = self.follow.update(rain_level > 0, self.rain_follow_enabled, jam_ahead, self.personality)
       if personality != self.personality:
         self._set_personality(personality)
 
       self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
-      top = self.rain_follow.top(self.rain_follow_enabled)
-      position = new_position = self.rain_follow.position(self.personality)
+      top = self.follow.top(self.rain_follow_enabled)
+      position = new_position = self.follow.position(self.personality)
       show_personality = show_personality or self.distance_display.step != 0
       if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
         # the first press shows the current personality on screen too, like the cluster
@@ -567,7 +572,7 @@ class SelfdriveD:
           new_position = (new_position + 1) % (top + 1)
       new_position = min(max(new_position + self.distance_display.step, 0), top)
       if new_position != position:
-        personality = self.rain_follow.select(new_position, self.personality)
+        personality = self.follow.select(new_position, self.personality)
         if personality != self.personality:
           self._set_personality(personality)
         show_personality = True
@@ -635,7 +640,8 @@ class SelfdriveD:
     if self.enabled or (ET.NO_ENTRY not in (c := self.state_machine.current_alert_types) and (ET.ENABLE in c or ET.USER_DISABLE in c)):
       clear_event_types.add(ET.NO_ENTRY)
 
-    pers = 'rain' if self.rain_follow.active else LONGITUDINAL_PERSONALITY_MAP[self.personality]
+    mode = self.follow.mode(self.personality)
+    pers = 'rain' if mode == FollowDistance.RAIN else 'traffic jam' if mode == FollowDistance.JAM else LONGITUDINAL_PERSONALITY_MAP[self.personality]
     callback_args = [self.CP, CS, self.sm, self.is_metric,
                      self.state_machine.soft_disable_timer, pers]
 
@@ -654,7 +660,7 @@ class SelfdriveD:
     ss.active = self.active
     ss.state = self.state_machine.state
     ss.engageable = not self.events.contains(ET.NO_ENTRY)
-    ss.personality = self.personality
+    ss.personality = self.follow.personality(self.personality)
 
     ss.alertText1 = self.AM.current_alert.alert_text_1
     ss.alertText2 = self.AM.current_alert.alert_text_2
@@ -698,7 +704,8 @@ class SelfdriveD:
     ss_ic_msg.valid = True
     ss_ic = ss_ic_msg.selfdriveStateIC
     ss_ic.rainLevel = self.rain_detector.level
-    ss_ic.rainMode = self.rain_follow.active
+    ss_ic.rainMode = self.follow.rain.active
+    ss_ic.jamMode = self.follow.mode(self.personality) == FollowDistance.JAM
     self.pm.send('selfdriveStateIC', ss_ic_msg)
 
     # onroadEventsSP - logged every second or on change

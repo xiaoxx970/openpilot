@@ -71,9 +71,14 @@ class JamPrompt:
     self.clear_since: float | None = None
 
   @classmethod
-  def nearest(cls, jams: list, fast: bool) -> tuple[float, float] | None:
-    """(distance, length) of the first jam that counts; jams: (distance ahead, length, status) in route order."""
-    min_status, near = (2, cls.NEAR_FAST) if fast else (3, cls.NEAR)
+  def near(cls, fast: bool) -> float:
+    return cls.NEAR_FAST if fast else cls.NEAR
+
+  @classmethod
+  def runs(cls, jams: list, fast: bool) -> list[tuple[float, float]]:
+    """(distance, length) of the jams that count, in route order; jams: (distance ahead, length, status) in route order.
+    A negative distance: the car is in that jam."""
+    min_status = 2 if fast else 3
     runs: list[list[float]] = []
     for d, length, status in jams:
       if status < min_status:
@@ -82,7 +87,12 @@ class JamPrompt:
         runs[-1][1] += length
       else:
         runs.append([d, length])
-    return next(((d, length) for d, length in runs if 0. <= d <= near and length >= cls.MIN_LENGTH), None)
+    return [(d, length) for d, length in runs if length >= cls.MIN_LENGTH]
+
+  @classmethod
+  def nearest(cls, jams: list, fast: bool) -> tuple[float, float] | None:
+    """(distance, length) of the first jam that counts starting ahead within the prompt's distance."""
+    return next(((d, length) for d, length in cls.runs(jams, fast) if 0. <= d <= cls.near(fast)), None)
 
   def update(self, t: float, jams: list, fast: bool) -> tuple[int, float, float]:
     found = self.nearest(jams, fast)
@@ -100,6 +110,41 @@ class JamPrompt:
     if not self.armed and self.clear_since is not None and t - self.clear_since >= self.REARM - 1e-6:
       self.armed = True
     return EVENT_NONE, 0., 0.
+
+
+class JamAhead:
+  """Asks for the relaxed following distance while a traffic jam lies ahead; selfdrived applies it.
+
+  Comes on with the jams JamPrompt announces (the same ones, within its distance, from MIN_SPEED), but stays for the whole
+  approach, not just the prompt. Once on, a jam starting within KEEP times that distance keeps it, so a jam start that moves
+  a little between Baidu answers does not switch the distance back and forth. Off as soon as the car is in a jam (from
+  there the driver's own distance: queues are driven and stopped in as before), when Baidu reports none ahead and when its
+  answer is stale. Without Baidu data for the car's position (no GPS in a tunnel) it holds for up to NO_DATA_HOLD s.
+  """
+  KEEP = 1.5
+  NO_DATA_HOLD = 30.   # s
+
+  def __init__(self):
+    self.active = False
+    self.distance = 0.
+    self.data_t = -math.inf
+
+  def update(self, t: float, jams: list | None, fast: bool, moving: bool) -> tuple[bool, float]:
+    """jams: the Baidu snapshot's, [] with Baidu off or stale, None without a snapshot for the car's position.
+    Returns whether to ask for the relaxed distance and the distance to the start of that jam."""
+    if jams is None:
+      if t - self.data_t >= self.NO_DATA_HOLD:
+        self.active, self.distance = False, 0.
+      return self.active, self.distance
+    self.data_t = t
+    near = JamPrompt.near(fast) * (self.KEEP if self.active else 1.)
+    # in route order: a jam the car is in comes first, with a negative distance
+    first = next((d for d, _ in JamPrompt.runs(jams, fast) if d <= near), None)
+    if first is None or first < 0. or not (self.active or moving):
+      self.active, self.distance = False, 0.
+    else:
+      self.active, self.distance = True, first
+    return self.active, self.distance
 
 
 def ground_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

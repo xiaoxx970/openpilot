@@ -506,6 +506,9 @@ struct RoadEventsIC @0xcb9fd56c7057593a {
   speedLimitValid @10 :Bool;  # a fresh Baidu answer for that road: then it stands in for the offline map's limit
   speedLimitAhead @11 :Float32;          # m/s, limit of the next Baidu speed camera on the road ahead, 0 = none
   speedLimitAheadDistance @12 :Float32;  # m to it
+  jamFollow @13 :Bool;           # a traffic jam ahead asks for the relaxed following distance (Baidu, see prompts.JamAhead)
+  jamFollowDistance @14 :Float32;  # m to the start of that jam
+  promptAlways @15 :Bool;        # show the prompts in ACC standby and with the main switch off too (VwRoadEventPrompts 2)
 
   enum Source {
     none @0;
@@ -524,6 +527,7 @@ struct CustomReserved12 @0x9ccdc8676701b412 {
 struct SelfdriveStateIC @0xcd96dafb67a082d0 {
   rainLevel @0 :UInt8;   # 0 dry, 1 rain, 2 heavy rain, held a while after it stops
   rainMode @1 :Bool;     # the rain following distance is selected
+  jamMode @2 :Bool;      # the relaxed following distance is selected for a traffic jam ahead (selfdriveState.personality)
 }
 
 struct ControlsStateIC @0xb057204d7deadf3f {
@@ -595,6 +599,7 @@ struct CarControlIC @0xa30662f84033036c {
   hudCurveDirection @16 :Int8; # direction of that curve: 0 = none, -1 = left, 1 = right, 2 = S-bend
   hudRoadEvent @17 :UInt8; # road prompt (ACC_Events value) from roadeventd: 0 = none, 9 crossing, 10 roundabout, 14 downhill, 15 uphill
   hudRoadEventDistance @18 :Float32; # m to that road event, 0 = unknown
+  hudRoadEventAlways @19 :Bool; # show hudRoadEvent in ACC standby and with the main switch off too
 }
 
 struct CarParamsIC @0xc86a3d38d13eb3ef {

@@ -6,7 +6,8 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from openpilot.selfdrive.road_events.osm_map import OfflineMap
-from openpilot.selfdrive.road_events.prompts import EVENT_CROSSING, EVENT_JAM, EVENT_NONE, EVENT_ROUNDABOUT, JamPrompt, MapPrompt, SlopePrompt
+from openpilot.selfdrive.road_events.prompts import EVENT_CROSSING, EVENT_JAM, EVENT_NONE, EVENT_ROUNDABOUT, JamAhead, JamPrompt, MapPrompt, \
+  SlopePrompt
 from openpilot.selfdrive.road_events.slope import grades_ahead, slope_ahead
 
 MIN_SPEED = 5.          # m/s: below it the model path is short and the course unreliable
@@ -26,15 +27,18 @@ class RoadEvents:
     self.roundabout = MapPrompt(EVENT_ROUNDABOUT, *ROUNDABOUT_WINDOW)
     self.crossing = MapPrompt(EVENT_CROSSING, *CROSSING_WINDOW)
     self.jam = JamPrompt()
+    self.jam_ahead = JamAhead()
     self.prev_way: int | None = None
     self.road_key: tuple[str, int] | None = None   # (name, OSM class) of the road the car was last placed on
 
   def update(self, t: float, v: float, roll: float, pitch: float, course: float, lat: float, lon: float, position_ok: bool,
              path: ModelPath | None, baidu=None) -> dict:
     """path: the model's (x, y, z) in the calibrated frame, or None. course: rad from north, clockwise.
-    baidu: baidu.Snapshot of the road ahead, or None: its traffic jams ahead. Crossings stay the map's (the owner's call)."""
+    baidu: baidu.Snapshot of the road ahead (an empty one with Baidu off), or None without one for the car's position: its
+    traffic jams ahead, for the prompt and the relaxed following distance. Crossings stay the map's (the owner's call)."""
     out = {"event": EVENT_NONE, "distance": 0., "source": SOURCE_NONE, "grade": math.tan(pitch), "gradeAhead": 0.,
-           "mapMatched": False, "roadClass": 0, "jamLength": 0., "baiduOnline": bool(baidu is not None and baidu.online)}
+           "mapMatched": False, "roadClass": 0, "jamLength": 0., "baiduOnline": bool(baidu is not None and baidu.online),
+           "jamFollow": False, "jamFollowDistance": 0.}
 
     sign, dist = 0, 0.
     if path is not None and v >= MIN_SPEED:
@@ -61,9 +65,11 @@ class RoadEvents:
     out["roadKey"] = self.road_key
 
     fast = self.road_key is not None and self.road_key[1] in FAST_ROADS
+    jams = baidu.jams if baidu is not None and baidu.online else []
     jam_event, jam_distance, jam_length = EVENT_NONE, 0., 0.
     if v >= MIN_SPEED:   # crawling or stopped the car is in the queue already
-      jam_event, jam_distance, jam_length = self.jam.update(t, baidu.jams if out["baiduOnline"] else [], fast)
+      jam_event, jam_distance, jam_length = self.jam.update(t, jams, fast)
+    out["jamFollow"], out["jamFollowDistance"] = self.jam_ahead.update(t, jams if baidu is not None else None, fast, v >= MIN_SPEED)
 
     # one prompt at a time: a jam, the map's, then the model's
     for (event, d), source in (((jam_event, jam_distance), SOURCE_BAIDU), (self.roundabout.update(t, roundabout), SOURCE_MAP),

@@ -317,6 +317,7 @@ class Car:
     road = self.sm['roadEventsIC']
     CC_IC_dc.hudRoadEvent = int(road.event) if road_fresh else 0
     CC_IC_dc.hudRoadEventDistance = float(road.distance) if road_fresh else 0.
+    CC_IC_dc.hudRoadEventAlways = bool(road.promptAlways) if road_fresh else False
 
   def controls_update(self, CS: car.CarState, CC: car.CarControl, CC_SP: custom.CarControlSP, CC_IC: custom.CarControlIC):
     """control update loop, driven by carControl"""
