@@ -157,6 +157,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"EnableSpeedLimitControl", {PERSISTENT, BOOL}},
     {"VwVisionCarTypes", {PERSISTENT, BOOL, "0"}},
     {"RainFollowDistance", {PERSISTENT, BOOL, "0"}},
+    {"CurveSpeedDriverProfile", {PERSISTENT, BOOL, "0"}},
     {"CoastBandCalibration", {PERSISTENT, JSON}},
     {"EnableSpeedLimitPredicative", {PERSISTENT, BOOL}},
 	{"EnableSLPredReactToSL", {PERSISTENT, BOOL}},
@@ -314,6 +315,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 
     // Smart Cruise Control
     {"MapTargetVelocities", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
+    {"MapCurvatures", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
     {"SmartCruiseControlMap", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"SmartCruiseControlVision", {PERSISTENT | BACKUP, BOOL, "0"}},
 
