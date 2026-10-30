@@ -37,6 +37,10 @@ button.sec{font-size:15px;padding:13px 14px;border-radius:12px;border:0;backgrou
 h3{font-size:13px;color:var(--muted);font-weight:500;margin:14px 0 2px;letter-spacing:.5px}
 .msg{color:var(--warn);font-size:14px;margin:6px 0}
 .legend{font-size:12px;color:var(--muted)}
+.fab{position:fixed;right:12px;z-index:4;width:44px;height:44px;border-radius:22px;border:0;background:var(--card);color:var(--text);
+  font-size:20px;box-shadow:0 2px 10px #0008;display:flex;align-items:center;justify-content:center}
+body.nomap .fab{display:none}
+#toast{position:fixed;left:50%;transform:translateX(-50%);top:40%;z-index:6;background:#000c;color:#fff;font-size:14px;padding:8px 14px;border-radius:10px;display:none}
 .legend i{display:inline-block;width:14px;height:4px;border-radius:2px;margin:0 3px 2px 8px;vertical-align:middle}
 </style></head><body>
 <div id="mapwrap"><div id="map"></div></div>
@@ -44,6 +48,9 @@ h3{font-size:13px;color:var(--muted);font-weight:500;margin:14px 0 2px;letter-sp
   <form id="f"><input id="q" placeholder="搜地点，或粘贴百度地图分享" autocomplete="off" enterkeyhint="search"></form>
   <div id="chips"></div>
 </div>
+<button class="fab" id="fabme" onclick="toMe()" aria-label="我的位置">📍</button>
+<button class="fab" id="fabcar" onclick="toCar()" aria-label="车的位置">🚗</button>
+<div id="toast"></div>
 <div id="spacer"></div>
 <div id="sheet"><div id="body">读取中…</div></div>
 <script>
@@ -69,6 +76,8 @@ function wgsOf(p){   // BD-09 -> GCJ-02 -> WGS-84
   for(let i=0;i<4;i++){const d=gcjDelta(lat,lon);lat-=lat+d[0]-glat;lon-=lon+d[1]-glon}
   return [lat,lon]}
 const COLORS={1:'#2fb36b',2:'#f2c94c',3:'#eb5757',4:'#9b1c1c'};
+const ME_ICON='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18">'
+  +'<circle cx="9" cy="9" r="7" fill="#2d7ff9" stroke="#fff" stroke-width="2.5"/></svg>');   // the phone
 const CAR_ICON='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22">'
   +'<circle cx="11" cy="11" r="8" fill="#2d7ff9" stroke="#fff" stroke-width="3"/></svg>');
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -84,8 +93,20 @@ async function api(path,body,headers){   // the phone's position goes in headers
 // view: 'home' (the car and its destination), 'results' (a search), 'place' (one place, its preview, send it)
 let state=null,places={saved:{},recent:[]},route=null,view='home',results=[],picked=null,preview=null,msg='';
 let map=null,layer=[],marks=[],fitKey='',phone=null;   // phone: [lat, lon], the start when the car's position is not known
-function locate(){if(!navigator.geolocation)return;navigator.geolocation.watchPosition(p=>{phone=[p.coords.latitude,p.coords.longitude]},()=>{},
+function locate(){if(!navigator.geolocation)return;navigator.geolocation.watchPosition(p=>{const first=!phone;phone=[p.coords.latitude,p.coords.longitude];if(first)draw()},()=>{},
   {enableHighAccuracy:false,maximumAge:120000,timeout:20000})}
+function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>{e.style.display='none'},2000)}
+function focus(at){if(!map)return;map.centerAndZoom(bdPoint(at[0],at[1]),Math.max(map.getZoom(),16))}
+function carAt(){return (route&&route.car)||(state&&state.position)}
+function toMe(){
+  if(phone)return focus(phone);
+  if(!navigator.geolocation)return toast('浏览器不给定位');
+  toast('定位中…');
+  navigator.geolocation.getCurrentPosition(p=>{phone=[p.coords.latitude,p.coords.longitude];draw();focus(phone)},
+    ()=>toast('拿不到手机位置，看看是否允许了定位'),{enableHighAccuracy:true,maximumAge:30000,timeout:15000})}
+function toCar(){const c=carAt();if(c)focus(c);else toast(state&&state.car_online===false?'车不在线，不知道车在哪':'还不知道车的位置')}
+function placeFabs(){const b=$('sheet').offsetHeight+12;$('fabcar').style.bottom=b+'px';$('fabme').style.bottom=(b+52)+'px'}
+addEventListener('resize',placeFabs)
 
 function statusLine(){
   if(!state)return'';
@@ -131,6 +152,7 @@ function render(){
     if(places.recent.length)h+='<h3>最近去过</h3>'+list(places.recent,'pickRecent');
   }
   $('body').innerHTML=h;
+  placeFabs();
   draw();
 }
 function same(a,b){return a&&b&&Math.abs(a.latitude-b.latitude)<1e-4&&Math.abs(a.longitude-b.longitude)<1e-4}
@@ -149,7 +171,8 @@ function draw(){
   const r=view==='place'?preview:(view==='home'?route:null);
   if(r&&r.route)for(const seg of r.route.segments){const pts=seg.points.map(p=>bdPoint(p[0],p[1]));all.push(...pts);
     add(new BMapGL.Polyline(pts,{strokeColor:COLORS[seg.status]||COLORS[1],strokeWeight:7,strokeOpacity:0.95}))}
-  const car=(route&&route.car)||(state&&state.position);
+  const car=carAt();
+  if(phone)add(new BMapGL.Marker(bdPoint(phone[0],phone[1]),{icon:new BMapGL.Icon(ME_ICON,new BMapGL.Size(18,18))}));
   if(car){const c=bdPoint(car[0],car[1]);add(new BMapGL.Marker(c,{icon:new BMapGL.Icon(CAR_ICON,new BMapGL.Size(22,22))}));if(view!=='results')all.push(c)}
   const target=view==='place'?picked:(view==='home'&&state?state.destination:null);
   if(target){const p=bdPoint(target.latitude,target.longitude);add(new BMapGL.Marker(p));all.push(p)}
