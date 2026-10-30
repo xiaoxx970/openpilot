@@ -543,79 +543,110 @@ class TestBaiduOnline(unittest.TestCase):
     self.assertLess(self.clock.t - t_off, baidu.CRUISE_MIN_GAP)
 
   def test_jam_range_as_the_prompt(self):
-    self.assertEqual(baidu.JAM_RANGE, (JamPrompt.NEAR, JamPrompt.NEAR_FAST))
+    self.assertEqual(baidu.JAM_RANGE, (JamPrompt.FAR, JamPrompt.FAR_FAST))
 
 
 class TestJamPrompt(unittest.TestCase):
-  def test_in_town_congestion_within_500_m(self):
-    self.assertEqual(JamPrompt.nearest([(400., 150., 3)], fast=False), (400., 150.))
-    self.assertIsNone(JamPrompt.nearest([(400., 150., 2)], fast=False))   # slow traffic only counts on fast roads
-    self.assertIsNone(JamPrompt.nearest([(600., 150., 3)], fast=False))
-    self.assertIsNone(JamPrompt.nearest([(400., 80., 4)], fast=False))
-    self.assertIsNone(JamPrompt.nearest([(-50., 300., 4)], fast=False))   # already in it
+  def test_15_s_ahead_in_town_20_s_on_fast_roads(self):
+    # at the car's speed, 150 m at the least, 500 m (1.5 km on fast roads) at the most
+    for v, fast, window in ((5., False, JamPrompt.NEAR), (20., False, 15. * 20.), (40., False, JamPrompt.FAR),
+                            (5., True, JamPrompt.NEAR), (20., True, 20. * 20.), (30., True, 20. * 30.), (80., True, JamPrompt.FAR_FAST)):
+      self.assertEqual(JamPrompt.window(v, fast), window)
 
-  def test_fast_roads_slow_traffic_within_1500_m(self):
-    self.assertEqual(JamPrompt.nearest([(1400., 200., 2)], fast=True), (1400., 200.))
-    self.assertIsNone(JamPrompt.nearest([(1600., 200., 3)], fast=True))
+  def test_announced_once_its_start_is_within_the_window(self):
+    for v, fast in ((8., False), (20., False), (25., True), (35., True)):
+      p, first = JamPrompt(), None
+      for i in range(600):
+        d = 2000. - v * 0.5 * i
+        if p.update(i * 0.5, [(d, 300., 3)], fast, v)[0] == EVENT_JAM:
+          first = d
+          break
+      assert first is not None
+      self.assertLessEqual(first, JamPrompt.window(v, fast))
+      self.assertGreater(first, JamPrompt.window(v, fast) - v * 0.5)
+
+  def test_in_town_congestion_on_fast_roads_slow_traffic_too(self):
+    self.assertEqual(JamPrompt.nearest([(400., 150., 3)], False, JamPrompt.FAR), (400., 150.))
+    self.assertIsNone(JamPrompt.nearest([(400., 150., 2)], False, JamPrompt.FAR))   # slow traffic only counts on fast roads
+    self.assertIsNone(JamPrompt.nearest([(400., 80., 4)], False, JamPrompt.FAR))
+    self.assertIsNone(JamPrompt.nearest([(-50., 300., 4)], False, JamPrompt.FAR))   # already in it
+    self.assertEqual(JamPrompt.nearest([(1400., 200., 2)], True, JamPrompt.FAR_FAST), (1400., 200.))
+    self.assertEqual(JamPrompt().update(0., [(250., 150., 2)], False, 20.)[0], EVENT_NONE)
+    self.assertEqual(JamPrompt().update(0., [(250., 150., 2)], True, 20.)[0], EVENT_JAM)
 
   def test_adjoining_runs_join(self):
-    self.assertEqual(JamPrompt.nearest([(300., 60., 3), (360., 60., 4)], fast=False), (300., 120.))
-    self.assertIsNone(JamPrompt.nearest([(300., 60., 3), (380., 60., 4)], fast=False))
+    self.assertEqual(JamPrompt.nearest([(300., 60., 3), (360., 60., 4)], False, JamPrompt.FAR), (300., 120.))
+    self.assertIsNone(JamPrompt.nearest([(300., 60., 3), (380., 60., 4)], False, JamPrompt.FAR))
 
   def test_once_per_jam(self):
-    p, jam = JamPrompt(), [(400., 200., 3)]
-    out = [p.update(i * 0.5, jam, False)[0] for i in range(40)]
+    p, jam = JamPrompt(), [(250., 200., 3)]
+    out = [p.update(i * 0.5, jam, False, 20.)[0] for i in range(40)]
     n = int(HOLD / 0.5)
     self.assertEqual(out[:n], [EVENT_JAM] * n)
     self.assertEqual(set(out[n:]), {EVENT_NONE})
-    self.assertEqual(p.update(20.5 + JamPrompt.REARM - 1., [], False)[0], EVENT_NONE)
-    self.assertEqual(p.update(21. + JamPrompt.REARM - 1., jam, False)[0], EVENT_NONE)   # not clear for REARM s
+    self.assertEqual(p.update(20.5 + JamPrompt.REARM - 1., [], False, 20.)[0], EVENT_NONE)
+    self.assertEqual(p.update(21. + JamPrompt.REARM - 1., jam, False, 20.)[0], EVENT_NONE)   # not clear for REARM s
     for i in range(int(JamPrompt.REARM / 0.5) + 1):
-      p.update(50. + i * 0.5, [], False)
-    self.assertEqual(p.update(81., jam, False)[0], EVENT_JAM)
+      p.update(50. + i * 0.5, [], False, 20.)
+    self.assertEqual(p.update(81., jam, False, 20.)[0], EVENT_JAM)
 
+  def test_slowing_down_short_of_a_jam_announces_it_once(self):
+    # the window shrinks with the speed, but the jam stays ahead within FAR: in the window again it is not a new one
+    p = JamPrompt()
+    self.assertEqual(p.update(0., [(280., 200., 3)], False, 20.)[0], EVENT_JAM)
+    for i in range(int(2 * JamPrompt.REARM / 0.5)):
+      self.assertEqual(p.update(10. + i * 0.5, [(250., 200., 3)], False, 6.)[0], EVENT_NONE)   # outside the 150 m window
+    self.assertEqual(p.update(80., [(140., 200., 3)], False, 6.)[0], EVENT_NONE)
 
   def test_a_prompt_ends_once_the_jam_data_is_gone(self):
-    p, jam = JamPrompt(), [(400., 200., 3)]
-    self.assertEqual(p.update(0., jam, False)[0], EVENT_JAM)
-    self.assertEqual(p.update(0.5, [], False)[0], EVENT_JAM)              # in the hold without it, e.g. a GPS gap
-    self.assertEqual(p.update(1., [], False, gone=True)[0], EVENT_NONE)   # the car left the planned road
-    self.assertEqual(p.update(1.5, jam, False)[0], EVENT_NONE)            # once per jam
+    p, jam = JamPrompt(), [(250., 200., 3)]
+    self.assertEqual(p.update(0., jam, False, 20.)[0], EVENT_JAM)
+    self.assertEqual(p.update(0.5, [], False, 20.)[0], EVENT_JAM)              # in the hold without it, e.g. a GPS gap
+    self.assertEqual(p.update(1., [], False, 20., gone=True)[0], EVENT_NONE)   # the car left the planned road
+    self.assertEqual(p.update(1.5, jam, False, 20.)[0], EVENT_NONE)            # once per jam
 
 
 class TestJamAhead(unittest.TestCase):
   def test_on_for_the_jams_the_prompt_announces(self):
-    self.assertEqual(JamAhead().update(0., [(400., 150., 3)], False, True), (True, 400.))
-    self.assertEqual(JamAhead().update(0., [(1400., 200., 2)], True, True), (True, 1400.))
-    for jams, fast in (([(400., 150., 2)], False), ([(600., 150., 3)], False), ([(400., 80., 4)], False), ([(1600., 200., 3)], True)):
-      self.assertEqual(JamAhead().update(0., jams, fast, True), (False, 0.))
+    self.assertEqual(JamAhead().update(0., [(280., 150., 3)], False, 20., True), (True, 280.))   # 15 s, 300 m at 20 m/s
+    self.assertEqual(JamAhead().update(0., [(580., 200., 2)], True, 30., True), (True, 580.))    # 20 s, 600 m at 30 m/s
+    for jams, fast, v in (([(280., 150., 2)], False, 20.), ([(320., 150., 3)], False, 20.), ([(280., 80., 4)], False, 20.),
+                          ([(620., 200., 3)], True, 30.)):
+      self.assertEqual(JamAhead().update(0., jams, fast, v, True), (False, 0.))
 
   def test_comes_on_only_while_moving(self):
-    a, jam = JamAhead(), [(400., 150., 3)]
-    self.assertFalse(a.update(0., jam, False, False)[0])
-    self.assertTrue(a.update(0.5, jam, False, True)[0])
-    self.assertTrue(a.update(1., [(380., 150., 3)], False, False)[0])   # slowing down on the approach keeps it
+    a, jam = JamAhead(), [(280., 150., 3)]
+    self.assertFalse(a.update(0., jam, False, 20., False)[0])
+    self.assertTrue(a.update(0.5, jam, False, 20., True)[0])
+    self.assertTrue(a.update(1., [(260., 150., 3)], False, 2., False)[0])   # slowing down on the approach keeps it
 
   def test_a_jam_start_moving_back_a_little_keeps_it(self):
     a = JamAhead()
-    a.update(0., [(480., 150., 3)], False, True)
-    self.assertEqual(a.update(30., [(700., 150., 3)], False, True), (True, 700.))   # within KEEP times 500 m
-    self.assertEqual(a.update(60., [(800., 150., 3)], False, True), (False, 0.))
-    self.assertFalse(a.update(60.5, [(700., 150., 3)], False, True)[0])            # on again only within 500 m
+    a.update(0., [(290., 150., 3)], False, 20., True)
+    self.assertEqual(a.update(30., [(440., 150., 3)], False, 20., True), (True, 440.))   # within KEEP times its 300 m
+    self.assertEqual(a.update(60., [(460., 150., 3)], False, 20., True), (False, 0.))
+    self.assertFalse(a.update(60.5, [(440., 150., 3)], False, 20., True)[0])            # on again only within 300 m
+
+  def test_kept_with_the_largest_window_since_it_came_on(self):
+    a = JamAhead()
+    a.update(0., [(290., 150., 3)], False, 20., True)
+    self.assertEqual(a.update(10., [(400., 150., 3)], False, 6., True), (True, 400.))    # slower: still 450 m
+    self.assertEqual(a.update(20., [(600., 150., 3)], False, 30., True), (True, 600.))   # faster: 1.5 x 450 m
+    self.assertEqual(a.update(30., [(600., 150., 3)], False, 6., True), (True, 600.))
 
   def test_off_once_in_the_jam(self):
     a = JamAhead()
-    a.update(0., [(100., 300., 3)], False, True)
-    self.assertEqual(a.update(10., [(-5., 300., 3), (450., 200., 3)], False, True), (False, 0.))   # a next one too
-    self.assertEqual(a.update(40., [(150., 200., 3)], False, True), (True, 150.))   # out of it, the next one ahead
+    a.update(0., [(100., 300., 3)], False, 20., True)
+    self.assertEqual(a.update(10., [(-5., 300., 3), (250., 200., 3)], False, 20., True), (False, 0.))   # a next one too
+    self.assertEqual(a.update(40., [(150., 200., 3)], False, 20., True), (True, 150.))   # out of it, the next one ahead
 
   def test_off_without_jams_held_without_data(self):
-    a, jam = JamAhead(), [(400., 150., 3)]
-    a.update(0., jam, False, True)
-    self.assertEqual(a.update(JamAhead.NO_DATA_HOLD - 1., None, False, True), (True, 400.))   # no GPS in a tunnel
-    self.assertEqual(a.update(JamAhead.NO_DATA_HOLD + 0.5, None, False, True), (False, 0.))
-    a.update(40., jam, False, True)
-    self.assertEqual(a.update(40.5, [], False, True), (False, 0.))   # Baidu off, stale or the jam gone
+    a, jam = JamAhead(), [(280., 150., 3)]
+    a.update(0., jam, False, 20., True)
+    self.assertEqual(a.update(JamAhead.NO_DATA_HOLD - 1., None, False, 20., True), (True, 280.))   # no GPS in a tunnel
+    self.assertEqual(a.update(JamAhead.NO_DATA_HOLD + 0.5, None, False, 20., True), (False, 0.))
+    a.update(40., jam, False, 20., True)
+    self.assertEqual(a.update(40.5, [], False, 20., True), (False, 0.))   # Baidu off, stale or the jam gone
 
 
 class TestCameraPrompt(unittest.TestCase):
@@ -706,7 +737,7 @@ class TestBaiduPrompts(unittest.TestCase):
     core = RoadEvents(self.tmp.name)
 
     def jam(x):
-      return baidu.Snapshot(online=True, jams_online=True, lamps=[(150. - x, *latlon(150., 0.))], jams=[(200. - x, 200., 3)])
+      return baidu.Snapshot(online=True, jams_online=True, lamps=[(150. - x, *latlon(150., 0.))], jams=[(110. - x, 200., 3)])
     out = None
     for i, x in enumerate(self.xs[:50]):
       out = core.update(i * 0.5, 15., 0., 0., EAST, *latlon(x, 1.), True, FLAT, jam(x))
@@ -714,7 +745,7 @@ class TestBaiduPrompts(unittest.TestCase):
         break
     assert out is not None
     self.assertEqual((out["event"], out["source"], out["jamLength"]), (EVENT_JAM, SOURCE_BAIDU, 200.))
-    self.assertAlmostEqual(x, -300., delta=8.)   # 500 m before it in town
+    self.assertAlmostEqual(x, 110. - 15. * 15., delta=8.)   # 15 s before it at 15 m/s in town, before the map's Cross Rd
 
   def test_a_speed_camera_comes_first(self):
     core = RoadEvents(self.tmp.name)
@@ -736,7 +767,7 @@ class TestBaiduPrompts(unittest.TestCase):
 
   def test_no_jam_prompt_in_the_queue(self):
     core = RoadEvents(self.tmp.name)
-    snap = baidu.Snapshot(online=True, jams_online=True, jams=[(300., 200., 3)])
+    snap = baidu.Snapshot(online=True, jams_online=True, jams=[(200., 200., 3)])
     out = [core.update(i * 0.5, 2., 0., 0., EAST, *latlon(-300., 1.), True, FLAT, snap)["event"] for i in range(10)]
     self.assertEqual(set(out), {EVENT_NONE})
     self.assertEqual(core.update(5., 15., 0., 0., EAST, *latlon(-300., 1.), True, FLAT, snap)["event"], EVENT_JAM)
@@ -750,20 +781,20 @@ class TestBaiduPrompts(unittest.TestCase):
       if out["jamFollow"]:
         on.append(x)
         self.assertAlmostEqual(out["jamFollowDistance"], 200. - x, delta=0.1)
-    self.assertAlmostEqual(on[0], -300., delta=8.)   # with the prompt, 500 m before it in town
-    self.assertAlmostEqual(on[-1], 200., delta=8.)   # until the car reaches it
-    self.assertEqual(len(on), 67)                    # without a gap
+    self.assertAlmostEqual(on[0], 200. - 15. * 15., delta=8.)   # with the prompt, 15 s before it at 15 m/s in town
+    self.assertAlmostEqual(on[-1], 200., delta=8.)              # until the car reaches it
+    self.assertEqual(len(on), 1 + round((on[-1] - on[0]) / 7.5))   # without a gap
 
   def test_relaxed_distance_held_without_a_position_not_with_baidu_off(self):
     core = RoadEvents(self.tmp.name)
-    jam = baidu.Snapshot(online=True, jams_online=True, jams=[(400., 300., 3)])
+    jam = baidu.Snapshot(online=True, jams_online=True, jams=[(200., 300., 3)])
     self.assertTrue(core.update(0., 15., 0., 0., EAST, *latlon(-300., 1.), True, FLAT, jam)["jamFollow"])
     self.assertTrue(core.update(10., 15., 0., 0., EAST, *latlon(-150., 1.), False, FLAT, None)["jamFollow"])
     self.assertFalse(core.update(10.5, 15., 0., 0., EAST, *latlon(-142., 1.), True, FLAT, baidu.Snapshot())["jamFollow"])
 
   def test_slow_traffic_counts_on_fast_roads(self):
     def slow(x):
-      return baidu.Snapshot(online=True, jams_online=True, jams=[(1000., 300., 2)])
+      return baidu.Snapshot(online=True, jams_online=True, jams=[(250., 300., 2)])
 
     starts = drive(RoadEvents(self.tmp.name), self.xs[:10], slow)
     self.assertEqual(starts, [])

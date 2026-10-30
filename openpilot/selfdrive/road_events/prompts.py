@@ -56,14 +56,19 @@ class SlopePrompt:
 class JamPrompt:
   """A traffic jam on the road ahead (Baidu's live traffic along the route it predicts, so in the car's direction).
 
-  Congested or worse (slow too on motorways and trunk roads) starting within NEAR m (NEAR_FAST m on fast roads) and at least
-  MIN_LENGTH long, adjoining stretches joined. No exception before traffic lights (the owner's call): a queue Baidu marks
-  congested is worth the prompt there too. Once per jam: again only after REARM s with none ahead.
+  Congested or worse (slow too on motorways and trunk roads) and at least MIN_LENGTH long, adjoining stretches joined,
+  announced LOOK_AHEAD s before its start at the car's speed (LOOK_AHEAD_FAST on fast roads), NEAR m at the least and FAR
+  (FAR_FAST) at the most: a fixed 1.5 km on fast roads came 75 s to 4 min before the jam on a 10-30 drive. No exception
+  before traffic lights (the owner's call): a queue Baidu marks congested is worth the prompt there too. Once per jam: again
+  only after REARM s with none within FAR (FAR_FAST), so slowing down short of a jam does not announce it twice.
   """
-  NEAR = 500.          # m
-  NEAR_FAST = 1500.    # m
-  MIN_LENGTH = 100.    # m
-  REARM = 30.          # s
+  LOOK_AHEAD = 15.       # s
+  LOOK_AHEAD_FAST = 20.  # s
+  NEAR = 150.            # m
+  FAR = 500.             # m
+  FAR_FAST = 1500.       # m
+  MIN_LENGTH = 100.      # m
+  REARM = 30.            # s
 
   def __init__(self):
     self.armed = True
@@ -72,8 +77,13 @@ class JamPrompt:
     self.clear_since: float | None = None
 
   @classmethod
-  def near(cls, fast: bool) -> float:
-    return cls.NEAR_FAST if fast else cls.NEAR
+  def far(cls, fast: bool) -> float:
+    return cls.FAR_FAST if fast else cls.FAR
+
+  @classmethod
+  def window(cls, v: float, fast: bool) -> float:
+    """m ahead a jam start is announced at speed v."""
+    return min(cls.far(fast), max(cls.NEAR, (cls.LOOK_AHEAD_FAST if fast else cls.LOOK_AHEAD) * v))
 
   @classmethod
   def runs(cls, jams: list, fast: bool) -> list[tuple[float, float]]:
@@ -91,25 +101,25 @@ class JamPrompt:
     return [(d, length) for d, length in runs if length >= cls.MIN_LENGTH]
 
   @classmethod
-  def nearest(cls, jams: list, fast: bool) -> tuple[float, float] | None:
-    """(distance, length) of the first jam that counts starting ahead within the prompt's distance."""
-    return next(((d, length) for d, length in cls.runs(jams, fast) if 0. <= d <= cls.near(fast)), None)
+  def nearest(cls, jams: list, fast: bool, within: float) -> tuple[float, float] | None:
+    """(distance, length) of the first jam that counts starting ahead within that many m."""
+    return next(((d, length) for d, length in cls.runs(jams, fast) if 0. <= d <= within), None)
 
-  def update(self, t: float, jams: list, fast: bool, gone: bool = False) -> tuple[int, float, float]:
+  def update(self, t: float, jams: list, fast: bool, v: float, gone: bool = False) -> tuple[int, float, float]:
     """gone: the jam data is gone (the car left the planned road, or it went stale): a prompt being shown ends."""
     if gone:
       self.until = min(self.until, t)
-    found = self.nearest(jams, fast)
-    if found is not None and self.armed:
+    ahead = self.nearest(jams, fast, self.far(fast))
+    if ahead is not None and ahead[0] <= self.window(v, fast) and self.armed:
       self.armed = False
       self.until = t + HOLD
-    if found is not None:
+    if ahead is not None:
       self.clear_since = None
     elif self.clear_since is None:
       self.clear_since = t
     if t < self.until:
-      if found is not None:
-        self.distance, self.length = found
+      if ahead is not None:
+        self.distance, self.length = ahead
       return EVENT_JAM, self.distance, self.length
     if not self.armed and self.clear_since is not None and t - self.clear_since >= self.REARM - 1e-6:
       self.armed = True
@@ -119,11 +129,12 @@ class JamPrompt:
 class JamAhead:
   """Asks for the relaxed following distance while a traffic jam lies ahead; selfdrived applies it.
 
-  Comes on with the jams JamPrompt announces (the same ones, within its distance, from MIN_SPEED), but stays for the whole
-  approach, not just the prompt. Once on, a jam starting within KEEP times that distance keeps it, so a jam start that moves
-  a little between Baidu answers does not switch the distance back and forth. Off as soon as the car is in a jam (from
-  there the driver's own distance: queues are driven and stopped in as before), when Baidu reports none ahead and when its
-  answer is stale. Without Baidu data for the car's position (no GPS in a tunnel) it holds for up to NO_DATA_HOLD s.
+  Comes on with the jams JamPrompt announces (the same ones, within its window at the car's speed, from MIN_SPEED), but
+  stays for the whole approach, not just the prompt. Once on, a jam starting within KEEP times the largest window since then
+  keeps it, so a jam start that moves a little between Baidu answers, or the car slowing down, does not switch the distance
+  back and forth. Off as soon as the car is in a jam (from there the driver's own distance: queues are driven and stopped
+  in as before), when Baidu reports none ahead and when its answer is stale. Without Baidu data for the car's position (no
+  GPS in a tunnel) it holds for up to NO_DATA_HOLD s.
   """
   KEEP = 1.5
   NO_DATA_HOLD = 30.   # s
@@ -131,9 +142,10 @@ class JamAhead:
   def __init__(self):
     self.active = False
     self.distance = 0.
+    self.keep = 0.       # m: a jam starting this far ahead keeps it on
     self.data_t = -math.inf
 
-  def update(self, t: float, jams: list | None, fast: bool, moving: bool) -> tuple[bool, float]:
+  def update(self, t: float, jams: list | None, fast: bool, v: float, moving: bool) -> tuple[bool, float]:
     """jams: the Baidu snapshot's, [] with Baidu off or stale, None without a snapshot for the car's position.
     Returns whether to ask for the relaxed distance and the distance to the start of that jam."""
     if jams is None:
@@ -141,12 +153,14 @@ class JamAhead:
         self.active, self.distance = False, 0.
       return self.active, self.distance
     self.data_t = t
-    near = JamPrompt.near(fast) * (self.KEEP if self.active else 1.)
+    window = JamPrompt.window(v, fast)
+    near = max(self.keep, self.KEEP * window) if self.active else window
     # in route order: a jam the car is in comes first, with a negative distance
     first = next((d for d, _ in JamPrompt.runs(jams, fast) if d <= near), None)
     if first is None or first < 0. or not (self.active or moving):
       self.active, self.distance = False, 0.
     else:
+      self.keep = max(self.keep, self.KEEP * window) if self.active else self.KEEP * window
       self.active, self.distance = True, first
     return self.active, self.distance
 
