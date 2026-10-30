@@ -158,6 +158,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VwVisionCarTypes", {PERSISTENT, BOOL, "0"}},
     {"RainFollowDistance", {PERSISTENT, BOOL, "0"}},
     {"CurveSpeedDriverProfile", {PERSISTENT, BOOL, "0"}},
+    {"VwRoadEventPrompts", {PERSISTENT, INT, "0"}},  // 0 off, 1 while openpilot's ACC is on, 2 always
+    {"VwBaiduOnline", {PERSISTENT, BOOL, "0"}},
     {"CoastBandCalibration", {PERSISTENT, JSON}},
     {"EnableSpeedLimitPredicative", {PERSISTENT, BOOL}},
 	{"EnableSLPredReactToSL", {PERSISTENT, BOOL}},

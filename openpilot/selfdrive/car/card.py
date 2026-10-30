@@ -26,6 +26,7 @@ from openpilot.sunnypilot.mads.helpers import set_alternative_experience, set_ca
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
 
 REPLAY = "REPLAY" in os.environ
+ROAD_EVENTS_TIMEOUT = 1.5  # s without a roadEventsIC message before its prompt is dropped
 
 EventName = log.OnroadEvent.EventName
 
@@ -73,9 +74,11 @@ class Car:
 
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
-    ic_sm_services = ['carControlIC']
+    ic_sm_services = ['carControlIC', 'roadEventsIC']
     ic_pm_services = ['carParamsIC', 'carStateIC']
-    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'] + ['carControlSP', 'longitudinalPlanSP'] + ic_sm_services)
+    # roadeventd is opt-in and display only: never part of any check here
+    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'] + ['carControlSP', 'longitudinalPlanSP'] + ic_sm_services,
+                                  ignore_alive=['roadEventsIC'], ignore_avg_freq=['roadEventsIC'], ignore_valid=['roadEventsIC'])
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks'] + ['carParamsSP', 'carStateSP'] + ic_pm_services)
 
     self.can_rcv_cum_timeout_counter = 0
@@ -299,14 +302,29 @@ class Car:
     lp_sp = self.sm['longitudinalPlanSP']
     resolver = lp_sp.speedLimit.resolver
     CC_IC_dc.hudSpeedLimit = float(resolver.speedLimit) if resolver.speedLimitValid else 0.
-    CC_IC_dc.hudSpeedLimitFromMap = resolver.source == custom.LongitudinalPlanSP.SpeedLimit.Source.map
+    CC_IC_dc.hudSpeedLimitFromMap = resolver.source in (custom.LongitudinalPlanSP.SpeedLimit.Source.map,
+                                                        custom.LongitudinalPlanSP.SpeedLimit.Source.baidu)
     CC_IC_dc.hudSpeedLimitAhead = resolver.distToSpeedLimit > 0.
+    # Speed Limit Assist asking to set a limit: the cluster shows it for as long as assist asks. The limit's own prompt
+    # lasts 4 s after it changes and is long gone when assist asks after engaging or a set speed change.
+    offering = lp_sp.speedLimit.assist.state == custom.LongitudinalPlanSP.SpeedLimit.AssistState.preActive
+    CC_IC_dc.hudSpeedLimitOffer = float(resolver.speedLimitLast) if offering and resolver.speedLimitLastValid else 0.
+    CC_IC_dc.hudSpeedLimitOfferAhead = offering and resolver.distToSpeedLimit > 0.
+    CC_IC_dc.hudCarSpeedLimit = float(resolver.carSpeedLimit)   # the car's sign reading, a ramp's sign read from the motorway held back
 
     vision = lp_sp.smartCruiseControl.vision
     VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.VisionState
     slowing_for_curve = vision.active and vision.state in (VisionState.entering, VisionState.turning)
     CC_IC_dc.hudCurveSpeed = float(vision.vTarget) if slowing_for_curve else 0.
     CC_IC_dc.hudCurveDirection = int(vision.curveDirection) if slowing_for_curve else 0
+
+    # road prompts from roadeventd (2 Hz); missing or stale means none
+    road_fresh = self.sm.seen['roadEventsIC'] and time.monotonic() - self.sm.recv_time['roadEventsIC'] < ROAD_EVENTS_TIMEOUT
+    road = self.sm['roadEventsIC']
+    CC_IC_dc.hudRoadEvent = int(road.event) if road_fresh else 0
+    CC_IC_dc.hudRoadEventDistance = float(road.distance) if road_fresh else 0.
+    CC_IC_dc.hudRoadEventAlways = bool(road.promptAlways) if road_fresh else False
+    CC_IC_dc.hudRoadEventSpeedLimit = float(road.eventSpeedLimit) if road_fresh else 0.
 
   def controls_update(self, CS: car.CarState, CC: car.CarControl, CC_SP: custom.CarControlSP, CC_IC: custom.CarControlIC):
     """control update loop, driven by carControl"""

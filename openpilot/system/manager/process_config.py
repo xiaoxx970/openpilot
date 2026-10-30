@@ -67,11 +67,21 @@ def vision_car_types_enabled(started: bool, params: Params, CP: car.CarParams) -
   return started and CP.brand == "volkswagen" and params.get_bool("VwVisionCarTypes") and \
     os.path.exists("/data/yolo_lead/yolo26n.onnx")
 
+def road_events_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # opt-in: the VW cluster's road prompts are part of openpilot's own ACC HUD, with Baidu (it needs its key file too) also
+  # the traffic jam following distance
+  return started and CP.brand == "volkswagen" and CP.openpilotLongitudinalControl and \
+    (bool(params.get("VwRoadEventPrompts", return_default=True)) or (params.get_bool("VwBaiduOnline") and os.path.exists("/data/baidu_ak")))
+
 def curvatured_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   return only_onroad(started, params, CP) and params.get_bool("EnableCurvatureD")
 
 def navigation(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and params.get_bool("NavigationEnabled")
+
+def navigation_destination(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # the phone page to set the destination: offroad too, the destination can be set before the car starts
+  return params.get_bool("NavigationEnabled")
 
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
@@ -135,6 +145,7 @@ procs = [
   PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", and_(only_onroad, is_stock_model)),
   PythonProcess("navd", "openpilot.selfdrive.navigation.navd", navigation),
   PythonProcess("mapsd", "openpilot.selfdrive.navigation.mapsd", navigation),
+  PythonProcess("destinationd", "openpilot.selfdrive.navigation.destinationd", navigation_destination, enabled=not PC),
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
@@ -162,6 +173,7 @@ procs = [
   PythonProcess("lateral_maneuversd", "openpilot.tools.lateral_maneuvers.lateral_maneuversd", lat_maneuver),
   PythonProcess("radard", "openpilot.selfdrive.controls.radard", only_onroad),
   PythonProcess("yolo_leadd", "openpilot.selfdrive.yolo_lead.yolo_leadd", vision_car_types_enabled, enabled=not PC),
+  PythonProcess("roadeventd", "openpilot.selfdrive.road_events.roadeventd", road_events_enabled, enabled=not PC),
   PythonProcess("hardwared", "openpilot.system.hardware.hardwared", always_run),
   PythonProcess("modem", "openpilot.common.hardware.comma.modem", always_run, enabled=COMMA_HARDWARE),
   PythonProcess("tombstoned", "openpilot.system.tombstoned", always_run, enabled=not PC),

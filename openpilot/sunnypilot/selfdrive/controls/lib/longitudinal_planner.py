@@ -50,7 +50,8 @@ class LongitudinalPlannerSP:
     # Speed Limit Assist
     has_speed_limit = self.resolver.speed_limit_valid or self.resolver.speed_limit_last_valid
     self.sla.update(long_enabled, long_override, v_ego, a_ego, v_cruise_cluster, self.resolver.speed_limit,
-                    self.resolver.speed_limit_final_last, has_speed_limit, self.resolver.distance, self.events_sp)
+                    self.resolver.speed_limit_final_last, has_speed_limit, self.resolver.distance, self.events_sp,
+                    camera=self.resolver.camera)
 
     targets = {
       LongitudinalPlanSource.cruise: (v_cruise, a_ego),
@@ -111,6 +112,7 @@ class LongitudinalPlannerSP:
     resolver.speedLimitFinalLast = float(self.resolver.speed_limit_final_last)
     resolver.speedLimitValid = self.resolver.speed_limit_valid
     resolver.speedLimitLastValid = self.resolver.speed_limit_last_valid
+    resolver.carSpeedLimit = float(self.resolver.ramp_filter.accepted)
     resolver.speedLimitOffset = float(self.resolver.speed_limit_offset)
     resolver.distToSpeedLimit = float(self.resolver.distance)
     resolver.source = self.resolver.source

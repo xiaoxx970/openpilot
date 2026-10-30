@@ -1,6 +1,6 @@
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.system.ui.widgets import Widget
-from openpilot.system.ui.widgets.list_view import toggle_item
+from openpilot.system.ui.widgets.list_view import multiple_button_item, toggle_item
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
@@ -8,6 +8,9 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 
 if gui_app.sunnypilot_ui():
   from openpilot.system.ui.sunnypilot.widgets.list_view import toggle_item_sp as toggle_item
+  from openpilot.system.ui.sunnypilot.widgets.list_view import multiple_button_item_sp as multiple_button_item
+
+ROAD_EVENT_PROMPTS = 3  # VwRoadEventPrompts: off, when engaged, always
 
 # Description constants
 DESCRIPTIONS = {
@@ -39,6 +42,18 @@ DESCRIPTIONS = {
     "Curve speed from your own driving instead of Smart Cruise Control (Vision)'s fixed limit: lateral accel by speed, " +
     "braking planned ahead of the curve from the camera and the offline map's road, a steady target inside it and " +
     "speeding up out of it at your pace. Needs Smart Cruise Control (Vision) on; off gives exactly the stock curve control."
+  ),
+  "VwRoadEventPrompts": tr_noop(
+    "Shows uphill / downhill ahead from the driving model, roundabout / crossing ahead from the offline map " +
+    "(download it in the OSM settings) and with Baidu Traffic a traffic jam ahead on the cluster: when engaged while " +
+    "openpilot's ACC is on, always also in ACC standby and with the main switch off. Display only, except that with Baidu " +
+    "Traffic a traffic jam ahead selects the relaxed following distance until the car reaches it, like rain's."
+  ),
+  "VwBaiduOnline": tr_noop(
+    "Baidu Maps' live data for the road ahead: speed cameras' limits in place of the offline map's near a camera (Speed " +
+    "Limit Assist still asks before each change), and with Road Event Prompts a traffic jam ahead, shown and approached at " +
+    "the relaxed following distance. Sends the car's recent positions to Baidu about once a minute over mobile data. Needs " +
+    "your Baidu Maps key in /data/baidu_ak."
   ),
   "EnableSpeedLimitPredicative": tr_noop(
     "Enables setting predicative speed limit"
@@ -107,6 +122,12 @@ class ICTogglesLayout(Widget):
         "chffr_wheel.png",
         False,
       ),
+      "VwBaiduOnline": (
+        lambda: tr("VW: Baidu Traffic & Speed Limits"),
+        DESCRIPTIONS["VwBaiduOnline"],
+        "chffr_wheel.png",
+        False,
+      ),
       "EnableSpeedLimitPredicative": (
         lambda: tr("VW: Predicative Speed Limit (pACC)"),
         DESCRIPTIONS["EnableSpeedLimitPredicative"],
@@ -163,10 +184,23 @@ class ICTogglesLayout(Widget):
       ),
     }
 
+    self._road_event_prompts = multiple_button_item(
+      lambda: tr("VW: Road Event Prompts"),
+      lambda: tr(DESCRIPTIONS["VwRoadEventPrompts"]),
+      buttons=[lambda: tr("Off"), lambda: tr("When Engaged"), lambda: tr("Always")],
+      button_width=300,
+      callback=lambda index: self._params.put("VwRoadEventPrompts", index),
+      selected_index=self._road_event_prompts_index(),
+      icon="chffr_wheel.png",
+    )
+
     self._toggles = {}
     self._locked_toggles = set()
     self._offroad_only_toggles = {"EnableCurvatureD"}
     for param, (title, desc, icon, needs_restart) in self._toggle_defs.items():
+      # the road prompts' three states before Baidu, which they share the jam with
+      if param == "VwBaiduOnline":
+        self._toggles["VwRoadEventPrompts"] = self._road_event_prompts
       toggle = toggle_item(
         title,
         desc,
@@ -214,6 +248,7 @@ class ICTogglesLayout(Widget):
     # refresh toggles from params to mirror external changes
     for param in self._toggle_defs:
       self._toggles[param].action_item.set_state(ui_state.params.get_bool(param))
+    self._road_event_prompts.action_item.set_selected_button(self._road_event_prompts_index())
 
     # these toggles need restart, block while engaged
     for toggle_def in self._toggle_defs:
@@ -226,6 +261,9 @@ class ICTogglesLayout(Widget):
 
     if "EnableCurvatureD" not in self._locked_toggles:
       self._toggles["EnableCurvatureD"].action_item.set_enabled(ui_state.is_offroad())
+
+  def _road_event_prompts_index(self) -> int:
+    return min(max(int(self._params.get("VwRoadEventPrompts", return_default=True) or 0), 0), ROAD_EVENT_PROMPTS - 1)
 
   def _render(self, rect):
     self._scroller.render(rect)

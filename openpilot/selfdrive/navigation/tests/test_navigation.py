@@ -11,18 +11,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import urllib.parse
+
 import numpy as np
 import requests
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.selfdrive.navigation.mapsd import MapsD
-from openpilot.selfdrive.navigation.navd import REROUTE_COUNTER_MIN, ROUTE_RESEND_PERIOD, RouteEngine, set_banner
+from openpilot.selfdrive.navigation.navd import BAIDU_REFRESH, BAIDU_RETRY, REROUTE_COUNTER_MIN, ROUTE_RESEND_PERIOD, RouteEngine, set_banner
 from openpilot.selfdrive.navigation.pmtiles import PMTiles, decode_directory, tile_id
 from openpilot.selfdrive.navigation.renderer import MAJOR, MEDIUM, MINOR, SIZE, STREET, TRACK, MapRenderer, draw_segments, mercator, project, stroke_widths
 from openpilot.selfdrive.navigation.route import RouteTracker
-from openpilot.selfdrive.navigation.tiles import RemoteTiles
+from openpilot.selfdrive.navigation.tiles import LocalTiles, NoTiles, RemoteTiles, open_tiles
+from openpilot.selfdrive.navigation.tests.test_baidu_route import answer as baidu_answer, line, step as baidu_step
 from openpilot.selfdrive.navigation.vector_tile import decode_lines, decode_roads
+from openpilot.selfdrive.road_events.tests.test_road_events import latlon
 
 METER = 1 / 111319.49079327358  # degrees of latitude
 
@@ -89,11 +93,13 @@ def mapbox_response(steps):
   return response
 
 
-def route_engine(sm, pm, values):
+def route_engine(sm, pm, values, baidu_keys=None):
   params = MagicMock()
   params.get.side_effect = values.get
   params.remove.side_effect = lambda key: values.pop(key, None)
-  with patch('openpilot.selfdrive.navigation.navd.Api') as api:
+  with patch('openpilot.selfdrive.navigation.navd.Api') as api, \
+       patch('openpilot.selfdrive.navigation.navd.baidu.load_keys', return_value=baidu_keys), \
+       patch('openpilot.selfdrive.navigation.navd.BAIDU_COUNT_FILE', None):
     api.return_value.get_token.return_value = 'test-token'
     return RouteEngine(sm, pm, params=params)
 
@@ -136,11 +142,13 @@ class TileServerCase(unittest.TestCase):
     threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True).start()
     self.addCleanup(self.server.server_close)
     self.addCleanup(self.server.shutdown)
-    self.api = MagicMock(dongle_id='test-dongle')
+    self.api = MagicMock()
     self.api.get_token.return_value = 'device-token'
     self.url = f'http://127.0.0.1:{self.server.server_port}/planet.pmtiles?sig=secret'
     self.api.get.return_value.json.return_value = {'url': self.url, 'expires': time.time() + 86400}  # noqa: TID251
-    for name, value in [('Api', MagicMock(return_value=self.api)), ('Params', MagicMock()), ('PC', True)]:
+    params = MagicMock()
+    params.return_value.get.side_effect = {'DongleId': 'test-dongle', 'PrimeType': 3}.get   # hosted tiles come with prime
+    for name, value in [('Api', MagicMock(return_value=self.api)), ('Params', params), ('PC', True)]:
       self.enterContext(patch(f'openpilot.selfdrive.navigation.tiles.{name}', value))
     self.enterContext(patch('openpilot.selfdrive.navigation.tiles.Paths.comma_home', return_value=self.directory.name))
 
@@ -205,7 +213,41 @@ class TestEndToEnd(TileServerCase):
       self.assertEqual((self.cache / 'version').read_text().split()[0], '"new-version"')
 
 
+class TestLocalTiles(unittest.TestCase):
+  def setUp(self):
+    self.directory = tempfile.TemporaryDirectory()
+    self.addCleanup(self.directory.cleanup)
+    self.enterContext(patch('openpilot.selfdrive.navigation.tiles.PC', True))
+    self.enterContext(patch('openpilot.selfdrive.navigation.tiles.Paths.comma_home', return_value=self.directory.name))
+    self.remote = self.enterContext(patch('openpilot.selfdrive.navigation.tiles.RemoteTiles'))
+
+  def test_device_archive(self):
+    path = Path(self.directory.name) / 'navigation' / 'basemap.pmtiles'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(make_archive(leaf=True))
+    source = open_tiles()
+    self.assertIsInstance(source, LocalTiles)
+    with closing(PMTiles(source)) as archive:
+      self.assertEqual(archive.get(0, 0, 0), road_tile())
+    self.remote.assert_not_called()  # no account or network needed
+
+  def test_hosted_without_archive(self):
+    with patch('openpilot.selfdrive.navigation.tiles.Params') as params:
+      params.return_value.get.return_value = 2  # prime lite
+      self.assertIs(open_tiles(), self.remote.return_value)
+      for prime in (None, 0, -2):
+        params.return_value.get.return_value = prime
+        with self.assertRaises(NoTiles):
+          open_tiles()
+    self.remote.assert_called_once()
+
+
 class TestRemoteTiles(TileServerCase):
+  def test_device_dongle_id(self):
+    with closing(RemoteTiles()):
+      pass
+    self.assertEqual(self.api.get.call_args.args[0], 'v1/test-dongle/nav/tiles')
+
   def test_shared_cache_and_refresh(self):
     with closing(PMTiles(RemoteTiles())) as archive:
       archive.source.expires = 0  # the signed URL is refreshed before the next fetch
@@ -254,7 +296,7 @@ class TestRouteEngine(unittest.TestCase):
     self.sm.valid = dict.fromkeys(('gpsLocation', 'gpsLocationExternal'), True)
     self.sm.logMonoTime = dict.fromkeys(self.sm.valid, time.monotonic_ns())
     self.sm.recv_time = dict.fromkeys(self.sm.valid, time.monotonic())
-    self.sm.__getitem__.return_value = SimpleNamespace(hasFix=True, latitude=0, longitude=0, bearingDeg=90)
+    self.sm.__getitem__.return_value = SimpleNamespace(hasFix=True, latitude=0, longitude=0, bearingDeg=90, speed=0)
     self.engine = route_engine(self.sm, self.pm, self.values)
     self.engine.last_position, self.engine.last_bearing = (0, 0), 90
     distance = 111.195  # Mapbox's length of 0.001 degrees at the equator
@@ -336,6 +378,24 @@ class TestRouteEngine(unittest.TestCase):
     self.assertIsNone(self.engine.route)
     self.assertNotIn('NavDestination', self.values)
 
+  def test_no_reroute_storm_when_slow(self):
+    self.load_route()
+    self.engine.nav_destination = (0.002, 0)
+    self.engine.request_position = (0, 0)
+    self.engine.last_position, self.engine.last_speed = (0.00005, 0.00025), 1.  # 28 m off the route, crawling in a car park
+    with patch('requests.get', return_value=self.response) as get:
+      for _ in range(60):
+        self.engine.recompute_route(gps_ok=True)
+      get.assert_not_called()
+      self.engine.last_position = (0.0001, 0.0006)  # 67 m off and 50 m on from where the route was asked: worth asking
+      for _ in range(REROUTE_COUNTER_MIN + 1):
+        self.engine.recompute_route(gps_ok=True)
+      self.assertEqual(get.call_count, 1)
+      self.engine.last_speed = 10.
+      for _ in range(90):  # still off: later reroutes wait longer, 10 s then 30 s then 60 s
+        self.engine.recompute_route(gps_ok=True)
+      self.assertEqual(get.call_count, 3)
+
   def test_failed_request_clears_route(self):
     self.load_route()
     self.response.raise_for_status.side_effect = requests.HTTPError('test failure')
@@ -346,8 +406,8 @@ class TestRouteEngine(unittest.TestCase):
     self.assertFalse(self.last_message('navInstruction').valid)
 
   def test_gps_source(self):
-    fixes = {'gpsLocation': SimpleNamespace(hasFix=True, latitude=1, longitude=1, bearingDeg=180),
-             'gpsLocationExternal': SimpleNamespace(hasFix=True, latitude=2, longitude=2, bearingDeg=0)}
+    fixes = {'gpsLocation': SimpleNamespace(hasFix=True, latitude=1, longitude=1, bearingDeg=180, speed=0),
+             'gpsLocationExternal': SimpleNamespace(hasFix=True, latitude=2, longitude=2, bearingDeg=0, speed=0)}
     self.sm.__getitem__.side_effect = fixes.get
     self.sm.logMonoTime = {'gpsLocation': 2, 'gpsLocationExternal': 1}  # replayed logs are judged by receipt time
     with patch('requests.get', return_value=self.response):
@@ -356,10 +416,85 @@ class TestRouteEngine(unittest.TestCase):
       self.sm.valid['gpsLocation'] = False
       self.engine.update()
       self.assertEqual(self.engine.last_position, (2, 2))  # unless it is invalid
-      fixes['gpsLocationExternal'] = SimpleNamespace(hasFix=True, latitude=3, longitude=3, bearingDeg=0)
+      fixes['gpsLocationExternal'] = SimpleNamespace(hasFix=True, latitude=3, longitude=3, bearingDeg=0, speed=0)
       self.sm.recv_time = dict.fromkeys(self.sm.valid, time.monotonic() - 3)  # or stale
       self.engine.update()
       self.assertEqual(self.engine.last_position, (2, 2))
+
+
+class TestBaiduRoutes(unittest.TestCase):
+  """With Baidu's key file: China's roads and traffic, the traffic also for roadeventd."""
+
+  def setUp(self):
+    self.pm = MagicMock()
+    self.values = {'NavDestination': {'latitude': latlon(700, -200)[0], 'longitude': latlon(700, -200)[1]}}
+    self.sm = MagicMock()
+    self.engine = route_engine(self.sm, self.pm, self.values, baidu_keys=('ak-test', 'sk-test'))
+    lat, lon = latlon(0, 0)
+    self.engine.last_position, self.engine.last_bearing, self.engine.last_speed = (lon, lat), 90, 10.
+    traffic = [{'status': 1, 'geo_cnt': 10, 'distance': 200.}, {'status': 3, 'geo_cnt': 10, 'distance': 200.}]
+    self.answer = baidu_answer([baidu_step(line(0, 0, 400, 0), 'A', 40., traffic), baidu_step(line(400, 0, 700, 0), 'B', 30.),
+                                baidu_step(line(700, 0, 700, -200), 'C', 20.)])
+
+  def last_message(self, service):
+    return next(call.args[1] for call in reversed(self.pm.send.call_args_list) if call.args[0] == service)
+
+  def route(self, answer=None, error=None):
+    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', return_value=answer or self.answer, side_effect=error) as get, \
+         patch('requests.get') as mapbox:
+      self.engine.calculate_route((self.values['NavDestination']['longitude'], self.values['NavDestination']['latitude']))
+      mapbox.assert_not_called()
+    self.engine.send_route()
+    return get
+
+  def test_route_and_instruction(self):
+    get = self.route()
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query)
+    destination = self.values['NavDestination']
+    self.assertEqual(query['destination'][0], f"{destination['latitude']:.6f},{destination['longitude']:.6f}")
+    self.assertEqual((query['coord_type'][0], query['gps_direction'][0], query['speed'][0]), ('wgs84', '90', '10.00'))
+    self.engine.send_instruction()
+    instruction = self.last_message('navInstruction').navInstruction
+    self.assertEqual((instruction.maneuverModifier, instruction.maneuverPrimaryText), ('right', 'C'))
+    self.assertAlmostEqual(instruction.maneuverDistance, 700, delta=2)
+    self.assertAlmostEqual(instruction.distanceRemaining, 900, delta=3)
+    traffic = self.last_message('navRouteIC').navRouteIC
+    self.assertEqual(len(traffic.coordinates), len(self.last_message('navRoute').navRoute.coordinates))
+    self.assertEqual([(j.start, j.length, j.status) for j in traffic.jams], [(200., 200., 3)])
+    self.assertEqual(traffic.requestTime, int(self.engine.route_time * 1e9))
+
+  def test_asked_again_for_fresh_traffic_while_moving(self):
+    self.route()
+    self.engine.nav_destination = (self.values['NavDestination']['longitude'], self.values['NavDestination']['latitude'])
+    self.engine.reroute_counter = 0
+    self.engine.recompute_hold = 0
+    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', return_value=self.answer) as get:
+      self.engine.recompute_route(gps_ok=True)
+      get.assert_not_called()
+      self.engine.route_time -= BAIDU_REFRESH
+      self.engine.last_speed = 0.
+      self.engine.recompute_route(gps_ok=True)
+      get.assert_not_called()  # not while stopped
+      self.engine.last_speed = 10.
+      self.engine.recompute_route(gps_ok=True)
+      get.assert_called_once()
+
+  def test_a_failed_request_waits(self):
+    self.route(error=OSError('https://api.map.baidu.com/?ak=secret'))
+    self.assertIsNone(self.engine.route)
+    self.assertEqual(self.engine.recompute_hold, BAIDU_RETRY)
+    self.assertEqual(len(self.last_message('navRouteIC').navRouteIC.coordinates), 0)
+
+  def test_daily_budget(self):
+    self.engine.baidu_daily.left = MagicMock(return_value=0)
+    get = self.route()
+    get.assert_not_called()
+    self.assertIsNone(self.engine.route)
+
+  def test_without_keys_no_traffic_message(self):
+    engine = route_engine(self.sm, self.pm, self.values)
+    engine.send_route()
+    self.assertNotIn('navRouteIC', [call.args[0] for call in self.pm.send.call_args_list])
 
 
 class TestTiles(unittest.TestCase):
@@ -479,6 +614,14 @@ class TestRouteTracking(unittest.TestCase):
     self.assertAlmostEqual(tracker.snap(9 * m, 150 * m)[2], 0, places=3)
     self.assertAlmostEqual(tracker.progress, 150, delta=0.5)
     self.assertAlmostEqual(RouteTracker(route).snap(9 * m, 150 * m)[2], 180, places=3)
+
+
+class TestDestinationdLive(unittest.TestCase):
+  def test_live_route_imports_and_reads(self):
+    from openpilot.selfdrive.navigation import destinationd
+    with OpenpilotPrefix():
+      get = destinationd.live_route()   # the real imports, as on the car
+      self.assertIsNone(get())   # no navd: no route
 
 
 if __name__ == '__main__':

@@ -2652,8 +2652,8 @@ struct Event {
     carStateSP @114 :Custom.CarStateSP;
     liveMapDataSP @115 :Custom.LiveMapDataSP;
     modelDataV2SP @116 :Custom.ModelDataV2SP;
-    customReserved10 @136 :Custom.CustomReserved10;
-    customReserved11 @137 :Custom.CustomReserved11;
+    roadEventsIC @136 :Custom.RoadEventsIC;
+    navRouteIC @137 :Custom.NavRouteIC;
     customReserved12 @138 :Custom.CustomReserved12;
     selfdriveStateIC @139 :Custom.SelfdriveStateIC;
     controlsStateIC @140 :Custom.ControlsStateIC;
