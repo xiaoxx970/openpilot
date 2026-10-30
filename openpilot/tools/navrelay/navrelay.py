@@ -256,7 +256,7 @@ def main():
   if len(key) < 24:
     raise SystemExit("NAVRELAY_KEY must be set, at least 24 characters")
   relay = Relay(Car(os.environ.get("NAVRELAY_CAR", "http://100.69.175.43:8082")), os.environ.get("NAVRELAY_STATE", "/var/lib/navrelay"))
-  address = (os.environ.get("NAVRELAY_BIND", "0.0.0.0"), int(os.environ.get("NAVRELAY_PORT", "8443")))
+  address = (os.environ.get("NAVRELAY_BIND", "0.0.0.0"), int(os.environ.get("NAVRELAY_PORT", "443")))
   server = ThreadingHTTPServer(address, handler(relay, key, os.environ.get("NAVRELAY_CA")))
   cert, cert_key = os.environ.get("NAVRELAY_CERT"), os.environ.get("NAVRELAY_CERT_KEY")
   if cert and cert_key:

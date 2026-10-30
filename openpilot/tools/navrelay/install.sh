@@ -4,7 +4,7 @@
 set -euo pipefail
 
 IP="${1:?usage: install.sh <public ip> [port]}"
-PORT="${2:-8443}"
+PORT="${2:-443}"
 CAR="${NAVRELAY_CAR:-http://100.69.175.43:8082}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ETC=/etc/navrelay
@@ -53,6 +53,7 @@ Wants=network-online.target
 
 [Service]
 User=navrelay
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 EnvironmentFile=$ETC/navrelay.env
 ExecStart=/usr/bin/python3 -I /opt/navrelay/navrelay.py
 Restart=always
