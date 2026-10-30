@@ -106,7 +106,10 @@ let map=null,layer=[],marks=[],fitKey='',phone=null;   // phone: [lat, lon], the
 function locate(){if(!navigator.geolocation)return;navigator.geolocation.watchPosition(p=>{const first=!phone;phone=[p.coords.latitude,p.coords.longitude];if(first)draw()},()=>{},
   {enableHighAccuracy:false,maximumAge:120000,timeout:20000})}
 function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>{e.style.display='none'},2000)}
-function focus(at){if(!map)return;map.centerAndZoom(bdPoint(at[0],at[1]),Math.max(map.getZoom(),16))}
+function focus(at){   // centred in the map left between the search bar and the sheet, not in the screen
+  if(!map)return;map.centerAndZoom(bdPoint(at[0],at[1]),Math.max(map.getZoom(),16));
+  const top=$('top').offsetHeight,bottom=$('sheet').offsetHeight,dy=Math.round((top-bottom)/2);
+  if(dy)map.panBy(0,dy,{noAnimation:true})}
 function carAt(){return (route&&route.car)||(state&&state.position)}
 function toMe(){
   if(phone)return focus(phone);
