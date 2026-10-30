@@ -85,50 +85,11 @@ const ICONS={   // single-colour line icons for the saved places
   home:'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>',
   work:'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V4h6v3"/><path d="M3 13h18"/></svg>',
   star:'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/></svg>'};
-const DARK=[   // a dark map, set inline: no style ID needed
-  {featureType:'land',elementType:'geometry',stylers:{color:'#10171dff'}},
-  {featureType:'water',elementType:'geometry',stylers:{color:'#0a1f2bff'}},
-  {featureType:'green',elementType:'geometry',stylers:{color:'#122118ff'}},
-  {featureType:'building',elementType:'geometry',stylers:{color:'#1a242cff'}},
-  {featureType:'highway',elementType:'geometry.fill',stylers:{color:'#3a4650ff'}},
-  {featureType:'highway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'cityhighway',elementType:'geometry.fill',stylers:{color:'#34404aff'}},
-  {featureType:'cityhighway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'arterial',elementType:'geometry.fill',stylers:{color:'#2c3740ff'}},
-  {featureType:'arterial',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'tertiaryway',elementType:'geometry.fill',stylers:{color:'#26313aff'}},
-  {featureType:'tertiaryway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'fourlevelway',elementType:'geometry.fill',stylers:{color:'#222c34ff'}},
-  {featureType:'fourlevelway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'local',elementType:'geometry.fill',stylers:{color:'#1f2930ff'}},
-  {featureType:'local',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'scenicspotsway',elementType:'geometry.fill',stylers:{color:'#1f2930ff'}},
-  {featureType:'scenicspotsway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'universityway',elementType:'geometry.fill',stylers:{color:'#1f2930ff'}},
-  {featureType:'universityway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'vacationway',elementType:'geometry.fill',stylers:{color:'#1f2930ff'}},
-  {featureType:'vacationway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'roadarrow',elementType:'geometry',stylers:{visibility:'off'}},
-  {featureType:'nationalway',elementType:'geometry.fill',stylers:{color:'#2c3740ff'}},
-  {featureType:'nationalway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'provincialway',elementType:'geometry.fill',stylers:{color:'#2c3740ff'}},
-  {featureType:'provincialway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
-  {featureType:'railway',elementType:'all',stylers:{visibility:'off'}},
-  {featureType:'highspeedrailway',elementType:'all',stylers:{visibility:'off'}},
-  {featureType:'subway',elementType:'geometry',stylers:{visibility:'off'}},
-  {featureType:'manmade',elementType:'geometry',stylers:{color:'#141c22ff'}},
-  {featureType:'education',elementType:'geometry',stylers:{color:'#141c22ff'}},
-  {featureType:'medical',elementType:'geometry',stylers:{color:'#141c22ff'}},
-  {featureType:'scenicspots',elementType:'geometry',stylers:{color:'#122118ff'}},
-  {featureType:'boundary',elementType:'geometry',stylers:{color:'#3a4752ff'}},
-  {featureType:'label',elementType:'labels.text.fill',stylers:{color:'#8a9aa6ff'}},
-  {featureType:'label',elementType:'labels.text.stroke',stylers:{color:'#0b1116ff'}},
-  {featureType:'poilabel',elementType:'labels.icon',stylers:{visibility:'off'}},
-  {featureType:'poilabel',elementType:'labels.text.fill',stylers:{color:'#7d8c97ff'}},
-  {featureType:'subwaylabel',elementType:'labels.text.fill',stylers:{color:'#7d8c97ff'}},
-  {featureType:'subwaylabel',elementType:'labels.icon',stylers:{visibility:'off'}}];
-const CAR_ICON='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22">'
-  +'<circle cx="11" cy="11" r="8" fill="#2d7ff9" stroke="#fff" stroke-width="3"/></svg>');
+function carIcon(bearing){
+  const glyph=bearing==null?'<path d="M8 17v-4l1.6-3.5h6.8L18 13v4zM8 17v1.5M18 17v1.5M8 13h10" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/>'
+    :'<path d="M13 5l5.5 13-5.5-3-5.5 3z" fill="#fff" transform="rotate('+Math.round(bearing)+' 13 13)"/>';
+  return 'data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26">'
+    +'<circle cx="13" cy="13" r="11.5" fill="#2fb36b" stroke="#fff" stroke-width="2"/>'+glyph+'</svg>')}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function km(m){return m>=1000?(m/1000).toFixed(m>=100000?0:1)+' 公里':Math.round(m)+' 米'}
 function mins(s){return s>=3600?Math.floor(s/3600)+' 小时 '+Math.round(s%3600/60)+' 分':Math.max(1,Math.round(s/60))+' 分钟'}
@@ -155,8 +116,8 @@ function toMe(){
     ()=>toast('拿不到手机位置，看看是否允许了定位'),{enableHighAccuracy:true,maximumAge:30000,timeout:15000})}
 function toCar(){const c=carAt();if(c)focus(c);else toast(state&&state.car_online===false?'车不在线，不知道车在哪':'还不知道车的位置')}
 function placeFabs(){const b=$('sheet').offsetHeight+12;$('fabcar').style.bottom=b+'px';$('fabme').style.bottom=(b+52)+'px';$('fabtraffic').style.bottom=(b+104)+'px'}
-let traffic=false;   // the city's traffic layer, off: its white casing glares on the dark map, and the route has its own jam colours
-try{traffic=localStorage.getItem('traffic')==='1'}catch(e){}
+let traffic=true;   // the city's traffic layer
+try{traffic=localStorage.getItem('traffic')!=='0'}catch(e){}
 function showTraffic(on){traffic=on;$('fabtraffic').classList.toggle('on',on);try{localStorage.setItem('traffic',on?'1':'0')}catch(e){}
   if(!map)return;try{on?map.setTrafficOn():map.setTrafficOff()}catch(e){}}
 addEventListener('resize',placeFabs)
@@ -214,7 +175,6 @@ function same(a,b){return a&&b&&Math.abs(a.latitude-b.latitude)<1e-4&&Math.abs(a
 function mapReady(){
   document.body.classList.remove('nomap');
   map=new BMapGL.Map('map');map.centerAndZoom(new BMapGL.Point(118.7969,32.0603),12);map.enableScrollWheelZoom(true);
-  try{map.setMapStyleV2({styleJson:DARK})}catch(e){}
   showTraffic(traffic)
   map.addEventListener('click',e=>{if(e.overlay)return;const w=wgsOf(e.latlng);pick({name:'地图上选的点',address:'',latitude:w[0],longitude:w[1]})});
   fitKey='';draw()}
@@ -227,7 +187,7 @@ function draw(){
     add(new BMapGL.Polyline(pts,{strokeColor:COLORS[seg.status]||COLORS[1],strokeWeight:7,strokeOpacity:0.95}))}
   const car=carAt();
   if(phone)add(new BMapGL.Marker(bdPoint(phone[0],phone[1]),{icon:new BMapGL.Icon(ME_ICON,new BMapGL.Size(18,18))}));
-  if(car){const c=bdPoint(car[0],car[1]);add(new BMapGL.Marker(c,{icon:new BMapGL.Icon(CAR_ICON,new BMapGL.Size(22,22))}));if(view!=='results')all.push(c)}
+  if(car){const c=bdPoint(car[0],car[1]);add(new BMapGL.Marker(c,{icon:new BMapGL.Icon(carIcon(car[2]),new BMapGL.Size(26,26))}));if(view!=='results')all.push(c)}
   const target=view==='place'?picked:(view==='home'&&state?state.destination:null);
   if(target){const p=bdPoint(target.latitude,target.longitude);add(new BMapGL.Marker(p));all.push(p)}
   if(view==='results')results.forEach((p,i)=>{const pt=bdPoint(p.latitude,p.longitude);const m=new BMapGL.Marker(pt);
