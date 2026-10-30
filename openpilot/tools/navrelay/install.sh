@@ -16,20 +16,23 @@ install -m 644 "$HERE/navrelay.py" /opt/navrelay/navrelay.py
 install -d -m 750 -o root -g navrelay "$ETC"
 install -d -m 700 -o navrelay -g navrelay /var/lib/navrelay
 
-# a private CA the phone trusts once, and a server certificate for the IP under it (iOS: at most 825 days)
-if [ ! -f "$ETC/ca.key" ]; then
-  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$ETC/ca.key" -out "$ETC/ca.crt" -days 3650 \
-    -subj "/CN=navrelay CA" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
-fi
-if [ ! -f "$ETC/server.crt" ] || ! openssl x509 -in "$ETC/server.crt" -noout -text | grep -q "IP Address:$IP"; then
+# a private CA the phone trusts once, and a server certificate for the IP under it (iOS: at most 825 days). The CA may only
+# vouch for this IP (name constraints), and its key is shredded once the server certificate is signed: root on this box
+# can't mint certificates for other sites the phone visits. A new certificate means a new CA, installed on the phone again.
+if [ ! -f "$ETC/server.crt" ] || [ ! -f "$ETC/ca.crt" ] || ! openssl x509 -in "$ETC/server.crt" -noout -text | grep -q "IP Address:$IP"; then
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$ETC/ca.key" -out "$ETC/ca.crt" -days 3650 -subj "/CN=navrelay CA $IP" \
+    -addext "basicConstraints=critical,CA:TRUE,pathlen:0" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -addext "nameConstraints=critical,permitted;IP:$IP/255.255.255.255"
   openssl req -newkey rsa:2048 -nodes -keyout "$ETC/server.key" -out "$ETC/server.csr" -subj "/CN=$IP"
   printf 'subjectAltName=IP:%s\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n' "$IP" > "$ETC/server.ext"
-  openssl x509 -req -in "$ETC/server.csr" -CA "$ETC/ca.crt" -CAkey "$ETC/ca.key" -CAcreateserial -out "$ETC/server.crt" \
-    -days 800 -sha256 -extfile "$ETC/server.ext"
+  openssl x509 -req -in "$ETC/server.csr" -CA "$ETC/ca.crt" -CAkey "$ETC/ca.key" -set_serial "0x$(openssl rand -hex 16)" \
+    -out "$ETC/server.crt" -days 800 -sha256 -extfile "$ETC/server.ext"
+  shred -u "$ETC/ca.key"
   rm -f "$ETC/server.csr" "$ETC/server.ext"
+  echo "NEW CA: install https://$IP/ca.crt on the phone again"
 fi
 chown root:navrelay "$ETC"/server.key "$ETC"/server.crt "$ETC"/ca.crt
-chmod 640 "$ETC/server.key"; chmod 644 "$ETC/server.crt" "$ETC/ca.crt"; chmod 600 "$ETC/ca.key"
+chmod 640 "$ETC/server.key"; chmod 644 "$ETC/server.crt" "$ETC/ca.crt"
 
 if [ ! -f "$ETC/navrelay.env" ]; then
   KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"

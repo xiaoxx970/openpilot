@@ -237,7 +237,7 @@ def handler(relay: Relay, key: str, ca: str | None = None):
         return
       path = urllib.parse.urlsplit(self.path).path
       try:
-        body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), MAX_BODY)) or b"{}")
+        body = json.loads(self.rfile.read(min(max(0, int(self.headers.get("Content-Length") or 0)), MAX_BODY)) or b"{}")
       except ValueError:
         body = None
       if path not in PASSED or not isinstance(body, dict):
