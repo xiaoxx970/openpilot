@@ -517,7 +517,7 @@ class TestBaiduRoutes(unittest.TestCase):
     self.route()
     self.drive(690, 300)  # far off the first step: its "along" is past its end, but the car is not on the next one
     self.assertEqual(self.engine.step_idx, 0)
-    self.drive(700, -20)  # on the next step
+    self.drive(700, -30)  # on the next step
     self.assertEqual(self.engine.step_idx, 1)
 
   def test_daily_budget(self):
