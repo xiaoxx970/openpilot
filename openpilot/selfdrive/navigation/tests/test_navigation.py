@@ -11,18 +11,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import urllib.parse
+
 import numpy as np
 import requests
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.selfdrive.navigation.mapsd import MapsD
-from openpilot.selfdrive.navigation.navd import REROUTE_COUNTER_MIN, ROUTE_RESEND_PERIOD, RouteEngine, set_banner
+from openpilot.selfdrive.navigation.navd import BAIDU_REFRESH, BAIDU_RETRY, REROUTE_COUNTER_MIN, ROUTE_RESEND_PERIOD, RouteEngine, set_banner
 from openpilot.selfdrive.navigation.pmtiles import PMTiles, decode_directory, tile_id
 from openpilot.selfdrive.navigation.renderer import MAJOR, MEDIUM, MINOR, SIZE, STREET, TRACK, MapRenderer, draw_segments, mercator, project, stroke_widths
 from openpilot.selfdrive.navigation.route import RouteTracker
 from openpilot.selfdrive.navigation.tiles import LocalTiles, RemoteTiles, open_tiles
+from openpilot.selfdrive.navigation.tests.test_baidu_route import answer as baidu_answer, line, step as baidu_step
 from openpilot.selfdrive.navigation.vector_tile import decode_lines, decode_roads
+from openpilot.selfdrive.road_events.tests.test_road_events import latlon
 
 METER = 1 / 111319.49079327358  # degrees of latitude
 
@@ -89,11 +93,13 @@ def mapbox_response(steps):
   return response
 
 
-def route_engine(sm, pm, values):
+def route_engine(sm, pm, values, baidu_keys=None):
   params = MagicMock()
   params.get.side_effect = values.get
   params.remove.side_effect = lambda key: values.pop(key, None)
-  with patch('openpilot.selfdrive.navigation.navd.Api') as api:
+  with patch('openpilot.selfdrive.navigation.navd.Api') as api, \
+       patch('openpilot.selfdrive.navigation.navd.baidu.load_keys', return_value=baidu_keys), \
+       patch('openpilot.selfdrive.navigation.navd.BAIDU_COUNT_FILE', None):
     api.return_value.get_token.return_value = 'test-token'
     return RouteEngine(sm, pm, params=params)
 
@@ -283,7 +289,7 @@ class TestRouteEngine(unittest.TestCase):
     self.sm.valid = dict.fromkeys(('gpsLocation', 'gpsLocationExternal'), True)
     self.sm.logMonoTime = dict.fromkeys(self.sm.valid, time.monotonic_ns())
     self.sm.recv_time = dict.fromkeys(self.sm.valid, time.monotonic())
-    self.sm.__getitem__.return_value = SimpleNamespace(hasFix=True, latitude=0, longitude=0, bearingDeg=90)
+    self.sm.__getitem__.return_value = SimpleNamespace(hasFix=True, latitude=0, longitude=0, bearingDeg=90, speed=0)
     self.engine = route_engine(self.sm, self.pm, self.values)
     self.engine.last_position, self.engine.last_bearing = (0, 0), 90
     distance = 111.195  # Mapbox's length of 0.001 degrees at the equator
@@ -375,8 +381,8 @@ class TestRouteEngine(unittest.TestCase):
     self.assertFalse(self.last_message('navInstruction').valid)
 
   def test_gps_source(self):
-    fixes = {'gpsLocation': SimpleNamespace(hasFix=True, latitude=1, longitude=1, bearingDeg=180),
-             'gpsLocationExternal': SimpleNamespace(hasFix=True, latitude=2, longitude=2, bearingDeg=0)}
+    fixes = {'gpsLocation': SimpleNamespace(hasFix=True, latitude=1, longitude=1, bearingDeg=180, speed=0),
+             'gpsLocationExternal': SimpleNamespace(hasFix=True, latitude=2, longitude=2, bearingDeg=0, speed=0)}
     self.sm.__getitem__.side_effect = fixes.get
     self.sm.logMonoTime = {'gpsLocation': 2, 'gpsLocationExternal': 1}  # replayed logs are judged by receipt time
     with patch('requests.get', return_value=self.response):
@@ -385,10 +391,85 @@ class TestRouteEngine(unittest.TestCase):
       self.sm.valid['gpsLocation'] = False
       self.engine.update()
       self.assertEqual(self.engine.last_position, (2, 2))  # unless it is invalid
-      fixes['gpsLocationExternal'] = SimpleNamespace(hasFix=True, latitude=3, longitude=3, bearingDeg=0)
+      fixes['gpsLocationExternal'] = SimpleNamespace(hasFix=True, latitude=3, longitude=3, bearingDeg=0, speed=0)
       self.sm.recv_time = dict.fromkeys(self.sm.valid, time.monotonic() - 3)  # or stale
       self.engine.update()
       self.assertEqual(self.engine.last_position, (2, 2))
+
+
+class TestBaiduRoutes(unittest.TestCase):
+  """With Baidu's key file: China's roads and traffic, the traffic also for roadeventd."""
+
+  def setUp(self):
+    self.pm = MagicMock()
+    self.values = {'NavDestination': {'latitude': latlon(700, -200)[0], 'longitude': latlon(700, -200)[1]}}
+    self.sm = MagicMock()
+    self.engine = route_engine(self.sm, self.pm, self.values, baidu_keys=('ak-test', 'sk-test'))
+    lat, lon = latlon(0, 0)
+    self.engine.last_position, self.engine.last_bearing, self.engine.last_speed = (lon, lat), 90, 10.
+    traffic = [{'status': 1, 'geo_cnt': 10, 'distance': 200.}, {'status': 3, 'geo_cnt': 10, 'distance': 200.}]
+    self.answer = baidu_answer([baidu_step(line(0, 0, 400, 0), 'A', 40., traffic), baidu_step(line(400, 0, 700, 0), 'B', 30.),
+                                baidu_step(line(700, 0, 700, -200), 'C', 20.)])
+
+  def last_message(self, service):
+    return next(call.args[1] for call in reversed(self.pm.send.call_args_list) if call.args[0] == service)
+
+  def route(self, answer=None, error=None):
+    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', return_value=answer or self.answer, side_effect=error) as get, \
+         patch('requests.get') as mapbox:
+      self.engine.calculate_route((self.values['NavDestination']['longitude'], self.values['NavDestination']['latitude']))
+      mapbox.assert_not_called()
+    self.engine.send_route()
+    return get
+
+  def test_route_and_instruction(self):
+    get = self.route()
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query)
+    destination = self.values['NavDestination']
+    self.assertEqual(query['destination'][0], f"{destination['latitude']:.6f},{destination['longitude']:.6f}")
+    self.assertEqual((query['coord_type'][0], query['gps_direction'][0], query['speed'][0]), ('wgs84', '90', '10.00'))
+    self.engine.send_instruction()
+    instruction = self.last_message('navInstruction').navInstruction
+    self.assertEqual((instruction.maneuverModifier, instruction.maneuverPrimaryText), ('right', 'C'))
+    self.assertAlmostEqual(instruction.maneuverDistance, 700, delta=2)
+    self.assertAlmostEqual(instruction.distanceRemaining, 900, delta=3)
+    traffic = self.last_message('navRouteIC').navRouteIC
+    self.assertEqual(len(traffic.coordinates), len(self.last_message('navRoute').navRoute.coordinates))
+    self.assertEqual([(j.start, j.length, j.status) for j in traffic.jams], [(200., 200., 3)])
+    self.assertEqual(traffic.requestTime, int(self.engine.route_time * 1e9))
+
+  def test_asked_again_for_fresh_traffic_while_moving(self):
+    self.route()
+    self.engine.nav_destination = (self.values['NavDestination']['longitude'], self.values['NavDestination']['latitude'])
+    self.engine.reroute_counter = 0
+    self.engine.recompute_hold = 0
+    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', return_value=self.answer) as get:
+      self.engine.recompute_route(gps_ok=True)
+      get.assert_not_called()
+      self.engine.route_time -= BAIDU_REFRESH
+      self.engine.last_speed = 0.
+      self.engine.recompute_route(gps_ok=True)
+      get.assert_not_called()  # not while stopped
+      self.engine.last_speed = 10.
+      self.engine.recompute_route(gps_ok=True)
+      get.assert_called_once()
+
+  def test_a_failed_request_waits(self):
+    self.route(error=OSError('https://api.map.baidu.com/?ak=secret'))
+    self.assertIsNone(self.engine.route)
+    self.assertEqual(self.engine.recompute_hold, BAIDU_RETRY)
+    self.assertEqual(len(self.last_message('navRouteIC').navRouteIC.coordinates), 0)
+
+  def test_daily_budget(self):
+    self.engine.baidu_daily.left = MagicMock(return_value=0)
+    get = self.route()
+    get.assert_not_called()
+    self.assertIsNone(self.engine.route)
+
+  def test_without_keys_no_traffic_message(self):
+    engine = route_engine(self.sm, self.pm, self.values)
+    engine.send_route()
+    self.assertNotIn('navRouteIC', [call.args[0] for call in self.pm.send.call_args_list])
 
 
 class TestTiles(unittest.TestCase):
