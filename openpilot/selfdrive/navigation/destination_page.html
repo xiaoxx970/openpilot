@@ -14,6 +14,7 @@ body.nomap #mapwrap{display:none}
 #f{display:flex;gap:8px}
 #q{flex:1;font-size:17px;padding:12px 14px;border-radius:12px;border:0;background:var(--card);color:var(--text);box-shadow:0 2px 10px #0008;outline:none}
 #chips{display:flex;gap:8px;margin-top:8px;overflow-x:auto;scrollbar-width:none}
+.chip svg{vertical-align:-3px;margin-right:4px}
 .chip{flex:none;font-size:15px;padding:8px 14px;border-radius:18px;border:0;background:var(--card);color:var(--text);box-shadow:0 2px 8px #0008}
 #sheet{position:fixed;left:0;right:0;bottom:0;max-height:55vh;overflow-y:auto;z-index:5;background:var(--bg);border-radius:16px 16px 0 0;
   padding:14px 16px calc(env(safe-area-inset-bottom) + 14px);box-shadow:0 -4px 16px #0009}
@@ -48,8 +49,8 @@ body.nomap .fab{display:none}
   <form id="f"><input id="q" placeholder="搜地点，或粘贴百度地图分享" autocomplete="off" enterkeyhint="search"></form>
   <div id="chips"></div>
 </div>
-<button class="fab" id="fabme" onclick="toMe()" aria-label="我的位置">📍</button>
-<button class="fab" id="fabcar" onclick="toCar()" aria-label="车的位置">🚗</button>
+<button class="fab" id="fabme" onclick="toMe()" aria-label="我的位置"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
+<button class="fab" id="fabcar" onclick="toCar()" aria-label="车的位置"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 16V11l2-5h10l2 5v5"/><path d="M3 16h18v2H3z"/><path d="M5 11h14"/><circle cx="8" cy="14" r="0.6" fill="currentColor"/><circle cx="16" cy="14" r="0.6" fill="currentColor"/><path d="M6 18v2M18 18v2"/></svg></button>
 <div id="toast"></div>
 <div id="spacer"></div>
 <div id="sheet"><div id="body">读取中…</div></div>
@@ -78,6 +79,28 @@ function wgsOf(p){   // BD-09 -> GCJ-02 -> WGS-84
 const COLORS={1:'#2fb36b',2:'#f2c94c',3:'#eb5757',4:'#9b1c1c'};
 const ME_ICON='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18">'
   +'<circle cx="9" cy="9" r="7" fill="#2d7ff9" stroke="#fff" stroke-width="2.5"/></svg>');   // the phone
+const ICONS={   // single-colour line icons for the saved places
+  home:'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>',
+  work:'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V4h6v3"/><path d="M3 13h18"/></svg>',
+  star:'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/></svg>'};
+const DARK=[   // a dark map, set inline: no style ID needed
+  {featureType:'land',elementType:'geometry',stylers:{color:'#10171dff'}},
+  {featureType:'water',elementType:'geometry',stylers:{color:'#0a1f2bff'}},
+  {featureType:'green',elementType:'geometry',stylers:{color:'#122118ff'}},
+  {featureType:'building',elementType:'geometry',stylers:{color:'#1a242cff'}},
+  {featureType:'highway',elementType:'geometry',stylers:{color:'#3a4752ff'}},
+  {featureType:'arterial',elementType:'geometry',stylers:{color:'#2c3740ff'}},
+  {featureType:'local',elementType:'geometry',stylers:{color:'#222c34ff'}},
+  {featureType:'railway',elementType:'geometry',stylers:{color:'#2a333aff'}},
+  {featureType:'subway',elementType:'geometry',stylers:{visibility:'off'}},
+  {featureType:'manmade',elementType:'geometry',stylers:{color:'#141c22ff'}},
+  {featureType:'education',elementType:'geometry',stylers:{color:'#141c22ff'}},
+  {featureType:'medical',elementType:'geometry',stylers:{color:'#141c22ff'}},
+  {featureType:'scenicspots',elementType:'geometry',stylers:{color:'#122118ff'}},
+  {featureType:'boundary',elementType:'geometry',stylers:{color:'#3a4752ff'}},
+  {featureType:'label',elementType:'labels.text.fill',stylers:{color:'#8a9aa6ff'}},
+  {featureType:'label',elementType:'labels.text.stroke',stylers:{color:'#0b1116ff'}},
+  {featureType:'poilabel',elementType:'labels.icon',stylers:{visibility:'off'}}];
 const CAR_ICON='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22">'
   +'<circle cx="11" cy="11" r="8" fill="#2d7ff9" stroke="#fff" stroke-width="3"/></svg>');
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -126,7 +149,7 @@ function list(items,act){return items.map((p,i)=>'<div class="item" onclick="'+a
 
 function render(){
   $('chips').innerHTML=Object.keys(places.saved).map(k=>'<button class="chip" data-k="'+esc(k)+'" onclick="pickSaved(this.dataset.k)">'
-    +(k==='家'?'🏠 ':k==='公司'?'💼 ':'⭐ ')+esc(k)+'</button>').join('');
+    +(k==='家'?ICONS.home:k==='公司'?ICONS.work:ICONS.star)+esc(k)+'</button>').join('');
   let h='';
   if(view==='results'){
     h='<div class="row" style="margin:0 0 6px"><button class="sec" onclick="home()">返回</button></div>'
@@ -161,6 +184,7 @@ function same(a,b){return a&&b&&Math.abs(a.latitude-b.latitude)<1e-4&&Math.abs(a
 function mapReady(){
   document.body.classList.remove('nomap');
   map=new BMapGL.Map('map');map.centerAndZoom(new BMapGL.Point(118.7969,32.0603),12);map.enableScrollWheelZoom(true);
+  try{map.setMapStyleV2({styleJson:DARK})}catch(e){}
   try{map.setTrafficOn()}catch(e){}
   map.addEventListener('click',e=>{if(e.overlay)return;const w=wgsOf(e.latlng);pick({name:'地图上选的点',address:'',latitude:w[0],longitude:w[1]})});
   fitKey='';draw()}
