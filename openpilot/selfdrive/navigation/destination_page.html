@@ -38,6 +38,7 @@ button.sec{font-size:15px;padding:13px 14px;border-radius:12px;border:0;backgrou
 h3{font-size:13px;color:var(--muted);font-weight:500;margin:14px 0 2px;letter-spacing:.5px}
 .msg{color:var(--warn);font-size:14px;margin:6px 0}
 .legend{font-size:12px;color:var(--muted)}
+.fab.on{color:#2fb36b}
 .fab{position:fixed;right:12px;z-index:4;width:44px;height:44px;border-radius:22px;border:0;background:var(--card);color:var(--text);
   font-size:20px;box-shadow:0 2px 10px #0008;display:flex;align-items:center;justify-content:center}
 body.nomap .fab{display:none}
@@ -51,6 +52,7 @@ body.nomap .fab{display:none}
 </div>
 <button class="fab" id="fabme" onclick="toMe()" aria-label="我的位置"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
 <button class="fab" id="fabcar" onclick="toCar()" aria-label="车的位置"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 16V11l2-5h10l2 5v5"/><path d="M3 16h18v2H3z"/><path d="M5 11h14"/><circle cx="8" cy="14" r="0.6" fill="currentColor"/><circle cx="16" cy="14" r="0.6" fill="currentColor"/><path d="M6 18v2M18 18v2"/></svg></button>
+<button class="fab" id="fabtraffic" onclick="showTraffic(!traffic)" aria-label="全城路况"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="20" rx="3"/><circle cx="12" cy="7" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="17" r="1.5"/></svg></button>
 <div id="toast"></div>
 <div id="spacer"></div>
 <div id="sheet"><div id="body">读取中…</div></div>
@@ -107,7 +109,12 @@ const DARK=[   // a dark map, set inline: no style ID needed
   {featureType:'vacationway',elementType:'geometry.fill',stylers:{color:'#1f2930ff'}},
   {featureType:'vacationway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
   {featureType:'roadarrow',elementType:'geometry',stylers:{visibility:'off'}},
-  {featureType:'railway',elementType:'geometry',stylers:{color:'#2a333aff'}},
+  {featureType:'nationalway',elementType:'geometry.fill',stylers:{color:'#2c3740ff'}},
+  {featureType:'nationalway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
+  {featureType:'provincialway',elementType:'geometry.fill',stylers:{color:'#2c3740ff'}},
+  {featureType:'provincialway',elementType:'geometry.stroke',stylers:{color:'#10171dff'}},
+  {featureType:'railway',elementType:'all',stylers:{visibility:'off'}},
+  {featureType:'highspeedrailway',elementType:'all',stylers:{visibility:'off'}},
   {featureType:'subway',elementType:'geometry',stylers:{visibility:'off'}},
   {featureType:'manmade',elementType:'geometry',stylers:{color:'#141c22ff'}},
   {featureType:'education',elementType:'geometry',stylers:{color:'#141c22ff'}},
@@ -147,7 +154,11 @@ function toMe(){
   navigator.geolocation.getCurrentPosition(p=>{phone=[p.coords.latitude,p.coords.longitude];draw();focus(phone)},
     ()=>toast('拿不到手机位置，看看是否允许了定位'),{enableHighAccuracy:true,maximumAge:30000,timeout:15000})}
 function toCar(){const c=carAt();if(c)focus(c);else toast(state&&state.car_online===false?'车不在线，不知道车在哪':'还不知道车的位置')}
-function placeFabs(){const b=$('sheet').offsetHeight+12;$('fabcar').style.bottom=b+'px';$('fabme').style.bottom=(b+52)+'px'}
+function placeFabs(){const b=$('sheet').offsetHeight+12;$('fabcar').style.bottom=b+'px';$('fabme').style.bottom=(b+52)+'px';$('fabtraffic').style.bottom=(b+104)+'px'}
+let traffic=false;   // the city's traffic layer, off: its white casing glares on the dark map, and the route has its own jam colours
+try{traffic=localStorage.getItem('traffic')==='1'}catch(e){}
+function showTraffic(on){traffic=on;$('fabtraffic').classList.toggle('on',on);try{localStorage.setItem('traffic',on?'1':'0')}catch(e){}
+  if(!map)return;try{on?map.setTrafficOn():map.setTrafficOff()}catch(e){}}
 addEventListener('resize',placeFabs)
 
 function statusLine(){
@@ -204,7 +215,7 @@ function mapReady(){
   document.body.classList.remove('nomap');
   map=new BMapGL.Map('map');map.centerAndZoom(new BMapGL.Point(118.7969,32.0603),12);map.enableScrollWheelZoom(true);
   try{map.setMapStyleV2({styleJson:DARK})}catch(e){}
-  try{map.setTrafficOn()}catch(e){}
+  showTraffic(traffic)
   map.addEventListener('click',e=>{if(e.overlay)return;const w=wgsOf(e.latlng);pick({name:'地图上选的点',address:'',latitude:w[0],longitude:w[1]})});
   fitKey='';draw()}
 function draw(){
