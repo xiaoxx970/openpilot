@@ -6,38 +6,44 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
+from openpilot.selfdrive.navigation import destinationd
+from openpilot.selfdrive.navigation.tests.test_destinationd import DETAIL, SHARE, TARGET, route_answer
+from openpilot.selfdrive.road_events.tests.test_road_events import latlon
 from openpilot.tools.navrelay import navrelay
 
 KEY = "k" * 32
 
 
 class FakeCar:
-  """destinationd's answers, or OSError while offline."""
+  """The car's destinationd: its answers, or OSError while offline."""
   def __init__(self):
     self.online = True
     self.calls = []
     self.destination = None
+    self.position = list(latlon(0, 0))
     self.route = {"route": None, "car": None}
+    self.places = {"saved": {"家": {"name": "家", "address": "", "latitude": 32.0, "longitude": 118.8}}, "recent": []}
 
-  def call(self, path, body=None):
+  def state(self):
+    return {"navigation": True, "destination": self.destination, "onroad": True, "search": True, "position": self.position}
+
+  def call(self, path, body=None, timeout=None):
     if not self.online:
       raise OSError("offline")
     self.calls.append((path, body))
-    if path == "/":
-      return 200, "<html>导航目的地</html>".encode(), "text/html; charset=utf-8"
+    if path == "/api/state":
+      return self.state()
     if path == "/api/places":
-      return 200, json.dumps({"saved": {"家": {"name": "家"}}, "recent": []}).encode(), "application/json"
-    if path == "/api/route":
-      return 200, json.dumps(self.route).encode(), "application/json"
-    if path == "/api/go" and body.get("label") == "没有":
-      return 200, json.dumps({"error": "还没有存这个地点"}).encode(), "application/json"
+      return self.places
+    if path.startswith("/api/route"):
+      return self.route
     if path == "/api/destination":
-      self.destination = {"place_name": body.get("name")}
-    elif path == "/api/go":
-      self.destination = {"place_name": body["label"]}
+      if body["latitude"] > 90:
+        return {"error": "坐标不对"}
+      self.destination = {"latitude": body["latitude"], "longitude": body["longitude"], "place_name": body["name"]}
     elif path == "/api/clear":
       self.destination = None
-    return 200, json.dumps({"navigation": True, "destination": self.destination, "onroad": True}).encode(), "application/json"
+    return self.state()
 
 
 class Clock:
@@ -48,70 +54,113 @@ class Clock:
     return self.t
 
 
-class TestRelay(unittest.TestCase):
+def fetch_for(queries):
+  def fetch(pq):
+    queries.append(pq)
+    return route_answer() if "direction" in pq else DETAIL
+  return fetch
+
+
+class TestApp(unittest.TestCase):
   def setUp(self):
-    self.car, self.clock = FakeCar(), Clock()
+    self.car, self.clock, self.queries = FakeCar(), Clock(), []
     self.dir = self.enterContext(tempfile.TemporaryDirectory())
-    self.relay = navrelay.Relay(self.car, self.dir, clock=self.clock)
+    self.app = self.make()
 
-  def test_online_passes_through(self):
-    status, body, _ = self.relay.handle("POST", "/api/go", {"label": "家"})
-    self.assertEqual((status, json.loads(body)["destination"]["place_name"]), (200, "家"))
-    self.assertIsNone(self.relay.pending)
+  def make(self, keys=("ak", "sk")):
+    relay = navrelay.Relay(self.car, self.dir, clock=self.clock)
+    dest = destinationd.Destinations(navrelay.CarParams(relay), keys, fetch_for(self.queries), count_file=None,
+                                     places=destinationd.Places(None), resolve=lambda url: TARGET, clock=self.clock)
+    relay.poll()
+    return navrelay.App(relay, dest)
 
-  def test_offline_queues_newest_and_delivers(self):
-    self.relay.handle("GET", "/", None)
-    self.relay.handle("GET", "/api/places", None)
+  def test_share_resolved_here_then_sent(self):
+    s = self.app.post("/api/share", {"text": SHARE})
+    self.assertEqual(s["destination"]["place_name"], "大行宫")
+    self.assertEqual(self.car.calls[-1][0], "/api/destination")
+    self.assertEqual(self.car.destination["place_name"], "大行宫")
+    self.assertEqual(self.app.dest.places.recent[0]["name"], "大行宫")   # kept on the server
+    self.assertFalse(s["queued"])
+
+  def test_offline_queued_newest_wins(self):
     self.car.online = False
-    self.relay.handle("POST", "/api/go", {"label": "家"})
-    _, body, _ = self.relay.handle("POST", "/api/share", {"text": "大行宫 大行宫 https://j.map.baidu.com/f9/Z3J"})
-    state = json.loads(body)
-    self.assertEqual((state["queued"], state["destination"]["place_name"]), ("/api/share", "等车上线：大行宫 大行宫"))
-    self.assertTrue("导航目的地" in self.relay.handle("GET", "/", None)[1].decode())
-    self.assertEqual(json.loads(self.relay.handle("GET", "/api/places", None)[1])["saved"]["家"]["name"], "家")
-    self.assertTrue("error" in json.loads(self.relay.handle("POST", "/api/search", {"query": "x"})[1]))
-    self.assertFalse(self.relay.deliver())
-    # kept across a restart of the relay
-    self.relay = navrelay.Relay(self.car, self.dir, clock=self.clock)
+    self.app.relay.poll()
+    self.app.post("/api/destination", {"latitude": 32.1, "longitude": 118.9, "name": "甲"})
+    s = self.app.post("/api/destination", {"latitude": 32.2, "longitude": 118.9, "name": "乙"})
+    self.assertEqual((s["destination"]["place_name"], s["queued"], s["car_online"]), ("乙", True, False))
+    self.assertEqual(self.car.calls, [("/api/state", None)])   # nothing tried while it is off
+    # across a restart of the server
+    self.app = self.make()
     self.car.online = True
-    self.assertTrue(self.relay.deliver())
-    self.assertEqual(self.car.calls[-1], ("/api/share", {"text": "大行宫 大行宫 https://j.map.baidu.com/f9/Z3J"}))
-    self.assertIsNone(self.relay.pending)
-    self.assertEqual(len([c for c in self.car.calls if c[0] in navrelay.QUEUED]), 1)   # the older one never sent
+    self.app.relay.poll()
+    self.assertEqual(self.car.destination["place_name"], "乙")
+    self.assertEqual([c[1]["name"] for c in self.car.calls if c[0] == "/api/destination"], ["乙"])
+    self.assertFalse(self.app.state()["queued"])
 
-  def test_a_turned_down_one_is_not_retried(self):
+  def test_clear_queued(self):
+    self.app.post("/api/destination", {"latitude": 32.1, "longitude": 118.9, "name": "甲"})
     self.car.online = False
-    self.relay.handle("POST", "/api/go", {"label": "没有"})
+    self.app.relay.poll()
+    self.assertIsNone(self.app.post("/api/clear", {})["destination"])
     self.car.online = True
-    self.assertTrue(self.relay.deliver())
-    self.assertIsNone(self.relay.pending)
+    self.app.relay.poll()
+    self.assertIsNone(self.car.destination)
 
-  def test_stale_queue_is_dropped(self):
+  def test_stale_queue_dropped(self):
     self.car.online = False
-    self.relay.handle("POST", "/api/go", {"label": "家"})
+    self.app.relay.poll()
+    self.app.post("/api/go", {"label": "nope"})
+    self.app.post("/api/destination", {"latitude": 32.1, "longitude": 118.9, "name": "甲"})
     self.clock.t += navrelay.QUEUE_TTL + 1
-    self.assertIsNone(self.relay.offline_state()["destination"])
     self.car.online = True
-    self.assertTrue(self.relay.deliver())
-    self.assertEqual(self.car.calls, [])
+    self.app.relay.poll()
+    self.assertIsNone(self.car.destination)
 
-  def test_route_kept_for_offline(self):
-    self.car.route = {"route": {"source": "nav", "segments": [], "distance": 5, "duration": 1}, "car": None}
-    self.relay.handle("GET", "/api/route", None)
+  def test_preview_here_from_the_car_position(self):
+    lat, lon = latlon(800, 0)
+    self.app.post("/api/destination", {"latitude": lat, "longitude": lon, "name": "终点"})
+    r = self.app.get("/api/route")
+    self.assertEqual((r["route"]["source"], r["route"]["distance"]), ("preview", 800))
+    self.assertTrue(any("direction" in q for q in self.queries))
+    self.assertTrue(("/api/route?nav=1", None) in self.car.calls)   # the car only for its live route
+
+  def test_live_route_from_the_car(self):
+    self.car.route = {"route": {"source": "nav", "segments": [], "distance": 500, "duration": 60}, "car": [32.0, 118.8, 0.]}
+    self.assertEqual(self.app.get("/api/route")["route"]["source"], "nav")
     self.car.online = False
-    r = json.loads(self.relay.handle("GET", "/api/route", None)[1])
+    self.app.relay.poll()
+    r = self.app.get("/api/route")   # no destination left here: the last navd route, marked offline
     self.assertEqual((r["route"]["source"], r["offline"]), ("nav", True))
 
-  def test_no_page_yet(self):
+  def test_places_imported_once(self):
+    self.app.import_places()
+    self.assertEqual(list(self.app.dest.places.saved), ["家"])
+    self.app.dest.places.delete("家")
+    self.app.dest.places.save("公司", self.car.places["saved"]["家"])
+    self.app.import_places()
+    self.assertEqual(list(self.app.dest.places.saved), ["公司"])
+
+  def test_turned_down_not_retried(self):
+    self.app.post("/api/destination", {"latitude": 32.1, "longitude": 118.9})
+    self.app.relay.send("/api/destination", {"latitude": 100., "longitude": 0., "name": "", "address": ""})
+    self.assertIsNone(self.app.relay.pending)
+
+  def test_without_keys_the_car_searches(self):
+    self.app = self.make(keys=None)
+    self.app.post("/api/search", {"query": "x"})
+    self.assertEqual(self.car.calls[-1], ("/api/search", {"query": "x"}))
     self.car.online = False
-    self.assertEqual(self.relay.handle("GET", "/", None)[0], 503)
+    self.app.relay.poll()
+    self.assertTrue("error" in self.app.post("/api/search", {"query": "x"}))
 
 
 class TestServer(unittest.TestCase):
   def setUp(self):
     self.car = FakeCar()
     relay = navrelay.Relay(self.car, None)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), navrelay.handler(relay, KEY))
+    dest = destinationd.Destinations(navrelay.CarParams(relay), None, count_file=None, places=destinationd.Places(None))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), navrelay.handler(navrelay.App(relay, dest), KEY,
+                                                                    b"<html>const JSAK='__BAIDU_JS_AK__';</html>", "JSKEY123"))
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     self.addCleanup(server.server_close)
     self.addCleanup(server.shutdown)
@@ -148,27 +197,16 @@ class TestServer(unittest.TestCase):
       self.assertEqual((r.status, r.headers["Location"], r.headers["Referrer-Policy"]), (303, "/", "no-referrer"))
       cookie = r.headers["Set-Cookie"].split(";")[0]
     with self.open("/", headers={"Cookie": cookie}) as r:
-      self.assertEqual(r.read().decode(), "<html>导航目的地</html>")   # the car's page
+      self.assertEqual(r.read(), b"<html>const JSAK='JSKEY123';</html>")
     with self.open("/api/state", headers={"Cookie": cookie}) as r:
       self.assertTrue(json.loads(r.read())["navigation"])
 
   def test_shortcut_post(self):
-    with self.open("/api/go", {"label": "家"}, {"X-Key": KEY}) as r:
+    with self.open("/api/destination", {"latitude": 32.1, "longitude": 118.9, "name": "家"}, {"X-Key": KEY}) as r:
       self.assertEqual(json.loads(r.read())["destination"]["place_name"], "家")
     with self.assertRaises(urllib.error.HTTPError) as e:
       self.open("/api/other", {}, {"X-Key": KEY})
     self.assertEqual(e.exception.code, 404)
-
-  def test_page_from_here_with_the_map_key(self):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), navrelay.handler(navrelay.Relay(self.car, None), KEY, "JSKEY123",
-                                                                    b"<html>const JSAK='__BAIDU_JS_AK__';</html>"))
-    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
-    self.addCleanup(server.server_close)
-    self.addCleanup(server.shutdown)
-    self.car.online = False
-    req = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/", headers={"X-Key": KEY})
-    with urllib.request.urlopen(req, timeout=5) as r:
-      self.assertEqual(r.read(), b"<html>const JSAK='JSKEY123';</html>")
 
   def test_key_required(self):
     self.assertFalse(navrelay.key_ok("", ""))

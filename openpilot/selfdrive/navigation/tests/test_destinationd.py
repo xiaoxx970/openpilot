@@ -258,6 +258,21 @@ class TestRoute(unittest.TestCase):
     self.assertEqual((r["route"]["source"], r["route"]["distance"], r["car"]), ("nav", 650, [32.0, 118.8, 90.]))
     self.assertEqual(self.queries, [])
 
+  def test_preview_before_sending(self):
+    lat, lon = latlon(800, 0)
+    self.dest.clear()
+    r = self.dest.preview_route({"latitude": lat, "longitude": lon})
+    self.assertEqual(r["route"]["distance"], 800)
+    self.dest.set_destination({"latitude": lat, "longitude": lon})
+    self.dest.route()
+    self.assertEqual(len(self.queries), 1)   # the same place: the preview is reused
+    self.assertTrue("error" in self.dest.preview_route({"latitude": "x"}))
+
+  def test_nav_only(self):
+    self.assertIsNone(self.dest.route(nav_only=True)["route"])
+    self.assertEqual(self.queries, [])
+    self.assertEqual(self.dest.state()["position"], self.dest.near())
+
   def test_preview_budget(self):
     self.enterContext(patch.object(self.dest.daily, "left", return_value=0))
     self.assertTrue("error" in self.dest.route())
@@ -274,7 +289,7 @@ class TestServer(unittest.TestCase):
     self.addCleanup(server.shutdown)
     url = f"http://127.0.0.1:{server.server_port}"
     with urllib.request.urlopen(url + "/") as r:
-      self.assertTrue("导航目的地" in r.read().decode())
+      self.assertTrue("搜地点" in r.read().decode())
     body = json.dumps({"latitude": 39.8946, "longitude": 116.322}).encode()
     req = urllib.request.Request(url + "/api/destination", body, {"Content-Type": "application/json"})
     with urllib.request.urlopen(req) as r:

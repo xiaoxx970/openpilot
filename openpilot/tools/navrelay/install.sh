@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Install or update navrelay on the server, behind a reverse proxy that does https (1Panel's openresty).
-# Run as root (sudo bash install.sh [port]) with navrelay.py and destination_page.html next to it. Listens on 127.0.0.1 only, plain http.
+# Run as root (sudo bash install.sh [port]) with navrelay.py, destination_page.html, destinationd.py, baidu_route.py and
+# baidu.py (road_events) next to it. Baidu's server AK/SK for search and previews: NAVRELAY_BAIDU_AK / NAVRELAY_BAIDU_SK in
+# the env file, kept across runs like the key. Listens on 127.0.0.1 only, plain http.
 # Keeps an existing key, which it never prints: read it in /etc/navrelay/navrelay.env.
 set -euo pipefail
 
@@ -14,6 +16,13 @@ id navrelay >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sb
 install -d -m 755 /opt/navrelay
 install -m 644 "$HERE/navrelay.py" /opt/navrelay/navrelay.py
 install -m 644 "$HERE/destination_page.html" /opt/navrelay/destination_page.html   # selfdrive/navigation/destination_page.html
+# destinationd's own code (pure python), from the same commit: selfdrive/navigation/{destinationd,baidu_route}.py, selfdrive/road_events/baidu.py
+LIB=/opt/navrelay/lib/openpilot
+install -d -m 755 "$LIB/selfdrive/navigation" "$LIB/selfdrive/road_events"
+for d in "$LIB" "$LIB/selfdrive" "$LIB/selfdrive/navigation" "$LIB/selfdrive/road_events"; do : > "$d/__init__.py"; done
+install -m 644 "$HERE/destinationd.py" "$HERE/baidu_route.py" "$LIB/selfdrive/navigation/"
+install -m 644 "$HERE/baidu.py" "$LIB/selfdrive/road_events/"
+install -m 644 "$HERE/destination_page.html" "$LIB/selfdrive/navigation/"   # destinationd reads it at import
 install -d -m 750 -o root -g navrelay "$ETC"
 install -d -m 700 -o navrelay -g navrelay /var/lib/navrelay
 
@@ -23,9 +32,11 @@ fi
 # everything but the keys is rewritten, so an older https setup is dropped
 KEY_LINE="$(grep '^NAVRELAY_KEY=' "$ETC/navrelay.env")"
 JS_LINE="$(grep '^NAVRELAY_JS_AK=' "$ETC/navrelay.env" || echo "NAVRELAY_JS_AK=${NAVRELAY_JS_AK:-}")"
+BAIDU_LINES="$(grep '^NAVRELAY_BAIDU_[AS]K=' "$ETC/navrelay.env" || true)"
 cat > "$ETC/navrelay.env" <<EOF
 $KEY_LINE
 $JS_LINE
+$BAIDU_LINES
 NAVRELAY_CAR=$CAR
 NAVRELAY_BIND=127.0.0.1
 NAVRELAY_PORT=$PORT
@@ -44,7 +55,8 @@ Wants=network-online.target
 [Service]
 User=navrelay
 EnvironmentFile=$ETC/navrelay.env
-ExecStart=/usr/bin/python3 -I /opt/navrelay/navrelay.py
+Environment=PYTHONPATH=/opt/navrelay/lib
+ExecStart=/usr/bin/python3 -s /opt/navrelay/navrelay.py
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

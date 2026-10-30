@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Navigation destinations from the public internet, for a phone that is not on Tailscale.
+"""Navigation destinations from the phone, the way comma connect did it: the server is the app, the car takes destinations.
 
-Runs on the user's server, which is on the tailnet with the car. It passes the car's destination page and its API
-(destinationd, port 8082, Tailscale only) through to the phone behind a secret key, and keeps the last destination
-sent while the car is offline until the car is back. It listens on 127.0.0.1, plain http, behind the server's reverse
-proxy (1Panel's openresty), which does https for the domain.
+Runs on the user's server, on the tailnet with the car, behind the server's reverse proxy (1Panel's openresty), which does
+https for the domain; it listens on 127.0.0.1, plain http.
 
-  phone --https + key--> openresty --> this relay --tailnet--> car destinationd
+  phone --https + key--> openresty --> this server --tailnet--> car destinationd (port 8082)
 
+- The page (NAVRELAY_PAGE, the car's selfdrive/navigation/destination_page.html) is served from here, with Baidu's browser
+  AK for its map (NAVRELAY_JS_AK) put in: it opens with the car offline, and changes to it need no install on the car.
+- Search, Baidu share links, route previews and the saved and recent places are done here, by destinationd's own code,
+  with a Baidu server AK of the server's own (NAVRELAY_BAIDU_AK / _SK). Without one, search and shares go to the car.
+- The destination goes to the car's /api/destination at once, or waits here while the car is offline (newest wins,
+  QUEUE_TTL), sent when it is back: comma's "next destination". While the car navigates, its route comes from navd.
 - Key: typed into the page once (kept as a cookie), or the X-Key header (iOS Shortcuts). Never in a URL: access logs,
   history and Referer headers would keep it.
-- Car offline: share / go / destination / clear are queued (newest wins, QUEUE_TTL), the page, places and route are the
-  last ones seen, /api/state shows the queued one, search answers that the car is offline.
-- The page is served from here (NAVRELAY_PAGE, the car's selfdrive/navigation/destination_page.html), the car's own copy
-  without one. Its map takes Baidu's browser AK (NAVRELAY_JS_AK), put into the page here: it is kept off the car.
-- Python stdlib only. Config from the environment, see install.sh.
+- Python stdlib plus destinationd, baidu_route and road_events/baidu (pure python), copied next to it by install.sh.
 """
 from __future__ import annotations
 
@@ -28,46 +28,59 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-QUEUED = ("/api/share", "/api/go", "/api/destination", "/api/clear")
-PASSED = QUEUED + ("/api/search", "/api/places", "/api/places/delete")
+from openpilot.selfdrive.navigation import destinationd
+
 CAR_TIMEOUT = 8.       # s for one call to the car
-RETRY = 20.            # s between deliveries of the queued destination
+POLL_TIMEOUT = 3.      # s for the background look at the car
+POLL = 10.             # s between looks at the car: its state, the queued destination
 QUEUE_TTL = 3 * 3600.  # s a queued destination waits for the car
 MAX_BODY = 4096
 COOKIE = "navkey"
+POSTS = ("/api/search", "/api/destination", "/api/clear", "/api/share", "/api/go", "/api/places", "/api/places/delete",
+         "/api/preview")
 
 
 class Car:
   """The car's destinationd over the tailnet."""
-  def __init__(self, url: str, timeout: float = CAR_TIMEOUT):
+  def __init__(self, url: str):
     self.url = url.rstrip("/")
-    self.timeout = timeout
 
-  def call(self, path: str, body: dict | None = None) -> tuple[int, bytes, str]:
-    """(status, body, content type); raises OSError when the car is not reachable."""
+  def call(self, path: str, body: dict | None = None, timeout: float = CAR_TIMEOUT) -> dict:
+    """The car's JSON answer; OSError when it is not reachable or does not answer with one."""
     data = None if body is None else json.dumps(body, ensure_ascii=False).encode()
     req = urllib.request.Request(self.url + path, data, {"Content-Type": "application/json"} if data else {})
     try:
-      with urllib.request.urlopen(req, timeout=self.timeout) as r:
-        return r.status, r.read(), r.headers.get("Content-Type", "application/json")
-    except urllib.error.HTTPError as e:
-      return e.code, e.read(), e.headers.get("Content-Type", "text/plain")
+      with urllib.request.urlopen(req, timeout=timeout) as r:
+        answer = json.loads(r.read())
+    except urllib.error.HTTPError as e:   # an older destinationd without the path, or one turning us away
+      raise OSError(f"car answered {e.code}") from e
+    except ValueError as e:
+      raise OSError("car answered no JSON") from e
+    if not isinstance(answer, dict):
+      raise OSError("car answered no JSON object")
+    return answer
+
+
+def as_car_body(destination: dict) -> dict:
+  """NavDestination -> the body of the car's /api/destination."""
+  return {"latitude": destination["latitude"], "longitude": destination["longitude"],
+          "name": destination.get("place_name") or "", "address": destination.get("place_address") or ""}
 
 
 class Relay:
+  """What the server knows of the car, and the destination waiting for it. Kept in a file across restarts."""
   def __init__(self, car, state_dir: str | None = None, clock=time.time):  # noqa: TID251  # queued times are kept across restarts
     self.car = car
     self.clock = clock
-    self.lock = threading.Lock()
+    self.lock = threading.RLock()
     self.state_path = os.path.join(state_dir, "navrelay.json") if state_dir else None
-    self.pending: dict | None = None   # {"path", "body", "time"}
-    self.page: bytes | None = None     # the car's page, last seen
-    self.places: dict | None = None    # the car's places, last seen
-    self.route: dict | None = None     # the car's route for the page's map, last seen
+    self.pending: dict | None = None     # {"path", "body", "time"}: /api/destination or /api/clear
+    self.car_state: dict = {}            # the car's /api/state, last seen
+    self.route: dict | None = None       # navd's route, last seen
     self.last_seen: float | None = None
+    self.online = False
     self._load()
 
-  # the car's answers kept for when it is offline
   def _load(self):
     if self.state_path is None or not os.path.exists(self.state_path):
       return
@@ -76,88 +89,55 @@ class Relay:
         s = json.load(f)
     except (OSError, ValueError):
       return
-    self.pending, self.places, self.route, self.last_seen = s.get("pending"), s.get("places"), s.get("route"), s.get("last_seen")
-    self.page = s["page"].encode() if s.get("page") else None
+    self.pending, self.car_state, self.route, self.last_seen = s.get("pending"), s.get("car") or {}, s.get("route"), s.get("last_seen")
 
   def _save(self):
     if self.state_path is None:
       return
-    s = {"pending": self.pending, "places": self.places, "route": self.route, "last_seen": self.last_seen,
-         "page": self.page.decode() if self.page else None}
     tmp = self.state_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-      json.dump(s, f, ensure_ascii=False)
+      json.dump({"pending": self.pending, "car": self.car_state, "route": self.route, "last_seen": self.last_seen}, f, ensure_ascii=False)
     os.replace(tmp, self.state_path)
 
-  def _seen(self, path: str, status: int, body: bytes):
-    self.last_seen = self.clock()
-    if status != 200:
-      return
-    if path == "/":
-      self.page = body
-    elif path in ("/api/places", "/api/places/delete", "/api/route"):
-      try:
-        answer = json.loads(body)
-      except ValueError:
-        return
-      if path == "/api/route":
-        self.route = answer if answer.get("route") else None
-      else:
-        self.places = answer
+  def _call(self, path: str, body: dict | None = None, timeout: float = CAR_TIMEOUT) -> dict:
+    try:
+      answer = self.car.call(path, body, timeout)
+    except OSError:
+      self.online = False
+      raise
+    self.online, self.last_seen = True, self.clock()
+    return answer
 
   def _expired(self) -> bool:
     return self.pending is not None and self.clock() - self.pending["time"] > QUEUE_TTL
 
-  def offline_state(self) -> dict:
-    s = {"navigation": True, "destination": None, "onroad": False, "offline": True, "last_seen": self.last_seen}
-    if self.pending is not None and not self._expired():
-      p, b = self.pending["path"], self.pending["body"]
-      if p == "/api/destination":
-        name = b.get("name") or f"{b.get('latitude')}, {b.get('longitude')}"
-      elif p == "/api/go":
-        name = b.get("label") or ""
-      elif p == "/api/share":
-        name = (b.get("text") or "").split("http")[0].strip()[:40] or "分享的地点"
-      else:
-        name = None
-      if name is not None:
-        s["destination"] = {"place_name": f"等车上线：{name}", "latitude": 0., "longitude": 0.}
-      s["queued"] = p
-    return s
-
-  def handle(self, method: str, path: str, body: dict | None) -> tuple[int, bytes, str]:
-    try:
-      status, out, kind = self.car.call(path, body if method == "POST" else None)
-    except OSError:
-      return self._offline(method, path, body)
+  # NavDestination as the server sees it: the one waiting for the car, else the car's
+  def destination(self) -> dict | None:
     with self.lock:
-      self._seen(path, status, out)
-      if status == 200 and path in QUEUED:
-        self.pending = None   # a newer destination replaces the queued one
+      if self.pending is not None and not self._expired():
+        if self.pending["path"] == "/api/clear":
+          return None
+        b = self.pending["body"]
+        d = {"latitude": b["latitude"], "longitude": b["longitude"]}
+        d.update({k: v for k, v in (("place_name", b.get("name")), ("place_address", b.get("address"))) if v})
+        return d
+      d = self.car_state.get("destination")
+      return d if isinstance(d, dict) else None
+
+  def position(self) -> tuple[float, float] | None:
+    car = (self.route or {}).get("car") if self.online else None
+    pos = car or self.car_state.get("position")
+    return (float(pos[0]), float(pos[1])) if pos else None
+
+  def send(self, path: str, body: dict):
+    """A destination (or a clear) for the car: now, or when it is back."""
+    with self.lock:
+      self.pending = {"path": path, "body": body, "time": self.clock()}
       self._save()
-    return status, out, kind
+    if self.online:   # else the next poll finds out: no phone waits on a car that is off
+      self.deliver(POLL_TIMEOUT)
 
-  def _offline(self, method: str, path: str, body: dict | None) -> tuple[int, bytes, str]:
-    with self.lock:
-      if method == "POST" and path in QUEUED:
-        self.pending = {"path": path, "body": body or {}, "time": self.clock()}
-        self._save()
-        return _json({**self.offline_state(), "queued_until_online": True})
-      if path == "/":
-        if self.page is None:
-          return 503, "车不在线，还没存过页面。车开机后再打开一次。".encode(), "text/plain; charset=utf-8"
-        return 200, self.page, "text/html; charset=utf-8"
-      if path == "/api/state":
-        return _json(self.offline_state())
-      if path == "/api/places":
-        return _json(self.places or {"saved": {}, "recent": []})
-      if path == "/api/route":   # the last one seen, as it was then
-        return _json({**self.route, "offline": True} if self.route else {"route": None, "car": None, "error": "车不在线"})
-      if path == "/api/search":
-        return _json({"error": "车不在线，现在搜不了。可以粘贴百度地图分享链接，或者点常用地点，车上线后自动发过去。"})
-      return _json({"error": "车不在线"})
-
-  def deliver(self) -> bool:
+  def deliver(self, timeout: float = CAR_TIMEOUT) -> bool:
     """Send the queued destination to the car, True once it is no longer queued."""
     with self.lock:
       if self.pending is None:
@@ -168,23 +148,154 @@ class Relay:
         return True
       p = dict(self.pending)
     try:
-      status, out, _ = self.car.call(p["path"], p["body"])
+      answer = self._call(p["path"], p["body"], timeout)
     except OSError:
       return False
     with self.lock:
-      self.last_seen = self.clock()
+      if "error" not in answer:
+        self.car_state = answer
       if self.pending is not None and self.pending["time"] == p["time"]:
         self.pending = None   # sent, or the car turned it down (an answer is final)
       self._save()
     return True
 
-  def run_deliveries(self, stop: threading.Event):
-    while not stop.wait(RETRY):
-      self.deliver()
+  def poll(self):
+    """The car's state, then the queued destination."""
+    try:
+      answer = self._call("/api/state", timeout=POLL_TIMEOUT)
+    except OSError:
+      return
+    with self.lock:
+      self.car_state = answer
+      self._save()
+    self.deliver()
+
+  def live(self) -> dict | None:
+    """navd's route while the car navigates, None otherwise (and with the car offline: the page shows the last one then)."""
+    if not self.online:
+      return None
+    try:
+      answer = self._call("/api/route?nav=1", timeout=POLL_TIMEOUT)
+    except OSError:
+      return None
+    with self.lock:
+      self.route = answer
+      self._save()
+    return answer if answer.get("route") else None
 
 
-def _json(obj: dict, status: int = 200) -> tuple[int, bytes, str]:
-  return status, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8"
+class CarParams:
+  """The params destinationd's Destinations reads and writes, here: NavDestination goes to the car."""
+  def __init__(self, relay: Relay):
+    self.relay = relay
+
+  def get(self, key: str):
+    if key == "NavDestination":
+      return self.relay.destination()
+    if key == "LastGPSPositionLLK":
+      pos = self.relay.position()
+      return json.dumps({"latitude": pos[0], "longitude": pos[1]}) if pos else None
+    return None
+
+  def get_bool(self, key: str) -> bool:
+    if key == "NavigationEnabled":
+      return bool(self.relay.car_state.get("navigation", True))
+    if key == "IsOffroad":
+      return not (self.relay.online and self.relay.car_state.get("onroad"))
+    return False
+
+  def put(self, key: str, value: dict, block: bool = False):
+    assert key == "NavDestination"
+    self.relay.send("/api/destination", as_car_body(value))
+
+  def remove(self, key: str):
+    assert key == "NavDestination"
+    self.relay.send("/api/clear", {})
+
+
+class App:
+  """The page's API: Destinations on the server, the car behind it."""
+  def __init__(self, relay: Relay, dest: destinationd.Destinations):
+    self.relay, self.dest = relay, dest
+
+  def state(self) -> dict:
+    return self._with_car(self.dest.state())
+
+  def _with_car(self, answer: dict) -> dict:
+    """A state answer, with what the server knows of the car added."""
+    if "navigation" not in answer:
+      return answer   # an error, places, search results
+    with self.relay.lock:
+      queued = self.relay.pending is not None and not self.relay._expired()
+    return {**answer, "car_online": self.relay.online, "queued": queued, "last_seen": self.relay.last_seen}
+
+  def route(self) -> dict:
+    live = self.relay.live()
+    if live is not None:
+      return live
+    if self.dest.keys is None:   # previews need a key: the car's then
+      try:
+        return self.relay._call("/api/route")
+      except OSError:
+        pass
+    r = self.dest.route()
+    if not self.relay.online and r.get("route") is None and self.relay.route and self.relay.route.get("route"):
+      return {**self.relay.route, "offline": True}   # the last navd route seen
+    return r
+
+  def get(self, path: str) -> dict | None:
+    if path == "/api/state":
+      return self.state()
+    if path == "/api/places":
+      return self.dest.places.as_dict()
+    if path == "/api/route":
+      return self.route()
+    return None
+
+  def post(self, path: str, body: dict) -> dict:
+    return self._with_car(self._post(path, body))
+
+  def _post(self, path: str, body: dict) -> dict:
+    d = self.dest
+    if d.keys is None and path in ("/api/search", "/api/share"):   # no key here: the car searches
+      try:
+        answer = self.relay._call(path, body)
+      except OSError:
+        return {"error": "车不在线，现在搜不了"}
+      if path == "/api/share":
+        self.relay.poll()
+      return answer
+    if path == "/api/search":
+      return d.search(str(body.get("query") or ""))
+    if path == "/api/destination":
+      return d.set_destination(body)
+    if path == "/api/clear":
+      return d.clear()
+    if path == "/api/share":
+      return d.share(str(body.get("text") or ""))
+    if path == "/api/go":
+      return d.go(str(body.get("label") or ""))
+    if path == "/api/places":
+      return d.save_place(body)
+    if path == "/api/preview":
+      if d.keys is None:
+        return {"route": None, "error": "服务器没有百度 Key，预览不了"}
+      return d.preview_route(body)
+    return d.delete_place(body)
+
+  def import_places(self):
+    """The car's saved and recent places, once, when the server has none yet."""
+    p = self.dest.places
+    if p.saved or p.recent:
+      return
+    try:
+      car = self.relay._call("/api/places", timeout=POLL_TIMEOUT)
+    except OSError:
+      return
+    for label, place in (car.get("saved") or {}).items():
+      p.save(label, place)
+    for place in reversed(car.get("recent") or []):
+      p.visited(place)
 
 
 def key_ok(key: str, given: str | None) -> bool:
@@ -208,7 +319,9 @@ button{{font-size:16px;padding:10px 14px;border-radius:8px;border:0;background:#
 """
 
 
-def handler(relay: Relay, key: str, js_ak: str = "", page: bytes | None = None):
+def handler(app: App, key: str, page: bytes, js_ak: str = ""):
+  page = page.replace(b"__BAIDU_JS_AK__", js_ak.encode()) if js_ak else page
+
   class Handler(BaseHTTPRequestHandler):
     server_version = "navrelay"
     timeout = 15.   # s; a stalled phone does not hold a thread
@@ -226,6 +339,9 @@ def handler(relay: Relay, key: str, js_ak: str = "", page: bytes | None = None):
         self.send_header("Location", location)
       self.end_headers()
       self.wfile.write(body)
+
+    def _json(self, obj: dict):
+      self._send(200, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
     def _given(self) -> str | None:
       if self.headers.get("X-Key"):
@@ -253,16 +369,14 @@ def handler(relay: Relay, key: str, js_ak: str = "", page: bytes | None = None):
         else:
           self._send(403, b"", "text/plain")
         return
-      if path not in ("/", "/api/state", "/api/places", "/api/route"):
-        self._send(404, b"", "text/plain")
+      if path == "/":
+        self._send(200, page, "text/html; charset=utf-8")
         return
-      if path == "/" and page is not None:   # the page lives here: it opens with the car offline, and changes to it need no install
-        status, body, kind = 200, page, "text/html; charset=utf-8"
+      answer = app.get(path)
+      if answer is None:
+        self._send(404, b"", "text/plain")
       else:
-        status, body, kind = relay.handle("GET", path, None)
-      if path == "/" and js_ak:   # the map's browser AK lives here, not on the car
-        body = body.replace(b"__BAIDU_JS_AK__", js_ak.encode())
-      self._send(status, body, kind)
+        self._json(answer)
 
     def do_POST(self):
       path = urllib.parse.urlsplit(self.path).path
@@ -281,10 +395,10 @@ def handler(relay: Relay, key: str, js_ak: str = "", page: bytes | None = None):
         body = json.loads(self._body() or b"{}")
       except ValueError:
         body = None
-      if path not in PASSED or not isinstance(body, dict):
-        self._send(400 if path in PASSED else 404, b"", "text/plain")
+      if path not in POSTS or not isinstance(body, dict):
+        self._send(400 if path in POSTS else 404, b"", "text/plain")
         return
-      self._send(*relay.handle("POST", path, body))
+      self._json(app.post(path, body))
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002  # keys and places stay off the logs
       pass
@@ -292,20 +406,36 @@ def handler(relay: Relay, key: str, js_ak: str = "", page: bytes | None = None):
   return Handler
 
 
+def keys_from_env() -> tuple[str, str] | None:
+  ak, sk = os.environ.get("NAVRELAY_BAIDU_AK", ""), os.environ.get("NAVRELAY_BAIDU_SK", "")
+  return (ak, sk) if ak and sk else None
+
+
 def main():
   key = os.environ.get("NAVRELAY_KEY", "")
   if len(key) < 24:
     raise SystemExit("NAVRELAY_KEY must be set, at least 24 characters")
-  relay = Relay(Car(os.environ.get("NAVRELAY_CAR", "http://100.69.175.43:8082")), os.environ.get("NAVRELAY_STATE", "/var/lib/navrelay"))
-  address = (os.environ.get("NAVRELAY_BIND", "127.0.0.1"), int(os.environ.get("NAVRELAY_PORT", "8089")))
+  state = os.environ.get("NAVRELAY_STATE", "/var/lib/navrelay")
+  relay = Relay(Car(os.environ.get("NAVRELAY_CAR", "http://100.69.175.43:8082")), state)
+  dest = destinationd.Destinations(CarParams(relay), keys_from_env(), count_file=os.path.join(state, "baidu_calls"),
+                                   places=destinationd.Places(os.path.join(state, "places.json")))
+  app = App(relay, dest)
+  with open(os.environ.get("NAVRELAY_PAGE", "/opt/navrelay/destination_page.html"), "rb") as f:
+    page = f.read()
   js_ak = os.environ.get("NAVRELAY_JS_AK", "")
-  page = None
-  if os.environ.get("NAVRELAY_PAGE"):
-    with open(os.environ["NAVRELAY_PAGE"], "rb") as f:
-      page = f.read()
-  server = ThreadingHTTPServer(address, handler(relay, key, js_ak if js_ak.isalnum() else "", page))
+  address = (os.environ.get("NAVRELAY_BIND", "127.0.0.1"), int(os.environ.get("NAVRELAY_PORT", "8089")))
+  server = ThreadingHTTPServer(address, handler(app, key, page, js_ak if js_ak.isalnum() else ""))
+  server.daemon_threads = True
   stop = threading.Event()
-  threading.Thread(target=relay.run_deliveries, args=(stop,), daemon=True).start()
+
+  def background():
+    while True:
+      relay.poll()
+      if relay.online:
+        app.import_places()
+      if stop.wait(POLL):
+        return
+  threading.Thread(target=background, daemon=True).start()
   try:
     server.serve_forever()
   finally:

@@ -1,32 +1,50 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>导航目的地</title>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>导航</title>
 <style>
-body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#0b1116;color:#e8eef2;max-width:640px}
-h1{font-size:20px;margin:0 0 12px}
-#state{background:#16222b;border-radius:10px;padding:12px;margin-bottom:12px;line-height:1.5}
-.muted{color:#93a4b0;font-size:14px}
-form{display:flex;gap:8px;margin-bottom:12px}
-input{flex:1;font-size:17px;padding:10px;border-radius:8px;border:1px solid #33454f;background:#0f1a21;color:#e8eef2}
-button{font-size:16px;padding:10px 14px;border-radius:8px;border:0;background:#2f8f5b;color:#fff}
-button.secondary{background:#3a4a55}
-.place{background:#16222b;border-radius:10px;padding:12px;margin-bottom:8px}
-.place b{display:block;margin-bottom:2px}
-.place button{margin-top:8px;margin-right:6px}
-h2{font-size:16px;margin:16px 0 8px;color:#93a4b0}
-#saved{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
-#saved button{background:#25607f}
-#msg{color:#f2b36b;margin-bottom:8px}
-#map{height:45vh;border-radius:10px;margin-bottom:8px;display:none}
-#route{margin-bottom:12px}
+:root{--bg:#0b1116;--card:#16222b;--line:#2a3a45;--text:#e8eef2;--muted:#93a4b0;--accent:#2f8f5b;--warn:#f2b36b;--blue:#2d7ff9}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,system-ui,sans-serif;-webkit-tap-highlight-color:transparent}
+#map{position:fixed;inset:0;background:#0f1a21}
+body.nomap #map{display:none}
+#top{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top) + 10px) 12px 0;z-index:5}
+#f{display:flex;gap:8px}
+#q{flex:1;font-size:17px;padding:12px 14px;border-radius:12px;border:0;background:var(--card);color:var(--text);box-shadow:0 2px 10px #0008;outline:none}
+#chips{display:flex;gap:8px;margin-top:8px;overflow-x:auto;scrollbar-width:none}
+.chip{flex:none;font-size:15px;padding:8px 14px;border-radius:18px;border:0;background:var(--card);color:var(--text);box-shadow:0 2px 8px #0008}
+#sheet{position:fixed;left:0;right:0;bottom:0;max-height:55vh;overflow-y:auto;z-index:5;background:var(--bg);border-radius:16px 16px 0 0;
+  padding:14px 16px calc(env(safe-area-inset-bottom) + 14px);box-shadow:0 -4px 16px #0009}
+body.nomap #sheet{position:static;max-height:none;border-radius:0;box-shadow:none;padding-top:0}
+body.nomap #top{position:static}
+body.nomap #spacer{display:block}
+#spacer{display:none;height:12px}
+.status{font-size:14px;color:var(--muted);display:flex;align-items:center;gap:6px;margin-bottom:10px}
+.dot{width:8px;height:8px;border-radius:4px;background:#666}.dot.on{background:#2fb36b}
+.title{font-size:20px;font-weight:600;margin:2px 0}
+.sub{font-size:14px;color:var(--muted);margin-bottom:8px}
+.eta{font-size:16px;margin:8px 0}
+.eta b{font-size:22px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+button.main{flex:1;font-size:17px;padding:13px;border-radius:12px;border:0;background:var(--accent);color:#fff;font-weight:600}
+button.sec{font-size:15px;padding:13px 14px;border-radius:12px;border:0;background:#2a3a45;color:var(--text)}
+.item{display:flex;gap:10px;align-items:flex-start;padding:11px 2px;border-top:1px solid var(--line)}
+.item:first-child{border-top:0}
+.num{flex:none;width:22px;height:22px;border-radius:11px;background:var(--blue);color:#fff;font-size:13px;text-align:center;line-height:22px;margin-top:1px}
+.item .n{font-size:16px}.item .a{font-size:13px;color:var(--muted)}
+h3{font-size:13px;color:var(--muted);font-weight:500;margin:14px 0 2px;letter-spacing:.5px}
+.msg{color:var(--warn);font-size:14px;margin:6px 0}
+.legend{font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:14px;height:4px;border-radius:2px;margin:0 3px 2px 8px;vertical-align:middle}
 </style></head><body>
-<h1>导航目的地</h1>
-<div id="map"></div><div id="route" class="muted"></div>
-<div id="state">读取中…</div>
-<div id="saved"></div>
-<form id="f"><input id="q" placeholder="搜地点或粘贴分享链接" autocomplete="off"><button>搜索</button></form>
-<div id="msg"></div><div id="list"></div>
-<h2>最近去过</h2><div id="recent" class="muted">还没有</div>
+<div id="map"></div>
+<div id="top">
+  <form id="f"><input id="q" placeholder="搜地点，或粘贴百度地图分享" autocomplete="off" enterkeyhint="search"></form>
+  <div id="chips"></div>
+</div>
+<div id="spacer"></div>
+<div id="sheet"><div id="body">读取中…</div></div>
 <script>
 const $=id=>document.getElementById(id);
 const JSAK='__BAIDU_JS_AK__';   // the browser AK, filled in by navrelay; without one there is no map
@@ -52,86 +70,119 @@ function wgsOf(p){   // BD-09 -> GCJ-02 -> WGS-84
 const COLORS={1:'#2fb36b',2:'#f2c94c',3:'#eb5757',4:'#9b1c1c'};
 const CAR_ICON='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22">'
   +'<circle cx="11" cy="11" r="8" fill="#2d7ff9" stroke="#fff" stroke-width="3"/></svg>');
-let map=null,routeLayer=[],resultLayer=[],routeKey='';
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function km(m){return m>=1000?(m/1000).toFixed(m>=100000?0:1)+' 公里':Math.round(m)+' 米'}
+function mins(s){return s>=3600?Math.floor(s/3600)+' 小时 '+Math.round(s%3600/60)+' 分':Math.max(1,Math.round(s/60))+' 分钟'}
+function ago(t){const m=Math.round((Date.now()/1000-t)/60);return m<1?'刚刚':m<60?m+' 分钟前':Math.round(m/60)+' 小时前'}
+function nameOf(p){return p.name||p.place_name||(p.latitude.toFixed(5)+', '+p.longitude.toFixed(5))}
+async function api(path,body){
+  const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});
+  if(r.status===403){location.reload();throw new Error('key')}
+  return r.json()}
+
+// view: 'home' (the car and its destination), 'results' (a search), 'place' (one place, its preview, send it)
+let state=null,places={saved:{},recent:[]},route=null,view='home',results=[],picked=null,preview=null,msg='';
+let map=null,layer=[],marks=[],fitKey='';
+
+function statusLine(){
+  if(!state)return'';
+  const on=state.car_online!==false;
+  let t=on?(state.onroad?'车已启动':'车已连上，没启动'):'车不在线'+(state.last_seen?'，最后在线 '+ago(state.last_seen):'');
+  return '<div class="status"><span class="dot'+(on?' on':'')+'"></span>'+esc(t)+'</div>'}
+function etaLine(r){
+  if(!r||!r.route)return r&&r.error?'<div class="msg">'+esc(r.error)+'</div>':'';
+  const ro=r.route,head=ro.source==='nav'?'剩余 ':'';
+  let h='<div class="eta">'+(ro.duration!=null?'<b>'+mins(ro.duration)+'</b> · ':'')+(ro.distance!=null?head+km(ro.distance):'')+'</div>';
+  if(ro.source==='preview'&&ro.age>90)h+='<div class="sub">'+Math.round(ro.age/60)+' 分钟前的路况</div>';
+  if(r.offline)h+='<div class="sub">车离线前的最后一条路线</div>';
+  return h+'<div class="legend">路况<i style="background:#2fb36b"></i>畅通<i style="background:#f2c94c"></i>缓行<i style="background:#eb5757"></i>拥堵</div>'}
+function list(items,act){return items.map((p,i)=>'<div class="item" onclick="'+act+'('+i+')">'+(act==='pickResult'?'<span class="num">'+(i+1)+'</span>':'')
+  +'<div><div class="n">'+esc(nameOf(p))+'</div><div class="a">'+esc(p.address||'')+'</div></div></div>').join('')}
+
+function render(){
+  $('chips').innerHTML=Object.keys(places.saved).map(k=>'<button class="chip" data-k="'+esc(k)+'" onclick="pickSaved(this.dataset.k)">'
+    +(k==='家'?'🏠 ':k==='公司'?'💼 ':'⭐ ')+esc(k)+'</button>').join('');
+  let h='';
+  if(view==='results'){
+    h='<div class="row" style="margin:0 0 6px"><button class="sec" onclick="home()">返回</button></div>'
+      +(msg?'<div class="msg">'+esc(msg)+'</div>':'')+(results.length?list(results,'pickResult'):(msg?'':'<div class="sub">没找到</div>'));
+  }else if(view==='place'){
+    const p=picked,saved=Object.keys(places.saved).find(k=>same(places.saved[k],p));
+    h='<div class="title">'+esc(nameOf(p))+'</div><div class="sub">'+esc(p.address||'')+(saved?' · 常用地点：'+esc(saved):'')+'</div>'
+      +(preview?etaLine(preview):'<div class="sub">路线预览中…</div>')+(msg?'<div class="msg">'+esc(msg)+'</div>':'')
+      +'<div class="row"><button class="main" onclick="send()">'+(state&&state.car_online===false?'发到车上（车上线后自动导航）':'发到车上')+'</button></div>'
+      +'<div class="row"><button class="sec" onclick="home()">返回</button>'+(saved?'':'<button class="sec" onclick="savePicked()">存为常用地点</button>')+'</div>';
+  }else{
+    h=statusLine();
+    const d=state&&state.destination;
+    if(!state)h+='读取中…';
+    else if(!state.navigation)h+='<div class="msg">车上没开导航：设置 &gt; 开发者 &gt; navigation (alpha)</div>';
+    if(d){
+      h+='<div class="sub">'+(state.queued?'等车上线后发送':(route&&route.route&&route.route.source==='nav'?'导航中':'目的地'))+'</div>'
+        +'<div class="title">'+esc(nameOf(d))+'</div>'+(d.place_address?'<div class="sub">'+esc(d.place_address)+'</div>':'')
+        +etaLine(route)+(msg?'<div class="msg">'+esc(msg)+'</div>':'')
+        +'<div class="row"><button class="sec" onclick="clearDest()">取消导航</button>'
+        +(state.saved_as?'':'<button class="sec" onclick="saveCur()">存为常用地点</button>')+'</div>';
+    }else if(state){h+='<div class="sub">还没有目的地。搜一个地点，或者在地图上点一下。</div>'+(msg?'<div class="msg">'+esc(msg)+'</div>':'')}
+    if(places.recent.length)h+='<h3>最近去过</h3>'+list(places.recent,'pickRecent');
+  }
+  $('body').innerHTML=h;
+  draw();
+}
+function same(a,b){return a&&b&&Math.abs(a.latitude-b.latitude)<1e-4&&Math.abs(a.longitude-b.longitude)<1e-4}
+
+// the map
 function mapReady(){
-  $('map').style.display='block';
+  document.body.classList.remove('nomap');
   map=new BMapGL.Map('map');map.centerAndZoom(new BMapGL.Point(118.7969,32.0603),12);map.enableScrollWheelZoom(true);
   try{map.setTrafficOn()}catch(e){}
-  map.addEventListener('click',e=>{const w=wgsOf(e.latlng);
-    const box=document.createElement('div');box.innerHTML='<button>设为目的地</button>';
-    box.firstChild.onclick=()=>{map.closeInfoWindow();setPlace({name:'地图上选的点',address:'',latitude:w[0],longitude:w[1]})};
-    map.openInfoWindow(new BMapGL.InfoWindow(box,{width:120,height:40}),e.latlng)});
-  loadRoute(true)}
+  map.addEventListener('click',e=>{if(e.overlay)return;const w=wgsOf(e.latlng);pick({name:'地图上选的点',address:'',latitude:w[0],longitude:w[1]})});
+  fitKey='';draw()}
+function draw(){
+  if(!map)return;
+  layer.forEach(o=>map.removeOverlay(o));layer=[];
+  const all=[],add=o=>{map.addOverlay(o);layer.push(o)};
+  const r=view==='place'?preview:(view==='home'?route:null);
+  if(r&&r.route)for(const seg of r.route.segments){const pts=seg.points.map(p=>bdPoint(p[0],p[1]));all.push(...pts);
+    add(new BMapGL.Polyline(pts,{strokeColor:COLORS[seg.status]||COLORS[1],strokeWeight:7,strokeOpacity:0.95}))}
+  const car=(route&&route.car)||(state&&state.position);
+  if(car){const c=bdPoint(car[0],car[1]);add(new BMapGL.Marker(c,{icon:new BMapGL.Icon(CAR_ICON,new BMapGL.Size(22,22))}));if(view!=='results')all.push(c)}
+  const target=view==='place'?picked:(view==='home'&&state?state.destination:null);
+  if(target){const p=bdPoint(target.latitude,target.longitude);add(new BMapGL.Marker(p));all.push(p)}
+  if(view==='results')results.forEach((p,i)=>{const pt=bdPoint(p.latitude,p.longitude);const m=new BMapGL.Marker(pt);
+    m.addEventListener('click',()=>pickResult(i));add(m);all.push(pt);
+    const l=new BMapGL.Label(String(i+1),{position:pt,offset:new BMapGL.Size(-4,-34)});
+    l.setStyle({border:'0',background:'transparent',color:'#fff',fontWeight:'bold'});add(l)});
+  const key=view+'|'+(target?target.latitude+','+target.longitude:'')+'|'+(r&&r.route?r.route.source:'')+'|'+results.length;
+  if(all.length&&key!==fitKey){const sheet=$('sheet').offsetHeight,top=$('top').offsetHeight;
+    map.setViewport(all,{margins:[top+20,30,sheet+20,30]});fitKey=key}}
 if(!JSAK.startsWith('__')){const sc=document.createElement('script');
   sc.src='https://api.map.baidu.com/api?type=webgl&v=1.0&ak='+encodeURIComponent(JSAK)+'&callback=mapReady';document.head.appendChild(sc)}
-function km(m){return m>=1000?(m/1000).toFixed(1)+' km':Math.round(m)+' m'}
-function mins(s){return s>=3600?Math.floor(s/3600)+' 小时 '+Math.round(s%3600/60)+' 分钟':Math.max(1,Math.round(s/60))+' 分钟'}
-async function loadRoute(fit){
-  let r;try{r=await api('/api/route')}catch(e){return}
-  const ro=r.route;
-  if(!ro){$('route').textContent=r.error||''}
-  else{const head=ro.source==='nav'?'导航中：剩余 ':'路线预览：全程 ';
-    $('route').textContent=(ro.distance!=null?head+km(ro.distance):'')+(ro.duration!=null?'，约 '+mins(ro.duration):'')
-      +(ro.source==='preview'&&ro.age>60?'（'+Math.round(ro.age/60)+' 分钟前的路况）':'')}
-  if(!map)return;
-  routeLayer.forEach(o=>map.removeOverlay(o));routeLayer=[];
-  const all=[];
-  if(ro)for(const seg of ro.segments){const pts=seg.points.map(p=>bdPoint(p[0],p[1]));all.push(...pts);
-    const line=new BMapGL.Polyline(pts,{strokeColor:COLORS[seg.status]||COLORS[1],strokeWeight:6,strokeOpacity:0.9});
-    map.addOverlay(line);routeLayer.push(line)}
-  if(r.car){const c=bdPoint(r.car[0],r.car[1]);const m=new BMapGL.Marker(c,{icon:new BMapGL.Icon(CAR_ICON,new BMapGL.Size(22,22))});
-    map.addOverlay(m);routeLayer.push(m);all.push(c)}
-  const d=window.current;
-  if(d){const p=bdPoint(d.latitude,d.longitude);const m=new BMapGL.Marker(p);map.addOverlay(m);routeLayer.push(m);all.push(p)}
-  const key=(ro?ro.source+ro.distance:'')+(d?d.latitude+','+d.longitude:'');
-  if(all.length&&(fit||key!==routeKey))map.setViewport(all,{margins:[30,30,30,30]});
-  routeKey=key}
-function showResults(list){
-  if(!map)return;resultLayer.forEach(o=>map.removeOverlay(o));resultLayer=[];
-  const pts=list.map((p,i)=>{const pt=bdPoint(p.latitude,p.longitude);const m=new BMapGL.Marker(pt,{title:p.name});
-    m.addEventListener('click',()=>pick(i));map.addOverlay(m);resultLayer.push(m);
-    const l=new BMapGL.Label(String(i+1),{position:pt,offset:new BMapGL.Size(-4,-34)});
-    l.setStyle({border:'0',background:'transparent',color:'#fff',fontWeight:'bold'});map.addOverlay(l);resultLayer.push(l);return pt});
-  if(pts.length)map.setViewport(pts,{margins:[30,30,30,30]})}
-async function setPlace(p){const r=await api('/api/destination',p);if(r.error){$('msg').textContent=r.error;return}
-  show(r);places();$('msg').textContent='已设为目的地：'+(p.name||'地图上选的点');loadRoute(true)}
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-async function api(path,body){
-  const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});return r.json()}
-function show(s){
-  let h='';
-  if(!s.navigation)h+='<div class="muted">导航没开：设置 &gt; 开发者 &gt; navigation (alpha)</div>';
-  const d=s.destination;window.current=d&&d.latitude?d:null;
-  if(d){h+='<div>当前目的地：<b>'+esc(d.place_name||(d.latitude.toFixed(5)+', '+d.longitude.toFixed(5)))+'</b></div>'
-    +'<button class="secondary" onclick="clearDest()">取消导航</button>'
-    +(s.saved_as?' <span class="muted">（常用地点：'+esc(s.saved_as)+'）</span>':' <button class="secondary" onclick="saveCur()">存为常用地点</button>')}
-  else h+='<div>还没有目的地</div>';
-  h+='<div class="muted">'+(s.onroad?'车已启动':'车没启动：熄火时目的地会被清掉，comma 重启也会')+'</div>';
-  $('state').innerHTML=h;
-}
-function card(p,act){return '<div class="place"><b>'+esc(p.name||(p.latitude.toFixed(5)+', '+p.longitude.toFixed(5)))+'</b><span class="muted">'
-  +esc(p.address||'')+'</span><br>'+act+'</div>'}
-function showPlaces(r){
-  window.saved=r.saved;window.recent=r.recent;
-  $('saved').innerHTML=Object.keys(r.saved).map(k=>'<button onclick="go(this.dataset.k)" data-k="'+esc(k)+'">'+esc(k)+'</button>').join('');
-  $('recent').innerHTML=r.recent.length?r.recent.map((p,i)=>card(p,'<button onclick="goRecent('+i+')">去这里</button>')).join(''):'还没有';
-}
-async function places(){showPlaces(await api('/api/places'))}
-async function go(k){const r=await api('/api/go',{label:k});if(r.error){$('msg').textContent=r.error;return}
-  show(r);places();$('msg').textContent='已设为目的地：'+k;loadRoute(true)}
-async function goRecent(i){setPlace(window.recent[i])}
+else document.body.classList.add('nomap');
+
+// actions
+function home(){view='home';picked=null;preview=null;msg='';render();loadRoute()}
+async function pick(p){view='place';picked=p;preview=null;msg='';render();
+  try{preview=await api('/api/preview',p)}catch(e){preview={route:null,error:'预览失败'}}if(picked===p)render()}
+function pickResult(i){pick(results[i])}
+function pickRecent(i){pick(places.recent[i])}
+function pickSaved(k){pick(places.saved[k])}
+async function send(){const r=await api('/api/destination',picked);if(r.error){msg=r.error;render();return}
+  state=r;route=preview;view='home';picked=null;preview=null;msg=r.queued?'车不在线，上线后会自动开始导航':'';loadPlaces();render();loadRoute()}
+async function clearDest(){state=await api('/api/clear',{});route=null;msg='';render()}
 async function saveCur(){const k=prompt('起个名字，比如 家、公司');if(!k)return;const r=await api('/api/places',{label:k});
-  if(r.error){$('msg').textContent=r.error;return}showPlaces(r)}
-async function refresh(){try{show(await api('/api/state'))}catch(e){$('state').textContent='连不上车'}}
-async function clearDest(){show(await api('/api/clear',{}));loadRoute()}
-async function pick(i){const p=window.places[i];$('list').innerHTML='';showResults([]);setPlace(p)}
-$('f').onsubmit=async e=>{e.preventDefault();$('msg').textContent='搜索中…';$('list').innerHTML='';
-  const r=await api('/api/search',{query:$('q').value});
-  if(r.error){$('msg').textContent=r.error;return}
-  window.places=r.places;showResults(r.places);$('msg').textContent=r.places.length?'':'没找到';
-  $('list').innerHTML=r.places.map((p,i)=>'<div class="place"><b>'+(i+1)+'. '+esc(p.name)+'</b><span class="muted">'+esc(p.address)+'</span><br>'
-    +'<button onclick="pick('+i+')">设为目的地</button></div>').join('')};
-refresh();places();setInterval(refresh,5000);
-if(JSAK.startsWith('__'))loadRoute(true);
+  if(r.error){msg=r.error;render();return}places=r;refresh()}
+async function savePicked(){const k=prompt('起个名字，比如 家、公司');if(!k)return;const r=await api('/api/places',{label:k,place:picked});
+  if(r.error){msg=r.error;render();return}places=r;render()}
+$('f').onsubmit=async e=>{e.preventDefault();$('q').blur();const q=$('q').value.trim();if(!q)return;
+  view='results';results=[];msg='搜索中…';render();
+  const r=await api('/api/search',{query:q});msg=r.error||'';results=r.places||[];
+  if(results.length===1&&/https?:\/\//.test(q))return pick(results[0]);   // a pasted share: straight to it
+  render()};
+async function refresh(){try{state=await api('/api/state')}catch(e){return}if(view==='home')render()}
+async function loadPlaces(){try{places=await api('/api/places')}catch(e){}}
+async function loadRoute(){if(view!=='home')return;try{route=await api('/api/route')}catch(e){return}if(view==='home')render()}
+(async()=>{await Promise.all([refresh(),loadPlaces()]);render();loadRoute()})();
+setInterval(()=>{if(document.visibilityState==='visible')refresh()},5000);
 setInterval(()=>{if(document.visibilityState==='visible')loadRoute()},15000);
 </script></body></html>

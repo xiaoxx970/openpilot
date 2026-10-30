@@ -40,7 +40,8 @@ ALLOWED = (ip_network("100.64.0.0/10"), ip_network("fd7a:115c:a1e0::/48"), ip_ne
 MAX_RESULTS = 10
 INTERFACE = "tailscale0"
 PREVIEW_STALE = 600.     # s a route preview is shown before it is planned again: its traffic ages
-PREVIEW_MIN_GAP = 30.    # s between two previews
+PREVIEW_MIN_GAP = 3.     # s between two previews: a tap at a time, not a script
+PREVIEW_KEEP = 8         # places whose preview is kept, for going back and forth between them
 MAX_ROUTE_POINTS = 600   # a route on the page, thinned: it goes over cellular
 SIOCGIFADDR = 0x8915
 
@@ -224,7 +225,7 @@ class Destinations:
     self.params = params
     self.live = live      # navd's route while driving: {points, jams, distance, duration, car}, None without one
     self.clock = clock
-    self.preview: dict | None = None
+    self.previews: list[dict] = []   # newest first
     self.preview_tried = -math.inf
     self.keys = keys
     self.fetch = fetch
@@ -237,7 +238,7 @@ class Destinations:
     current = self.current()
     return {"destination": destination, "saved_as": self.places.label_of(current) if current is not None else None,
             "navigation": self.params.get_bool("NavigationEnabled"),
-            "onroad": not self.params.get_bool("IsOffroad"), "search": self.keys is not None}
+            "onroad": not self.params.get_bool("IsOffroad"), "search": self.keys is not None, "position": self.near()}
 
   def near(self) -> tuple[float, float] | None:
     try:
@@ -338,8 +339,9 @@ class Destinations:
     self.params.remove("NavDestination")
     return self.state()
 
-  def route(self) -> dict:
-    """The route to show on the page: navd's while it navigates, else a preview from where the car is."""
+  def route(self, nav_only: bool = False) -> dict:
+    """The route to show on the page: navd's while it navigates, else a preview from where the car is (not with nav_only:
+    navrelay plans its previews itself)."""
     live = self.live() if self.live is not None else None
     if live is not None:
       return {"route": {"source": "nav", "segments": route_segments(live["points"], live["jams"]), "distance": live["distance"],
@@ -347,7 +349,7 @@ class Destinations:
     near = self.near()
     car = [near[0], near[1], None] if near is not None else None
     d = self.current()
-    if d is None:
+    if d is None or nav_only:
       return {"route": None, "car": car}
     preview = self._preview(d, near)
     if "error" in preview:
@@ -355,14 +357,27 @@ class Destinations:
     return {"route": {"source": "preview", "segments": preview["segments"], "distance": preview["distance"],
                       "duration": preview["duration"], "age": round(self.clock() - preview["time"])}, "car": car}
 
+  def preview_route(self, body: dict) -> dict:
+    """A preview to a place before it becomes the destination (the page shows it first)."""
+    place = as_place(body)
+    if place is None:
+      return {"error": "坐标不对"}
+    near = self.near()
+    p = self._preview(place, near)
+    if "error" in p:
+      return {"route": None, "error": p["error"]}
+    return {"route": {"source": "preview", "segments": p["segments"], "distance": p["distance"], "duration": p["duration"],
+                      "age": round(self.clock() - p["time"])}, "car": [near[0], near[1], None] if near else None}
+
   def _preview(self, d: dict, near: tuple[float, float] | None) -> dict:
-    p, now = self.preview, self.clock()
-    if p is not None and same_place(p["to"], d) and now - p["time"] < PREVIEW_STALE:
+    now = self.clock()
+    p = next((q for q in self.previews if same_place(q["to"], d)), None)
+    if p is not None and now - p["time"] < PREVIEW_STALE:
       return p
     if near is None:
       return {"error": "还不知道车在哪，没法预览路线"}
     if now - self.preview_tried < PREVIEW_MIN_GAP:
-      return p if p is not None and same_place(p["to"], d) else {"error": "稍后再试"}
+      return p if p is not None else {"error": "稍后再试"}
     self.preview_tried = now
     resp = self._baidu(baidu.ROUTE_PATH, baidu.route_params(near[0], near[1], 0., 0., (d["latitude"], d["longitude"])), "preview")
     if "error" in resp:
@@ -371,9 +386,10 @@ class Destinations:
     if parsed is None:
       return {"error": "百度没有给出路线"}
     steps, points, jams = parsed
-    self.preview = {"to": d, "time": now, "segments": route_segments(points, jams),
-                    "distance": round(sum(st["distance"] for st in steps)), "duration": round(sum(st["duration"] for st in steps))}
-    return self.preview
+    p = {"to": d, "time": now, "segments": route_segments(points, jams),
+         "distance": round(sum(st["distance"] for st in steps)), "duration": round(sum(st["duration"] for st in steps))}
+    self.previews = ([p] + [q for q in self.previews if not same_place(q["to"], d)])[:PREVIEW_KEEP]
+    return p
 
 
 PAGE = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "destination_page.html"), encoding="utf-8").read()   # also served
@@ -410,7 +426,7 @@ def handler(dest: Destinations):
       elif path == "/api/places":
         self._json(dest.places.as_dict())
       elif path == "/api/route":
-        self._json(dest.route())
+        self._json(dest.route(nav_only="nav=1" in urllib.parse.urlsplit(self.path).query))
       else:
         self._send(404, b"", "text/plain")
 
@@ -439,6 +455,8 @@ def handler(dest: Destinations):
         self._json(dest.save_place(body))
       elif path == "/api/places/delete":
         self._json(dest.delete_place(body))
+      elif path == "/api/preview":
+        self._json(dest.preview_route(body))
       else:
         self._send(404, b"", "text/plain")
 
