@@ -72,6 +72,14 @@ class TestDestinations(unittest.TestCase):
     self.assertTrue("error" in no_keys.search("北京西站"))
     self.assertEqual(no_keys.search("39.8946,116.3220")["places"][0]["longitude"], 116.322)
 
+  def test_search_bias_without_a_position(self):
+    self.params.values.pop("LastGPSPositionLLK")
+    self.dest.search("x")
+    self.assertFalse("location" in urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[-1]).query))
+    self.dest.places.save("家", {"name": "家", "address": "", "latitude": 32.0, "longitude": 118.8})
+    self.dest.search("x")
+    self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[-1]).query)["location"][0], "32.000000,118.800000")
+
   def test_daily_budget(self):
     self.enterContext(patch.object(self.dest.daily, "left", return_value=0))
     self.assertTrue("error" in self.dest.search("北京西站"))

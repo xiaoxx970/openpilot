@@ -247,6 +247,14 @@ class Destinations:
     except (ValueError, KeyError, TypeError):
       return None
 
+  def bias(self) -> tuple[float, float] | None:
+    """Where searches look first: the car, else its destination, else a saved place (navrelay may not know where the car is)."""
+    near = self.near()
+    if near is not None:
+      return near
+    place = self.current() or next(iter(self.places.saved.values()), None)
+    return (place["latitude"], place["longitude"]) if place is not None else None
+
   def _baidu(self, path: str, params: list, kind: str = "place") -> dict:
     """One API call within the daily budget: the answer, or {"error": ...}."""
     if self.keys is None:
@@ -273,7 +281,7 @@ class Destinations:
     if SHARE_URL.search(query):
       place = self.share_place(query)
       return {"places": [place]} if "error" not in place else place
-    resp = self._baidu(SUGGESTION_PATH, suggestion_params(query[:64], self.near()))
+    resp = self._baidu(SUGGESTION_PATH, suggestion_params(query[:64], self.bias()))
     return resp if "error" in resp else {"places": parse_suggestions(resp)}
 
   def share_place(self, text: str) -> dict:
