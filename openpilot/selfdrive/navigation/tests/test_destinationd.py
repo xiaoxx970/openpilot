@@ -122,11 +122,13 @@ class TestShares(unittest.TestCase):
 
     def fetch(pq):
       self.queries.append(pq)
-      return DETAIL
+      return SUGGESTIONS if pq.startswith(destinationd.SUGGESTION_PATH) else DETAIL
+
+    self.redirects = {}
 
     def resolve(url):
       self.resolved.append(url)
-      return TARGET
+      return self.redirects.get(url, TARGET)
     self.dest = destinationd.Destinations(self.params, ("ak-test", "sk-test"), fetch, count_file=None, resolve=resolve)
 
   def test_baidu_share_becomes_the_destination(self):
@@ -147,8 +149,37 @@ class TestShares(unittest.TestCase):
 
   def test_other_hosts_are_not_fetched(self):
     self.assertIsNone(destinationd.share_uid("https://example.com/?uid=bda99fec8a4b6f474e776ef3", resolve=self._no_resolve))
-    self.assertTrue("error" in self.dest.share("随便一段文字"))
+    self.assertIsNone(destinationd.link_place("https://example.com/?ll=32.0,118.8", resolve=self._no_resolve))
+    self.assertTrue("error" in self.dest.share("https://example.com/a"))
     self.assertEqual((self.queries, self.resolved), ([], []))
+
+  def test_apple_maps_link(self):
+    p = destinationd.link_place("https://maps.apple.com/?ll=32.052,118.783&q=%E6%96%B0%E8%A1%97%E5%8F%A3", resolve=self._no_resolve)
+    self.assertEqual(p["name"], "新街口")
+    self.assertAlmostEqual(p["latitude"], 32.052 + 0.0022, delta=0.001)   # GCJ-02 -> WGS-84: ~250 m off in Nanjing
+    self.assertAlmostEqual(p["longitude"], 118.783 - 0.0052, delta=0.001)
+
+  def test_amap_links(self):
+    p = destinationd.link_place("https://uri.amap.com/marker?position=118.783,32.052&name=X", resolve=self._no_resolve)
+    self.assertEqual(p["name"], "X")
+    self.assertAlmostEqual(p["latitude"], 32.0542, delta=0.001)   # lon,lat in amap's
+    self.redirects["https://surl.amap.com/abc"] = "https://www.amap.com/place/B0FF?p=B0FF,32.052,118.783,%E5%AE%B6,addr"
+    p = destinationd.link_place("https://surl.amap.com/abc", resolve=lambda u: self.redirects[u])
+    self.assertEqual(p["name"], "家")
+    self.assertAlmostEqual(p["longitude"], 118.7778, delta=0.001)
+
+  def test_apple_short_link_followed(self):
+    self.redirects["https://maps.apple/p/x1"] = "https://maps.apple.com/place?coordinate=32.052,118.783&name=Y"
+    state = self.dest.share("Y https://maps.apple/p/x1")
+    self.assertEqual(state["destination"]["place_name"], "Y")
+    self.assertEqual(self.queries, [])
+
+  def test_location_text_searched(self):
+    state = self.dest.share("南京市玄武区中山路18号\n中国")   # a Shortcut's 位置, as its address
+    self.assertTrue(self.queries[0].startswith(destinationd.SUGGESTION_PATH))
+    self.assertEqual(state["destination"]["place_name"], SUGGESTIONS["result"][0]["name"])
+    self.dest.share("地点 https://maps.apple.com/?address=%E5%8D%97%E4%BA%AC&q=Z")   # a link with only a name
+    self.assertTrue("query=Z" in self.queries[1])
 
   def test_search_box_takes_a_share(self):
     places = self.dest.search(SHARE)["places"]

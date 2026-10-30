@@ -35,6 +35,10 @@ PLACES_FILE = "/data/navigation/places.json"   # saved places by label, recent d
 MAX_RECENT = 8
 SHARE_URL = re.compile(r"https?://(?:j\.)?map\.baidu\.com/[^\s\"'<>]+")
 UID = re.compile(r"uid(?:=|%3D)([0-9a-f]{24})")
+ANY_URL = re.compile(r"https?://[^\s\"'<>]+")
+MAP_HOSTS = {"maps.apple.com", "maps.apple", "surl.amap.com", "uri.amap.com", "www.amap.com", "amap.com", "ditu.amap.com",
+             "m.amap.com", "wb.amap.com", "map.qq.com", "apis.map.qq.com"}   # links from these are opened: GCJ-02 coordinates
+PAIR = re.compile(r"^\s*(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)")   # "lat,lon", or amap's "lon,lat"
 COUNT_FILE = "/data/baidu_place_calls"
 ALLOWED = (ip_network("100.64.0.0/10"), ip_network("fd7a:115c:a1e0::/48"), ip_network("127.0.0.0/8"), ip_network("::1/128"))
 MAX_RESULTS = 10
@@ -133,6 +137,47 @@ def share_uid(text: str, resolve=redirect_target) -> str | None:
   if uid is None and urllib.parse.urlsplit(url).hostname == "j.map.baidu.com":
     uid = UID.search(resolve(url))
   return uid.group(1) if uid else None
+
+
+def link_place(url: str, resolve=redirect_target) -> dict | None:
+  """The place in an Apple Maps, Amap or Tencent Maps link, following up to two redirects of a short link: WGS-84 with
+  "latitude" when the link has coordinates (GCJ-02 in China, as all three use), else only a "name" to search, else None."""
+  for _ in range(3):
+    parts = urllib.parse.urlsplit(url)
+    if parts.hostname not in MAP_HOSTS:
+      return None
+    q = dict(urllib.parse.parse_qsl(parts.query))
+    if parts.fragment:   # amap's web links keep them after the #
+      q = {**dict(urllib.parse.parse_qsl(parts.fragment.split("?")[-1])), **q}
+    marker = dict(kv.split(":", 1) for kv in q.get("marker", "").split(";") if ":" in kv)   # tencent: coord:lat,lng;title:...
+    name = q.get("name") or q.get("title") or marker.get("title") or ("" if PAIR.match(q.get("q", "")) else q.get("q", ""))
+    at, lon_first = None, False
+    for key in ("ll", "coordinate", "coord", "sll", "q", "daddr"):   # lat,lon
+      if PAIR.match(q.get(key, "")):
+        at = q[key]
+        break
+    if at is None and PAIR.match(marker.get("coord", "")):
+      at = marker["coord"]
+    if at is None and "p" in q and len(q["p"].split(",")) >= 3:   # amap: poiid,lat,lon,name,address
+      fields = q["p"].split(",")
+      at, name = ",".join(fields[1:3]), name or (fields[3] if len(fields) > 3 else "")
+    for key in ("position", "to", "dest"):   # amap: lon,lat[,name]
+      if at is None and PAIR.match(q.get(key, "")):
+        at, lon_first = q[key], True
+        name = name or ",".join(q[key].split(",")[2:])
+    if at is not None:
+      a, b = (float(v) for v in PAIR.match(at).groups())
+      lat, lon = baidu.gcj02_to_wgs84(*((b, a) if lon_first else (a, b)))
+      if -90 <= lat <= 90 and -180 <= lon <= 180:
+        return {"name": name, "address": q.get("address", ""), "latitude": round(lat, 6), "longitude": round(lon, 6)}
+    name = name or q.get("address", "")
+    if name:
+      return {"name": name, "address": q.get("address", "")}
+    target = resolve(url)
+    if not target:
+      return None
+    url = urllib.parse.urljoin(url, target)
+  return None
 
 
 def parse_detail(resp: dict) -> dict | None:
@@ -289,23 +334,35 @@ class Destinations:
     pasted = parse_coordinates(query)
     if pasted is not None:
       return {"places": [{"name": query, "address": "", "latitude": pasted[0], "longitude": pasted[1]}]}
-    if SHARE_URL.search(query):
+    if ANY_URL.search(query):
       place = self.share_place(query)
       return {"places": [place]} if "error" not in place else place
     resp = self._baidu(SUGGESTION_PATH, suggestion_params(query[:64], self.bias(phone)))
     return resp if "error" in resp else {"places": parse_suggestions(resp)}
 
   def share_place(self, text: str) -> dict:
-    """The place of a Baidu Maps share, or pasted coordinates, or {"error": ...}."""
+    """The place of a Baidu Maps share, another map app's link, pasted coordinates, or else the text's first match in a
+    search (an iOS Shortcut's 位置 arrives as its address), or {"error": ...}."""
     pasted = parse_coordinates(text.strip())
     if pasted is not None:
       return {"name": "", "address": "", "latitude": pasted[0], "longitude": pasted[1]}
     try:
       uid = share_uid(text, self.resolve)
+      if uid is None:
+        linked = next((p for p in (link_place(u, self.resolve) for u in ANY_URL.findall(text)) if p is not None), None)
     except Exception as e:
       return {"error": f"打不开分享链接（{type(e).__name__}）"}
     if uid is None:
-      return {"error": "没认出百度地图的分享链接"}
+      if linked is not None and "latitude" in linked:
+        return linked
+      words = linked["name"] if linked is not None else " ".join(ANY_URL.sub(" ", text).split())
+      if not words:
+        return {"error": "没认出地点"}
+      resp = self._baidu(SUGGESTION_PATH, suggestion_params(words[:64], self.bias(None)))
+      if "error" in resp:
+        return resp
+      found = parse_suggestions(resp)
+      return found[0] if found else {"error": f"没找到“{words[:20]}”"}
     resp = self._baidu(DETAIL_PATH, [("uid", uid), ("ret_coordtype", "gcj02ll"), ("scope", "1"), ("output", "json")])
     if "error" in resp:
       return resp
