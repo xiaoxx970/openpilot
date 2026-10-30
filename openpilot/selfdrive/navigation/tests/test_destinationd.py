@@ -133,10 +133,10 @@ class TestShares(unittest.TestCase):
 
   def test_uid_in_a_long_link_needs_no_redirect(self):
     long_link = "https://map.baidu.com/?newmap=1&s=inf%26uid%3Dbda99fec8a4b6f474e776ef3%26c%3D315"
-    self.assertEqual(destinationd.share_uid(long_link, resolve=self.fail), "bda99fec8a4b6f474e776ef3")
+    self.assertEqual(destinationd.share_uid(long_link, resolve=self._no_resolve), "bda99fec8a4b6f474e776ef3")
 
   def test_other_hosts_are_not_fetched(self):
-    self.assertIsNone(destinationd.share_uid("https://example.com/?uid=bda99fec8a4b6f474e776ef3", resolve=self.fail))
+    self.assertIsNone(destinationd.share_uid("https://example.com/?uid=bda99fec8a4b6f474e776ef3", resolve=self._no_resolve))
     self.assertTrue("error" in self.dest.share("随便一段文字"))
     self.assertEqual((self.queries, self.resolved), ([], []))
 
@@ -150,7 +150,11 @@ class TestShares(unittest.TestCase):
     self.dest.share(SHARE)
     self.assertEqual(self.dest.save_place({"label": "公司"})["saved"]["公司"]["name"], "大行宫")   # the current destination
     self.dest.clear()
-    self.assertEqual(self.dest.go("公司")["destination"]["place_name"], "大行宫")
+    state = self.dest.go("公司")
+    self.assertEqual((state["destination"]["place_name"], state["saved_as"]), ("大行宫", "公司"))
+    self.dest.set_destination({"latitude": 31.0, "longitude": 118.0, "name": "别处"})
+    self.dest.go("公司")
+    self.assertEqual([p["name"] for p in self.dest.places.recent], ["别处", "大行宫"])   # saved: not put first again
     self.assertTrue("error" in self.dest.save_place({"label": ""}))
     self.assertEqual(self.dest.delete_place({"label": "公司"})["saved"], {})
 
@@ -168,7 +172,7 @@ class TestShares(unittest.TestCase):
       places.save("家", {"name": "家", "address": "", "latitude": 32.0, "longitude": 118.8})
       self.assertEqual(destinationd.Places(path).saved["家"]["latitude"], 32.0)
 
-  def fail(self, url):
+  def _no_resolve(self, url):
     raise AssertionError(url)
 
 

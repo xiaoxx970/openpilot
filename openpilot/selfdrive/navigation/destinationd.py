@@ -129,6 +129,10 @@ def parse_detail(resp: dict) -> dict | None:
   return {"name": r.get("name") or "", "address": r.get("address") or "", "latitude": round(lat, 6), "longitude": round(lon, 6)}
 
 
+def same_place(a: dict, b: dict) -> bool:
+  return abs(a["latitude"] - b["latitude"]) < 1e-4 and abs(a["longitude"] - b["longitude"]) < 1e-4
+
+
 class Places:
   """Saved places by label and the recent destinations, in a file (in memory without one)."""
   def __init__(self, path: str | None = PLACES_FILE):
@@ -156,9 +160,13 @@ class Places:
     except OSError:
       pass
 
+  def label_of(self, place: dict) -> str | None:
+    return next((k for k, p in self.saved.items() if same_place(p, place)), None)
+
   def visited(self, place: dict):
-    same = lambda p: abs(p["latitude"] - place["latitude"]) < 1e-4 and abs(p["longitude"] - place["longitude"]) < 1e-4  # noqa: E731
-    self.recent = ([place] + [p for p in self.recent if not same(p)])[:MAX_RECENT]
+    if self.label_of(place) is not None:
+      return   # a saved place is one tap away already
+    self.recent = ([place] + [p for p in self.recent if not same_place(p, place)])[:MAX_RECENT]
     self._write()
 
   def save(self, label: str, place: dict):
@@ -196,7 +204,9 @@ class Destinations:
 
   def state(self) -> dict:
     destination = self.params.get("NavDestination")
-    return {"destination": destination, "navigation": self.params.get_bool("NavigationEnabled"),
+    current = self.current()
+    return {"destination": destination, "saved_as": self.places.label_of(current) if current is not None else None,
+            "navigation": self.params.get_bool("NavigationEnabled"),
             "onroad": not self.params.get_bool("IsOffroad"), "search": self.keys is not None}
 
   def near(self) -> tuple[float, float] | None:
@@ -322,7 +332,7 @@ h2{font-size:16px;margin:16px 0 8px;color:#93a4b0}
 <h1>导航目的地</h1>
 <div id="state">读取中…</div>
 <div id="saved"></div>
-<form id="f"><input id="q" placeholder="搜地点、粘贴百度地图分享或 纬度,经度" autocomplete="off"><button>搜索</button></form>
+<form id="f"><input id="q" placeholder="搜地点或粘贴分享链接" autocomplete="off"><button>搜索</button></form>
 <div id="msg"></div><div id="list"></div>
 <h2>最近去过</h2><div id="recent" class="muted">还没有</div>
 <script>
@@ -335,7 +345,8 @@ function show(s){
   if(!s.navigation)h+='<div class="muted">导航没开：设置 &gt; 开发者 &gt; navigation (alpha)</div>';
   const d=s.destination;
   if(d){h+='<div>当前目的地：<b>'+esc(d.place_name||(d.latitude.toFixed(5)+', '+d.longitude.toFixed(5)))+'</b></div>'
-    +'<button class="secondary" onclick="clearDest()">取消导航</button> <button class="secondary" onclick="saveCur()">存为常用地点</button>'}
+    +'<button class="secondary" onclick="clearDest()">取消导航</button>'
+    +(s.saved_as?' <span class="muted">（常用地点：'+esc(s.saved_as)+'）</span>':' <button class="secondary" onclick="saveCur()">存为常用地点</button>')}
   else h+='<div>还没有目的地</div>';
   h+='<div class="muted">'+(s.onroad?'车已启动':'车没启动：熄火时目的地会被清掉，comma 重启也会')+'</div>';
   $('state').innerHTML=h;
