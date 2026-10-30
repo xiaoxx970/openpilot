@@ -83,7 +83,9 @@ async function api(path,body){
 
 // view: 'home' (the car and its destination), 'results' (a search), 'place' (one place, its preview, send it)
 let state=null,places={saved:{},recent:[]},route=null,view='home',results=[],picked=null,preview=null,msg='';
-let map=null,layer=[],marks=[],fitKey='';
+let map=null,layer=[],marks=[],fitKey='',phone=null;   // phone: [lat, lon], the start when the car's position is not known
+function locate(){if(!navigator.geolocation)return;navigator.geolocation.watchPosition(p=>{phone=[p.coords.latitude,p.coords.longitude]},()=>{},
+  {enableHighAccuracy:false,maximumAge:120000,timeout:20000})}
 
 function statusLine(){
   if(!state)return'';
@@ -94,6 +96,7 @@ function etaLine(r){
   if(!r||!r.route)return r&&r.error?'<div class="msg">'+esc(r.error)+'</div>':'';
   const ro=r.route,head=ro.source==='nav'?'剩余 ':'';
   let h='<div class="eta">'+(ro.duration!=null?'<b>'+mins(ro.duration)+'</b> · ':'')+(ro.distance!=null?head+km(ro.distance):'')+'</div>';
+  if(ro.source==='preview'&&ro.from==='phone')h+='<div class="sub">从手机所在位置算的</div>';
   if(ro.source==='preview'&&ro.age>90)h+='<div class="sub">'+Math.round(ro.age/60)+' 分钟前的路况</div>';
   if(r.offline)h+='<div class="sub">车离线前的最后一条路线</div>';
   return h+'<div class="legend">路况<i style="background:#2fb36b"></i>畅通<i style="background:#f2c94c"></i>缓行<i style="background:#eb5757"></i>拥堵</div>'}
@@ -164,7 +167,8 @@ else document.body.classList.add('nomap');
 // actions
 function home(){view='home';picked=null;preview=null;msg='';render();loadRoute()}
 async function pick(p){view='place';picked=p;preview=null;msg='';render();
-  try{preview=await api('/api/preview',p)}catch(e){preview={route:null,error:'预览失败'}}if(picked===p)render()}
+  if(!phone&&!(state&&state.position))await new Promise(r=>setTimeout(r,1500));   // the first fix
+  try{preview=await api('/api/preview',Object.assign({},p,phone?{origin:phone}:{}))}catch(e){preview={route:null,error:'预览失败'}}if(picked===p)render()}
 function pickResult(i){pick(results[i])}
 function pickRecent(i){pick(places.recent[i])}
 function pickSaved(k){pick(places.saved[k])}
@@ -177,12 +181,14 @@ async function savePicked(){const k=prompt('起个名字，比如 家、公司')
   if(r.error){msg=r.error;render();return}places=r;render()}
 $('f').onsubmit=async e=>{e.preventDefault();$('q').blur();const q=$('q').value.trim();if(!q)return;
   view='results';results=[];msg='搜索中…';render();
-  const r=await api('/api/search',{query:q});msg=r.error||'';results=r.places||[];
+  const r=await api('/api/search',phone?{query:q,origin:phone}:{query:q});msg=r.error||'';results=r.places||[];
   if(results.length===1&&/https?:\/\//.test(q))return pick(results[0]);   // a pasted share: straight to it
   render()};
 async function refresh(){try{state=await api('/api/state')}catch(e){return}if(view==='home')render()}
 async function loadPlaces(){try{places=await api('/api/places')}catch(e){}}
-async function loadRoute(){if(view!=='home')return;try{route=await api('/api/route')}catch(e){return}if(view==='home')render()}
+async function loadRoute(){if(view!=='home')return;try{route=await api('/api/route'+(phone?'?from='+phone[0].toFixed(6)+','+phone[1].toFixed(6):''))}catch(e){return}
+  if(view==='home')render()}
+locate();
 (async()=>{await Promise.all([refresh(),loadPlaces()]);render();loadRoute()})();
 setInterval(()=>{if(document.visibilityState==='visible')refresh()},5000);
 setInterval(()=>{if(document.visibilityState==='visible')loadRoute()},15000);

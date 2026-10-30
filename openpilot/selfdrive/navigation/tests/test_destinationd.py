@@ -210,7 +210,7 @@ class TestRoute(unittest.TestCase):
 
     def fetch(pq):
       self.queries.append(pq)
-      return route_answer()
+      return SUGGESTIONS if pq.startswith(destinationd.SUGGESTION_PATH) else route_answer()
     self.dest = destinationd.Destinations(self.params, ("ak-test", "sk-test"), fetch, count_file=None, live=lambda: self.live,
                                           clock=self.clock)
     lat, lon = latlon(800, 0)
@@ -275,6 +275,18 @@ class TestRoute(unittest.TestCase):
     self.dest.route()
     self.assertEqual(len(self.queries), 1)   # the same place: the preview is reused
     self.assertTrue("error" in self.dest.preview_route({"latitude": "x"}))
+
+  def test_phone_as_the_start(self):
+    self.params.values.pop("LastGPSPositionLLK")
+    lat, lon = latlon(800, 0)
+    self.assertTrue("error" in self.dest.preview_route({"latitude": lat, "longitude": lon}))
+    self.clock.t += destinationd.PREVIEW_MIN_GAP
+    r = self.dest.preview_route({"latitude": lat, "longitude": lon, "origin": list(latlon(0, 0))})
+    self.assertEqual((r["route"]["from"], r["route"]["distance"], r["car"]), ("phone", 800, None))
+    self.assertEqual(self.dest.route(phone=latlon(0, 0))["route"]["from"], "phone")
+    self.assertIsNone(destinationd.as_origin(["x", 1]))
+    self.dest.search("x", phone=(31.5, 118.5))
+    self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[-1]).query)["location"][0], "31.500000,118.500000")
 
   def test_nav_only(self):
     self.assertIsNone(self.dest.route(nav_only=True)["route"])

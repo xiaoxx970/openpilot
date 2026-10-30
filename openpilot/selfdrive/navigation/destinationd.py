@@ -78,6 +78,15 @@ def parse_coordinates(text: str) -> tuple[float, float] | None:
   return (lat, lon) if -90 <= lat <= 90 and -180 <= lon <= 180 and math.isfinite(lat + lon) else None
 
 
+def as_origin(value) -> tuple[float, float] | None:
+  """A start the page sends ([lat, lon], WGS-84: the phone's position when the car's is not known), None when it is not one."""
+  try:
+    lat, lon = float(value[0]), float(value[1])
+  except (TypeError, ValueError, IndexError, KeyError):
+    return None
+  return (lat, lon) if -90 <= lat <= 90 and -180 <= lon <= 180 and math.isfinite(lat + lon) else None
+
+
 def suggestion_params(query: str, near: tuple[float, float] | None) -> list[tuple[str, str]]:
   params = [("query", query), ("region", "全国"), ("city_limit", "false"), ("ret_coordtype", "gcj02ll"), ("output", "json")]
   if near is not None:
@@ -247,9 +256,10 @@ class Destinations:
     except (ValueError, KeyError, TypeError):
       return None
 
-  def bias(self) -> tuple[float, float] | None:
-    """Where searches look first: the car, else its destination, else a saved place (navrelay may not know where the car is)."""
-    near = self.near()
+  def bias(self, phone: tuple[float, float] | None = None) -> tuple[float, float] | None:
+    """Where searches look first: the car, else the phone, else the destination, else a saved place (navrelay may not know
+    where the car is)."""
+    near = self.near() or phone
     if near is not None:
       return near
     place = self.current() or next(iter(self.places.saved.values()), None)
@@ -271,7 +281,7 @@ class Destinations:
       return {"error": f"百度返回 {resp.get('status')}"}
     return resp
 
-  def search(self, query: str) -> dict:
+  def search(self, query: str, phone: tuple[float, float] | None = None) -> dict:
     query = query.strip()[:200]
     if not query:
       return {"places": []}
@@ -281,7 +291,7 @@ class Destinations:
     if SHARE_URL.search(query):
       place = self.share_place(query)
       return {"places": [place]} if "error" not in place else place
-    resp = self._baidu(SUGGESTION_PATH, suggestion_params(query[:64], self.bias()))
+    resp = self._baidu(SUGGESTION_PATH, suggestion_params(query[:64], self.bias(phone)))
     return resp if "error" in resp else {"places": parse_suggestions(resp)}
 
   def share_place(self, text: str) -> dict:
@@ -347,9 +357,9 @@ class Destinations:
     self.params.remove("NavDestination")
     return self.state()
 
-  def route(self, nav_only: bool = False) -> dict:
-    """The route to show on the page: navd's while it navigates, else a preview from where the car is (not with nav_only:
-    navrelay plans its previews itself)."""
+  def route(self, nav_only: bool = False, phone: tuple[float, float] | None = None) -> dict:
+    """The route to show on the page: navd's while it navigates, else a preview from where the car is, or the phone without
+    the car's position (not with nav_only: navrelay plans its previews itself)."""
     live = self.live() if self.live is not None else None
     if live is not None:
       return {"route": {"source": "nav", "segments": route_segments(live["points"], live["jams"]), "distance": live["distance"],
@@ -359,23 +369,26 @@ class Destinations:
     d = self.current()
     if d is None or nav_only:
       return {"route": None, "car": car}
-    preview = self._preview(d, near)
+    preview = self._preview(d, near or phone)
     if "error" in preview:
       return {"route": None, "car": car, "error": preview["error"]}
     return {"route": {"source": "preview", "segments": preview["segments"], "distance": preview["distance"],
-                      "duration": preview["duration"], "age": round(self.clock() - preview["time"])}, "car": car}
+                      "duration": preview["duration"], "age": round(self.clock() - preview["time"]), "from": "car" if near else "phone"},
+            "car": car}
 
   def preview_route(self, body: dict) -> dict:
     """A preview to a place before it becomes the destination (the page shows it first)."""
     place = as_place(body)
     if place is None:
       return {"error": "坐标不对"}
-    near = self.near()
+    car = self.near()
+    near = car or as_origin(body.get("origin"))
     p = self._preview(place, near)
     if "error" in p:
       return {"route": None, "error": p["error"]}
     return {"route": {"source": "preview", "segments": p["segments"], "distance": p["distance"], "duration": p["duration"],
-                      "age": round(self.clock() - p["time"])}, "car": [near[0], near[1], None] if near else None}
+                      "age": round(self.clock() - p["time"]), "from": "car" if car else "phone"},
+            "car": [car[0], car[1], None] if car else None}
 
   def _preview(self, d: dict, near: tuple[float, float] | None) -> dict:
     now = self.clock()
@@ -383,7 +396,7 @@ class Destinations:
     if p is not None and now - p["time"] < PREVIEW_STALE:
       return p
     if near is None:
-      return {"error": "还不知道车在哪，没法预览路线"}
+      return {"error": "不知道车和手机在哪，没法预览路线（手机上允许网页使用位置就行）"}
     if now - self.preview_tried < PREVIEW_MIN_GAP:
       return p if p is not None else {"error": "稍后再试"}
     self.preview_tried = now
@@ -434,7 +447,9 @@ def handler(dest: Destinations):
       elif path == "/api/places":
         self._json(dest.places.as_dict())
       elif path == "/api/route":
-        self._json(dest.route(nav_only="nav=1" in urllib.parse.urlsplit(self.path).query))
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        phone = as_origin(query["from"][0].split(",")) if "from" in query else None
+        self._json(dest.route(nav_only="nav" in query, phone=phone))
       else:
         self._send(404, b"", "text/plain")
 
@@ -450,7 +465,7 @@ def handler(dest: Destinations):
         return
       path = urllib.parse.urlsplit(self.path).path
       if path == "/api/search":
-        self._json(dest.search(str(body.get("query") or "")))
+        self._json(dest.search(str(body.get("query") or ""), as_origin(body.get("origin"))))
       elif path == "/api/destination":
         self._json(dest.set_destination(body))
       elif path == "/api/clear":

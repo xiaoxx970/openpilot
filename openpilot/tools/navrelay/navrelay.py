@@ -229,7 +229,7 @@ class App:
       queued = self.relay.pending is not None and not self.relay._expired()
     return {**answer, "car_online": self.relay.online, "queued": queued, "last_seen": self.relay.last_seen}
 
-  def route(self) -> dict:
+  def route(self, phone: tuple[float, float] | None = None) -> dict:
     live = self.relay.live()
     if live is not None:
       return live
@@ -238,18 +238,19 @@ class App:
         return self.relay._call("/api/route")
       except OSError:
         pass
-    r = self.dest.route()
+    r = self.dest.route(phone=phone)
     if not self.relay.online and r.get("route") is None and self.relay.route and self.relay.route.get("route"):
       return {**self.relay.route, "offline": True}   # the last navd route seen
     return r
 
-  def get(self, path: str) -> dict | None:
+  def get(self, path: str, query: dict | None = None) -> dict | None:
     if path == "/api/state":
       return self.state()
     if path == "/api/places":
       return self.dest.places.as_dict()
     if path == "/api/route":
-      return self.route()
+      phone = (query or {}).get("from")
+      return self.route(destinationd.as_origin(phone[0].split(",")) if phone else None)
     return None
 
   def post(self, path: str, body: dict) -> dict:
@@ -266,7 +267,7 @@ class App:
         self.relay.poll()
       return answer
     if path == "/api/search":
-      return d.search(str(body.get("query") or ""))
+      return d.search(str(body.get("query") or ""), destinationd.as_origin(body.get("origin")))
     if path == "/api/destination":
       return d.set_destination(body)
     if path == "/api/clear":
@@ -372,7 +373,7 @@ def handler(app: App, key: str, page: bytes, js_ak: str = ""):
       if path == "/":
         self._send(200, page, "text/html; charset=utf-8")
         return
-      answer = app.get(path)
+      answer = app.get(path, urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query))
       if answer is None:
         self._send(404, b"", "text/plain")
       else:
