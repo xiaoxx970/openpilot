@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -95,6 +97,79 @@ class TestDestinations(unittest.TestCase):
     for address, ok in (("100.101.102.103", True), ("127.0.0.1", True), ("::ffff:100.64.0.1", True), ("fd7a:115c:a1e0::1", True),
                         ("192.168.43.10", False), ("10.0.0.2", False), ("::ffff:192.168.1.2", False), ("garbage", False)):
       self.assertEqual(destinationd.allowed(address), ok, address)
+
+
+DETAIL = {"status": 0, "message": "ok", "result": {"name": "大行宫", "location": {"lat": 32.041503, "lng": 118.79482},
+                                                  "address": "地铁2号线;地铁3号线", "uid": "bda99fec8a4b6f474e776ef3"}}
+SHARE = "大行宫 大行宫 https://j.map.baidu.com/f9/Z3J"
+TARGET = "https://map.baidu.com/mobile/webapp/search/search/qt=inf&uid=bda99fec8a4b6f474e776ef3/vt=map"
+
+
+class TestShares(unittest.TestCase):
+  def setUp(self):
+    self.params = FakeParams({"NavigationEnabled": True, "IsOffroad": True})
+    self.queries, self.resolved = [], []
+
+    def fetch(pq):
+      self.queries.append(pq)
+      return DETAIL
+
+    def resolve(url):
+      self.resolved.append(url)
+      return TARGET
+    self.dest = destinationd.Destinations(self.params, ("ak-test", "sk-test"), fetch, count_file=None, resolve=resolve)
+
+  def test_baidu_share_becomes_the_destination(self):
+    state = self.dest.share(SHARE)
+    self.assertEqual(self.resolved, ["https://j.map.baidu.com/f9/Z3J"])
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[0]).query)
+    self.assertEqual((urllib.parse.urlsplit(self.queries[0]).path, query["uid"][0]), (destinationd.DETAIL_PATH, "bda99fec8a4b6f474e776ef3"))
+    d = self.params.values["NavDestination"]
+    self.assertEqual(d["place_name"], "大行宫")
+    self.assertAlmostEqual(d["latitude"], 32.043565, places=4)   # WGS-84, as the Mac checked against the share
+    self.assertAlmostEqual(d["longitude"], 118.789626, places=4)
+    self.assertEqual(state["destination"], d)
+    self.assertEqual(self.dest.places.recent[0]["name"], "大行宫")
+
+  def test_uid_in_a_long_link_needs_no_redirect(self):
+    long_link = "https://map.baidu.com/?newmap=1&s=inf%26uid%3Dbda99fec8a4b6f474e776ef3%26c%3D315"
+    self.assertEqual(destinationd.share_uid(long_link, resolve=self.fail), "bda99fec8a4b6f474e776ef3")
+
+  def test_other_hosts_are_not_fetched(self):
+    self.assertIsNone(destinationd.share_uid("https://example.com/?uid=bda99fec8a4b6f474e776ef3", resolve=self.fail))
+    self.assertTrue("error" in self.dest.share("随便一段文字"))
+    self.assertEqual((self.queries, self.resolved), ([], []))
+
+  def test_search_box_takes_a_share(self):
+    places = self.dest.search(SHARE)["places"]
+    self.assertEqual(places[0]["name"], "大行宫")
+    self.assertFalse("NavDestination" in self.params.values)   # the page shows it first
+
+  def test_saved_places(self):
+    self.assertTrue("error" in self.dest.go("家"))
+    self.dest.share(SHARE)
+    self.assertEqual(self.dest.save_place({"label": "公司"})["saved"]["公司"]["name"], "大行宫")   # the current destination
+    self.dest.clear()
+    self.assertEqual(self.dest.go("公司")["destination"]["place_name"], "大行宫")
+    self.assertTrue("error" in self.dest.save_place({"label": ""}))
+    self.assertEqual(self.dest.delete_place({"label": "公司"})["saved"], {})
+
+  def test_recent_newest_first_without_repeats(self):
+    for i in range(10):
+      self.dest.set_destination({"latitude": 32 + i * 0.01, "longitude": 118.8, "name": f"p{i}"})
+    self.dest.set_destination({"latitude": 32.05, "longitude": 118.8, "name": "p5"})
+    names = [p["name"] for p in self.dest.places.recent]
+    self.assertEqual(names, ["p5", "p9", "p8", "p7", "p6", "p4", "p3", "p2"])
+
+  def test_places_kept_in_a_file(self):
+    with tempfile.TemporaryDirectory() as d:
+      path = os.path.join(d, "navigation", "places.json")
+      places = destinationd.Places(path)
+      places.save("家", {"name": "家", "address": "", "latitude": 32.0, "longitude": 118.8})
+      self.assertEqual(destinationd.Places(path).saved["家"]["latitude"], 32.0)
+
+  def fail(self, url):
+    raise AssertionError(url)
 
 
 class TestServer(unittest.TestCase):
