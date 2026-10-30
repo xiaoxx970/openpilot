@@ -107,7 +107,7 @@ function locate(){if(!navigator.geolocation)return;navigator.geolocation.watchPo
   {enableHighAccuracy:false,maximumAge:120000,timeout:20000})}
 function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>{e.style.display='none'},2000)}
 function focus(at){   // centred in the map left between the search bar and the sheet, not in the screen
-  if(!map)return;map.centerAndZoom(bdPoint(at[0],at[1]),Math.max(map.getZoom(),16));
+  if(!map)return;map.centerAndZoom(bdPoint(at[0],at[1]),Math.max(map.getZoom(),16),{noAnimation:true});   // an animation would undo the pan
   const top=$('top').offsetHeight,bottom=$('sheet').offsetHeight,dy=Math.round((top-bottom)/2);
   if(dy)map.panBy(0,dy,{noAnimation:true})}
 function carAt(){return (route&&route.car)||(state&&state.position)}
