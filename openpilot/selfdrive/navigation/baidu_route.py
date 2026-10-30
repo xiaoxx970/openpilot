@@ -2,8 +2,10 @@
 
 Baidu's steps are road by road with no maneuver of their own (has_guidance is false for this API): a step starts where the
 road name changes, often straight on. The maneuvers are taken from the geometry instead: a turn of TURN_MIN or more where
-two steps meet, the heading measured over HEADING_SPAN on either side. Turns inside a step (a cloverleaf, a bend) are the
-road itself and no maneuver. Each maneuver ends one navd step, as Mapbox's steps end at their banner's maneuver.
+two steps meet, the heading measured over HEADING_BEFORE before and HEADING_AFTER after (short: a ramp starts to curl at
+once). A turn back the other way within MERGE_GAP of a maneuver is part of it, as onto a side road (辅路) by a short ramp.
+Turns inside a step (a cloverleaf, a bend) are the road itself and no maneuver. Each maneuver ends one navd step, as
+Mapbox's steps end at their banner's maneuver.
 
 Pure python + road_events.baidu, no openpilot imports.
 """
@@ -11,8 +13,10 @@ import math
 
 from openpilot.selfdrive.road_events import baidu
 
-TURN_MIN = 25.        # deg of heading change where two of Baidu's steps meet that is a maneuver
-HEADING_SPAN = 30.    # m before and after a junction over which its headings are measured
+TURN_MIN = 20.        # deg of heading change where two of Baidu's steps meet that is a maneuver
+HEADING_BEFORE = 30.  # m before a junction over which the heading in is measured
+HEADING_AFTER = 15.   # m after it, for the heading out
+MERGE_GAP = 80.       # m after a maneuver in which one the other way is part of it
 UNNAMED = "无名路"
 
 
@@ -46,7 +50,7 @@ def point_at(path: baidu.Path, s: float) -> tuple[float, float]:
 
 def turn_at(path: baidu.Path, s: float) -> float:
   """Heading change in degrees, right positive, at s m along the path."""
-  before, at, after = (point_at(path, s + d) for d in (-HEADING_SPAN, 0., HEADING_SPAN))
+  before, at, after = (point_at(path, s + d) for d in (-HEADING_BEFORE, 0., HEADING_AFTER))
   if at in (before, after):
     return 0.
   return (heading(at, after) - heading(before, at) + 180.) % 360. - 180.
@@ -80,9 +84,12 @@ def parse(resp: dict) -> tuple[list[dict], list[tuple[float, float]], list[tuple
   maneuvers = []
   for i in range(1, len(starts)):
     turn = turn_at(path, starts[i])
-    if abs(turn) >= TURN_MIN:
-      road = next((r for r in roads[i:] if r), "")
-      maneuvers.append((starts[i], modifier(turn), road))
+    if abs(turn) < TURN_MIN:
+      continue
+    if maneuvers and starts[i] - maneuvers[-1][0] < MERGE_GAP and ("left" in maneuvers[-1][1]) != (turn < 0):
+      continue
+    road = next((r for r in roads[i:] if r), "")
+    maneuvers.append((starts[i], modifier(turn), road))
   maneuvers.append((length, "straight", "目的地"))
 
   def duration(a: float, b: float) -> float:

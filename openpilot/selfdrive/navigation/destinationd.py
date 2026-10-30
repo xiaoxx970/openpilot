@@ -3,13 +3,17 @@
 
 Open http://<the device's Tailscale name>:8082 on a phone in the same tailnet: search a place (Baidu's place suggestions,
 with the key file of road_events/baidu.py) or paste "latitude,longitude" (WGS-84), and it becomes NavDestination, the
-param navd routes to. Only Tailscale peers and the device itself get an answer; the keys never leave the device.
+param navd routes to. It listens on the Tailscale interface only (the cellular network's CGNAT shares Tailscale's address
+range, so the peer address alone would not do) and answers Tailscale peers only; the keys never leave the device.
 
 NavDestination is cleared when the car goes offroad and when manager starts: set it before or after starting the car,
 for the drive at hand.
 """
+import fcntl
 import json
 import math
+import socket
+import struct
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +26,8 @@ SUGGESTION_PATH = "/place/v2/suggestion"
 COUNT_FILE = "/data/baidu_place_calls"
 ALLOWED = (ip_network("100.64.0.0/10"), ip_network("fd7a:115c:a1e0::/48"), ip_network("127.0.0.0/8"), ip_network("::1/128"))
 MAX_RESULTS = 10
+INTERFACE = "tailscale0"
+SIOCGIFADDR = 0x8915
 
 
 def allowed(address: str) -> bool:
@@ -32,6 +38,15 @@ def allowed(address: str) -> bool:
   if ip.version == 6 and ip.ipv4_mapped is not None:
     ip = ip.ipv4_mapped
   return any(ip.version == net.version and ip in net for net in ALLOWED)
+
+
+def interface_ip(name: str = INTERFACE) -> str | None:
+  """The IPv4 address of a network interface, None without one."""
+  try:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+      return socket.inet_ntoa(fcntl.ioctl(s.fileno(), SIOCGIFADDR, struct.pack("256s", name.encode()[:15]))[20:24])
+  except OSError:
+    return None
 
 
 def parse_coordinates(text: str) -> tuple[float, float] | None:
@@ -62,7 +77,7 @@ def parse_suggestions(resp: dict) -> list[dict]:
     if "lat" not in loc or "lng" not in loc or not r.get("name"):
       continue   # bus lines and the like come without one
     lat, lon = baidu.gcj02_to_wgs84(float(loc["lat"]), float(loc["lng"]))
-    address = " ".join(p for p in (r.get("city"), r.get("district"), r.get("address")) if p)
+    address = r.get("address") or " ".join(p for p in (r.get("city"), r.get("district")) if p)   # its address has them already
     places.append({"name": r["name"], "address": address, "latitude": round(lat, 6), "longitude": round(lon, 6)})
   return places[:MAX_RESULTS]
 
@@ -78,7 +93,7 @@ class Destinations:
   def state(self) -> dict:
     destination = self.params.get("NavDestination")
     return {"destination": destination, "navigation": self.params.get_bool("NavigationEnabled"),
-            "onroad": self.params.get_bool("IsOnroad"), "search": self.keys is not None}
+            "onroad": not self.params.get_bool("IsOffroad"), "search": self.keys is not None}
 
   def near(self) -> tuple[float, float] | None:
     try:
@@ -118,7 +133,7 @@ class Destinations:
     destination = {"latitude": lat, "longitude": lon}
     if isinstance(body.get("name"), str) and body["name"]:
       destination["place_name"] = body["name"][:64]
-    self.params.put("NavDestination", destination)
+    self.params.put("NavDestination", destination, block=True)   # the answer reads it back
     return self.state()
 
   def clear(self) -> dict:
@@ -232,27 +247,20 @@ def handler(dest: Destinations):
   return Handler
 
 
-class DualStackServer(ThreadingHTTPServer):
-  daemon_threads = True
-
-  def server_bind(self):
-    import socket
-    self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-    super().server_bind()
-
-
 def main():
-  import socket
   from openpilot.common.params import Params
 
-  DualStackServer.address_family = socket.AF_INET6
   dest = Destinations(Params(), baidu.load_keys())
   while True:
-    try:
-      server = DualStackServer(("::", PORT), handler(dest))
-      break
-    except OSError:   # the port is still held by a previous run
-      time.sleep(5)
+    address = interface_ip()
+    if address is not None:
+      try:
+        server = ThreadingHTTPServer((address, PORT), handler(dest))
+        break
+      except OSError:   # the port is still held by a previous run
+        pass
+    time.sleep(10)   # Tailscale not up yet
+  server.daemon_threads = True
   server.serve_forever()
 
 
