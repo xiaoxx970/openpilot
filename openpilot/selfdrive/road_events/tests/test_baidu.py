@@ -547,10 +547,10 @@ class TestBaiduOnline(unittest.TestCase):
 
 
 class TestJamPrompt(unittest.TestCase):
-  def test_15_s_ahead_in_town_20_s_on_fast_roads(self):
+  def test_15_s_ahead_in_town_25_s_on_fast_roads(self):
     # at the car's speed, 150 m at the least, 500 m (1.5 km on fast roads) at the most
     for v, fast, window in ((5., False, JamPrompt.NEAR), (20., False, 15. * 20.), (40., False, JamPrompt.FAR),
-                            (5., True, JamPrompt.NEAR), (20., True, 20. * 20.), (30., True, 20. * 30.), (80., True, JamPrompt.FAR_FAST)):
+                            (5., True, JamPrompt.NEAR), (20., True, 25. * 20.), (30., True, 25. * 30.), (80., True, JamPrompt.FAR_FAST)):
       self.assertEqual(JamPrompt.window(v, fast), window)
 
   def test_announced_once_its_start_is_within_the_window(self):
@@ -609,9 +609,9 @@ class TestJamPrompt(unittest.TestCase):
 class TestJamAhead(unittest.TestCase):
   def test_on_for_the_jams_the_prompt_announces(self):
     self.assertEqual(JamAhead().update(0., [(280., 150., 3)], False, 20., True), (True, 280.))   # 15 s, 300 m at 20 m/s
-    self.assertEqual(JamAhead().update(0., [(580., 200., 2)], True, 30., True), (True, 580.))    # 20 s, 600 m at 30 m/s
+    self.assertEqual(JamAhead().update(0., [(730., 200., 2)], True, 30., True), (True, 730.))    # 25 s, 750 m at 30 m/s
     for jams, fast, v in (([(280., 150., 2)], False, 20.), ([(320., 150., 3)], False, 20.), ([(280., 80., 4)], False, 20.),
-                          ([(620., 200., 3)], True, 30.)):
+                          ([(770., 200., 3)], True, 30.)):
       self.assertEqual(JamAhead().update(0., jams, fast, v, True), (False, 0.))
 
   def test_comes_on_only_while_moving(self):

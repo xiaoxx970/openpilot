@@ -63,7 +63,7 @@ class JamPrompt:
   only after REARM s with none within FAR (FAR_FAST), so slowing down short of a jam does not announce it twice.
   """
   LOOK_AHEAD = 15.       # s
-  LOOK_AHEAD_FAST = 20.  # s
+  LOOK_AHEAD_FAST = 25.  # s (the owner's pick after 20 s, 10-30)
   NEAR = 150.            # m
   FAR = 500.             # m
   FAR_FAST = 1500.       # m
