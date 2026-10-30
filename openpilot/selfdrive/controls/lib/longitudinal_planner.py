@@ -105,6 +105,11 @@ COAST_BAND_FLAG_DEBOUNCE = 0.5  # s a car flag must have held its previous value
 COAST_BAND_PARAM = "CoastBandCalibration"
 COAST_BAND_KEEP = 0.5
 COAST_BAND_SAVE_INTERVAL = 120.  # s between saves, and only after new edges; the write is non-blocking
+# While the rain following distance is selected (selfdriveStateIC.rainMode), positive accel is capped: in rain, and in heavy
+# rain (rainLevel 2). In 33 min of op long in rain (2026-08 to 10-24) the command never asked more than 1.5 m/s^2 and the
+# wheels never slipped; the three slips in rain were the driver's own launches above 1 m/s^2 at 11-16 km/h
+RAIN_ACCEL_CAP = (1.2, 1.0)  # m/s^2: rain, heavy rain
+RAIN_ACCEL_CAP_RATE = 0.5    # m/s^3 the cap moves at as rain mode starts, changes or ends, so the command never steps
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 def get_max_decel(v_ego):
@@ -352,6 +357,31 @@ class CoastBandHold:
     return self.output
 
 
+class RainAccelCap:
+  """Caps positive accel while the rain following distance is selected.
+
+  The cap ramps between ACCEL_MAX and the rain value at RAIN_ACCEL_CAP_RATE, so rain mode starting, turning heavy or ending
+  never steps the command; while openpilot is not in control, and on the first update, there is no command to protect and
+  it follows at once.
+  """
+  def __init__(self, dt):
+    self.dt = dt
+    self.cap = ACCEL_MAX
+    self.started = False
+
+  def update(self, ss_ic, snap=False):
+    target = ACCEL_MAX
+    if ss_ic.rainMode:
+      target = RAIN_ACCEL_CAP[1] if ss_ic.rainLevel >= 2 else RAIN_ACCEL_CAP[0]
+    if snap or not self.started:
+      self.cap = float(target)
+    else:
+      step = RAIN_ACCEL_CAP_RATE * self.dt
+      self.cap = float(np.clip(target, self.cap - step, self.cap + step))
+    self.started = True
+    return self.cap
+
+
 def get_coast_accel(pitch):
   # where the coast band starts before the car has shown its own edges; kept from the chill planner upstream removed
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
@@ -406,6 +436,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.lead_closing_limit = LeadClosingLimit(self.dt)
     self.pull_away = PullAwayAssist(self.dt)
     self.e2e_deadband = E2EDeadband(self.dt)
+    self.rain_accel_cap = RainAccelCap(self.dt)
     self.params = Params()
     try:
       saved = self.params.get(COAST_BAND_PARAM)
@@ -504,7 +535,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target, self.mpc.source, _ = candidates[i_min]
     curve_wins = i_min == 3
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
-    self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
+    a_max = self.rain_accel_cap.update(sm['selfdriveStateIC'], snap=reset_state)
+    self.output_a_target = np.clip(output_a_target, ACCEL_MIN, a_max)
 
     # only the set-speed loop flip-flops between throttle and coasting; lead and e2e requests pass untouched
     if len(sm['carControl'].orientationNED) == 3:
@@ -565,6 +597,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     plan_ic_send.longitudinalPlanIC.coastBandHolding = bool(hold.holding)
     plan_ic_send.longitudinalPlanIC.pullAwayAllowance = float(self.pull_away.allowance)
     plan_ic_send.longitudinalPlanIC.e2eDeadbandMargin = float(self.e2e_deadband.margin)
+    plan_ic_send.longitudinalPlanIC.rainAccelCap = float(self.rain_accel_cap.cap)
+    plan_ic_send.longitudinalPlanIC.rainCurveLatScale = float(self.scc.vision.profile_planner.comfort_scale)
     pm.send('longitudinalPlanIC', plan_ic_send)
 
     self.publish_longitudinal_plan_sp(sm, pm)

@@ -25,7 +25,8 @@ class FakeSubMaster(dict):
     self.logMonoTime = mono_times
 
 
-def build_sm(v_ego, s_car, curvature_fn, lane_change=False, gps_xy=None, gps_age=0.1, now=NOW):
+def build_sm(v_ego, s_car, curvature_fn, lane_change=False, gps_xy=None, gps_age=0.1, now=NOW, rain=None):
+  """rain: (rainMode, rainLevel) for a selfdriveStateIC message, None leaves the service out."""
   x, y, heading = model_path(s_car, v_ego, curvature_fn)
   t = ModelConstants.T_IDXS
   model = messaging.new_message('modelV2')
@@ -49,8 +50,12 @@ def build_sm(v_ego, s_car, curvature_fn, lane_change=False, gps_xy=None, gps_age
     g.latitude, g.longitude, g.bearingDeg, g.speed = float(lat), float(lon), 0., float(v_ego)
     g.hasFix, g.horizontalAccuracy = True, 2.
     mono[GPS] = now - int(gps_age * 1e9)
-  return FakeSubMaster({'modelV2': model.modelV2, 'carState': car_state.carState, 'controlsState': controls_state.controlsState,
-                        GPS: getattr(gps, GPS)}, mono)
+  msgs = {'modelV2': model.modelV2, 'carState': car_state.carState, 'controlsState': controls_state.controlsState, GPS: getattr(gps, GPS)}
+  if rain is not None:
+    ss_ic = messaging.new_message('selfdriveStateIC')
+    ss_ic.selfdriveStateIC.rainMode, ss_ic.selfdriveStateIC.rainLevel = rain
+    msgs['selfdriveStateIC'] = ss_ic.selfdriveStateIC
+  return FakeSubMaster(msgs, mono)
 
 
 def straight(s):
@@ -72,9 +77,9 @@ class TestVisionDriverProfile(OpenpilotTestCase):
     self.params.put_bool("CurveSpeedDriverProfile", False, block=True)
     self.params.remove("MapCurvatures")
 
-  def run_for(self, seconds, v_ego=60 * KPH, long_enabled=True, long_override=False):
+  def run_for(self, seconds, v_ego=60 * KPH, long_enabled=True, long_override=False, rain=None):
     # the car holds its place at s = 0, so the curve ahead stays where it is
-    sm: Any = build_sm(v_ego, 0., self.curve)
+    sm: Any = build_sm(v_ego, 0., self.curve, rain=rain)
     for _ in range(int(seconds / DT_MDL)):
       self.scc_v.update(sm, long_enabled, long_override, v_ego, 0., 120 * KPH)
     return sm
@@ -145,3 +150,25 @@ class TestVisionDriverProfile(OpenpilotTestCase):
       stock.update(sm, True, False, 60 * KPH, 0., 120 * KPH)
     assert not stock.profile_active
     assert stock.published_v_target == stock.output_v_target
+
+  def test_rain_mode_lowers_the_comfortable_lateral_accel(self):
+    rain, heavy = self.scc_v.profile_planner.p.rain_lat_scale
+    self.run_for(2.)
+    a_req_dry = self.scc_v.profile_planner.a_req
+    self.run_for(6., rain=(True, 1))
+    np.testing.assert_allclose(self.scc_v.profile_planner.comfort_scale, rain)
+    a_req_rain = self.scc_v.profile_planner.a_req
+    assert a_req_rain < a_req_dry - 0.02, 'a lower target speed for the same curve needs more braking'
+    self.run_for(3., rain=(True, 2))
+    np.testing.assert_allclose(self.scc_v.profile_planner.comfort_scale, heavy)
+    assert self.scc_v.profile_planner.a_req < a_req_rain
+
+  def test_rain_without_rain_mode_is_dry(self):
+    # raining but the driver stepped off the rain following distance, or no selfdriveStateIC at all
+    for rain in ((False, 2), None):
+      self.run_for(6., rain=rain)
+      assert self.scc_v.profile_planner.comfort_scale == 1.
+
+  def test_rain_scale_applies_at_once_while_not_controlling(self):
+    self.run_for(0.5, long_enabled=False, rain=(True, 2))
+    assert self.scc_v.profile_planner.comfort_scale == self.scc_v.profile_planner.p.rain_lat_scale[1]

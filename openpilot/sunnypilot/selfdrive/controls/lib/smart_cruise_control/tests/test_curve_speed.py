@@ -40,9 +40,10 @@ def model_path(s_car, v, curvature_fn):
   return x, y, heading
 
 
-def drive(curvature_fn, v0, duration, lane_change=lambda s: False, kappa_meas_fn=None, with_map=False, params=None):
+def drive(curvature_fn, v0, duration, lane_change=lambda s: False, kappa_meas_fn=None, with_map=False, params=None,
+          comfort_scale=lambda s: 1.):
   """Close the loop on a point-mass car: the planner's command when it acts, else hold the speed. `with_map`: the
-  road's own curvature 5-245 m ahead as map input."""
+  road's own curvature 5-245 m ahead as map input; `comfort_scale`: the rain scale asked for at each distance."""
   planner = CurveSpeedPlanner(params, dt=DT_MDL)
   v, a, s = v0, 0., 0.
   log = []
@@ -50,7 +51,8 @@ def drive(curvature_fn, v0, duration, lane_change=lambda s: False, kappa_meas_fn
   for _ in range(int(duration / DT_MDL)):
     kappa = float(kappa_meas_fn(s) if kappa_meas_fn else curvature_fn(np.array([s]))[0])
     mk = {'map_dist': map_dist, 'map_kappa': curvature_fn(s + map_dist)} if with_map else {}
-    _, a_cmd = planner.update(v, a, kappa, *model_path(s, v, curvature_fn), lane_change=lane_change(s), **mk)
+    _, a_cmd = planner.update(v, a, kappa, *model_path(s, v, curvature_fn), lane_change=lane_change(s), comfort_scale=comfort_scale(s),
+                              **mk)
     a_des = a_cmd if planner.state != CurveSpeedPlanner.CRUISE else 0.
     a += (a_des - a) * DT_MDL / 0.35
     v = max(0., v + a * DT_MDL)
@@ -190,3 +192,79 @@ class TestCurveSpeedPlanner(OpenpilotTestCase):
     v = 120 * KPH
     reachable = p.cap_margin * p.cmd_lat_max * float(np.interp(v, p.yaw_ratio_bp, p.yaw_ratio_v))
     assert float(planner.lat_limit(v)) <= reachable + 1e-9
+
+
+def solve_v(planner, kappa, comfort_scale):
+  # the speed whose lateral accel on this curvature is the limit, solved directly
+  v = np.sqrt(2.2 / kappa)
+  for _ in range(50):
+    v = np.sqrt(planner.lat_limit(v, comfort_scale) / kappa)
+  return max(float(v), planner.p.min_target)
+
+
+class TestCurveSpeedRain(OpenpilotTestCase):
+  RAIN, HEAVY = CurveSpeedParams().rain_lat_scale
+
+  def test_only_the_comfort_part_is_scaled(self):
+    p = CurveSpeedParams()
+    planner = CurveSpeedPlanner(p, dt=DT_MDL)
+    for v in (25 * KPH, 50 * KPH, 80 * KPH, 120 * KPH):
+      comfort = p.lat_scale * float(np.interp(v, p.lat_bp, p.lat_v))
+      reachable = p.cap_margin * p.cmd_lat_max * float(np.interp(v, p.yaw_ratio_bp, p.yaw_ratio_v))
+      for scale in (1., self.RAIN, self.HEAVY):
+        np.testing.assert_allclose(planner.lat_limit(v, scale), min(scale * comfort, reachable))
+      np.testing.assert_allclose(planner.hard_limit(v), min(p.hard_lat, reachable))
+
+  def test_rain_targets(self):
+    # R40: 39 km/h dry, 37 in rain, 36 in heavy rain; scales between the tables blend, within 0.2 km/h of a direct solve
+    planner = CurveSpeedPlanner(dt=DT_MDL)
+    for radius in (15., 40., 120., 400.):
+      dry = float(planner.v_for_kappa(1 / radius))
+      for scale in (self.RAIN, self.HEAVY, (self.RAIN + self.HEAVY) / 2, (1. + self.RAIN) / 2):
+        planner.comfort_scale = scale
+        v = float(planner.v_for_kappa(1 / radius))
+        assert abs(v - solve_v(planner, 1 / radius, scale)) < 0.2 * KPH, f'R{radius:.0f} at x{scale}'
+        assert v <= dry
+      planner.comfort_scale = 1.
+    planner.comfort_scale = self.RAIN
+    assert round(float(planner.v_for_kappa(1 / 40.)) / KPH) == 37
+    planner.comfort_scale = self.HEAVY
+    assert round(float(planner.v_for_kappa(1 / 40.)) / KPH) == 36
+
+  def test_slower_curves_in_rain(self):
+    # closed loop the car enters below the target (camera far gain, braking plan), so the speed drops by a little less than
+    # sqrt(scale): R40 from 60 km/h 30.9 -> 30.1 -> 29.6 km/h
+    radius, start, length = 40., 250., 90.
+    apex = {}
+    for scale in (1., self.RAIN, self.HEAVY):
+      _, log = drive(one_curve(radius, start, length), 60 * KPH, 25., comfort_scale=lambda s, scale=scale: scale)
+      apex[scale] = np.median([r[1] for r in log if start + 20. <= r[0] <= start + length - 20.])
+    for scale in (self.RAIN, self.HEAVY):
+      assert np.sqrt(scale) - 0.03 <= apex[scale] / apex[1.] <= 0.985, f'x{scale}: {apex[scale] / KPH:.1f} vs {apex[1.] / KPH:.1f} km/h dry'
+    assert apex[self.HEAVY] < apex[self.RAIN] - 0.3 * KPH
+
+  def test_rain_starting_mid_curve_lowers_the_target_gradually(self):
+    # rain mode starts 30 m into a long R40 curve: the locked speed and the command come down without a step
+    radius, start, length = 40., 150., 200.
+    planner, log = drive(one_curve(radius, start, length), 45 * KPH, 30.,
+                         comfort_scale=lambda s: self.HEAVY if s >= start + 30. else 1.)
+    inside = [r for r in log if start + 10. <= r[0] <= start + length - 10.]
+    targets = np.array([r[5] for r in inside])
+    assert targets[-1] < targets[0] - 2 * KPH
+    assert np.abs(np.diff(targets)).max() / DT_MDL <= CurveSpeedParams().target_rate + 1e-6
+    cmds = np.array([r[3] for r in inside])
+    assert np.abs(np.diff(cmds)).max() / DT_MDL <= CurveSpeedParams().jerk + 1e-6
+    np.testing.assert_allclose(planner.comfort_scale, self.HEAVY)
+
+  def test_scale_ramps_and_snaps_when_idle(self):
+    p = CurveSpeedParams()
+    planner = CurveSpeedPlanner(p, dt=DT_MDL)
+    v = 60 * KPH
+    scales = []
+    for _ in range(int(5. / DT_MDL)):
+      planner.update(v, 0., 0., *model_path(0., v, straight), comfort_scale=self.RAIN)
+      scales.append(planner.comfort_scale)
+    assert np.abs(np.diff([1.] + scales)).max() <= p.comfort_scale_rate * DT_MDL + 1e-9
+    np.testing.assert_allclose(scales[-1], self.RAIN)
+    planner.update(v, 0., 0., *model_path(0., v, straight), enabled=False, comfort_scale=1.)
+    assert planner.comfort_scale == 1.
