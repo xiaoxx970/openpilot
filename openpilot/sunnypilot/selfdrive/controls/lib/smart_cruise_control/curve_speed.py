@@ -27,6 +27,11 @@ class CurveSpeedParams:
   lat_bp: tuple = (20 * KPH, 35 * KPH, 45 * KPH, 55 * KPH, 68 * KPH, 90 * KPH)
   lat_v: tuple = (2.5, 2.3, 2.2, 2.1, 1.7, 1.4)
   lat_scale: float = 1.3
+  # share of that comfortable lateral accel kept while the rain following distance is selected: (rain, heavy rain). Only
+  # the comfort part: the reachable-steering cap and hard_lat are not grip limits. It moves at comfort_scale_rate (1/s), so
+  # targets already being planned come down over a few seconds when rain mode starts (R40 m: 39 -> 37 / 36 km/h)
+  rain_lat_scale: tuple = (0.9, 0.85)
+  comfort_scale_rate: float = 0.05
   # what openpilot can actually make the car do: commanded curvature is capped at cmd_lat_max (m/s^2 at the EPS),
   # and the car only yaws a speed-dependent share of it (measured QFK_01 vs yaw rate, 277k samples, 2026-09-26)
   cmd_lat_max: float = 3.6
@@ -131,20 +136,28 @@ class CurveSpeedPlanner:
   def __init__(self, params: CurveSpeedParams | None = None, dt: float = 0.05):
     self.p = params or CurveSpeedParams()
     self.dt = dt
-    # curvature -> speed lookup, solved once (the lateral-accel table depends on speed, so it needs iterating)
+    self.comfort_scale = 1.0    # share of the comfortable lateral accel in use (rain mode lowers it)
+    # curvature -> speed lookup, solved once (the lateral-accel table depends on speed, so it needs iterating), for dry and
+    # for each rain scale; a scale between two of them blends their speeds
     self._lk = np.linspace(np.log(1e-5), np.log(0.3), 400)
     k = np.exp(self._lk)
-    v = np.sqrt(2.2 / k)
-    for _ in range(6):
-      v = np.sqrt(self.lat_limit(v) / k)
-    self._lv = v
+    self._scales = np.array(sorted({1.0, *self.p.rain_lat_scale}))
+    self._lv_by_scale = []
+    for scale in self._scales:
+      v = np.sqrt(2.2 / k)
+      for _ in range(6):
+        v = np.sqrt(self.lat_limit(v, scale) / k)
+      self._lv_by_scale.append(v)
+    self._lv = self._lv_by_scale[-1]
     vh = np.sqrt(2.2 / k)
     for _ in range(6):
       vh = np.sqrt(self.hard_limit(vh) / k)
     self._lvh = vh
     self.reset()
 
-  def reset(self):
+  def reset(self, comfort_scale=None):
+    if comfort_scale is not None:
+      self.comfort_scale = comfort_scale   # nothing is being commanded, so a new rain scale applies at once
     self.state = self.CRUISE
     self.kappa_f = 0.0
     self.kappa_lock = 0.0
@@ -168,8 +181,9 @@ class CurveSpeedPlanner:
     self.map_limited = False
 
   # ---- helpers -------------------------------------------------------------------------------
-  def lat_limit(self, v):
-    comfort = self.p.lat_scale * np.interp(v, self.p.lat_bp, self.p.lat_v)
+  def lat_limit(self, v, comfort_scale=None):
+    scale = self.comfort_scale if comfort_scale is None else comfort_scale
+    comfort = scale * self.p.lat_scale * np.interp(v, self.p.lat_bp, self.p.lat_v)
     reachable = self.p.cap_margin * self.p.cmd_lat_max * np.interp(v, self.p.yaw_ratio_bp, self.p.yaw_ratio_v)
     return np.minimum(comfort, reachable)
 
@@ -184,7 +198,14 @@ class CurveSpeedPlanner:
   def v_for_kappa(self, kappa):
     """Speed at which this curvature produces the driver's accepted lateral accel (speed-dependent table)."""
     k = np.maximum(np.asarray(kappa, dtype=np.float64), 1e-5)
-    v = np.interp(np.log(k), self._lk, self._lv)
+    lk = np.log(k)
+    if self.comfort_scale >= 1.0:
+      v = np.interp(lk, self._lk, self._lv)
+    else:
+      s = float(np.clip(self.comfort_scale, self._scales[0], 1.0))
+      i = min(int(np.searchsorted(self._scales, s, side='right')) - 1, len(self._scales) - 2)
+      w = (s - self._scales[i]) / (self._scales[i + 1] - self._scales[i])
+      v = (1.0 - w) * np.interp(lk, self._lk, self._lv_by_scale[i]) + w * np.interp(lk, self._lk, self._lv_by_scale[i + 1])
     return np.maximum(v, self.p.min_target)
 
   def exit_accel(self, v_ego):
@@ -216,12 +237,19 @@ class CurveSpeedPlanner:
 
   # ---- main update ---------------------------------------------------------------------------
   def update(self, v_ego, a_ego, kappa_meas, path_x, path_y, path_yaw, path_t=None, lane_change=False, enabled=True,
-             map_dist=None, map_kappa=None):
+             map_dist=None, map_kappa=None, comfort_scale=1.0):
+    """comfort_scale: share of the comfortable lateral accel to plan with (rain mode); it is approached at
+    comfort_scale_rate."""
     p = self.p
     dt = self.dt
     if not enabled or v_ego < 3.0:
-      self.reset()
+      self.reset(comfort_scale)
       return self.v_cap, 0.0
+    scale_prev = self.comfort_scale
+    self.comfort_scale = float(self._rate_limit(scale_prev, comfort_scale, p.comfort_scale_rate))
+    if self.state == self.CURVE and self.comfort_scale < scale_prev:
+      # rain mode starting in a curve: the locked speed comes down with the lateral accel it was locked at
+      self.v_lock *= float(np.sqrt(self.comfort_scale / scale_prev))
     # during a lane change the model path still follows the road, so keep planning from the preview;
     # only the measured curvature is polluted by the lane change yaw, so it must not start or reshape a curve
 

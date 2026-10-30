@@ -519,6 +519,9 @@ struct LongitudinalPlanIC @0xbd443b539493bc68 {
   coastBandHolding @7 :Bool;       # a state change is being held back right now
   pullAwayAllowance @8 :Float32;   # accel a radar lead pulling away lets the command reach above the model, m/s^2
   e2eDeadbandMargin @9 :Float32;   # how far below the lead plan the model must ask before its request counts, m/s^2
+  # rain mode (the rain following distance selected): both ramp in and out
+  rainAccelCap @10 :Float32;       # positive accel cap, m/s^2 (ACCEL_MAX when not in rain mode)
+  rainCurveLatScale @11 :Float32;  # share of the curve-speed profile's comfortable lateral accel (1 when not in rain mode)
 }
 
 struct CarStateIC @0xfc6241ed8877b611 {

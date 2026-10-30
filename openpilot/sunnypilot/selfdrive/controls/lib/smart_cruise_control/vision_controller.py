@@ -165,6 +165,17 @@ class SmartCruiseControlVision:
     ahead = self.map_ahead.ahead(gps.latitude, gps.longitude, gps.bearingDeg, v_ego, self.profile_odometer, advance=v_ego * age)
     return ahead if ahead is not None else (None, None)
 
+  def _rain_comfort_scale(self, sm: messaging.SubMaster) -> float:
+    """Share of the profile's comfortable lateral accel: lower while the rain following distance is selected."""
+    try:
+      ss_ic = sm['selfdriveStateIC']
+    except KeyError:
+      return 1.
+    if not ss_ic.rainMode:
+      return 1.
+    rain, heavy_rain = self.profile_planner.p.rain_lat_scale
+    return heavy_rain if ss_ic.rainLevel >= 2 else rain
+
   def _update_driver_profile(self, sm: messaging.SubMaster) -> None:
     cs = sm['carState']
     v_ego = cs.vEgo
@@ -175,13 +186,14 @@ class SmartCruiseControlVision:
     lane_change = model.meta.laneChangeState != log.LaneChangeState.off
     map_dist, map_kappa = self._update_map_ahead(sm, v_ego)
 
+    comfort_scale = self._rain_comfort_scale(sm)
     run = self.long_enabled and self.enabled and not self.long_override and self.profile_path is not None
     if run:
       _, self.profile_a_cmd = self.profile_planner.update(v_ego, cs.aEgo, sum(self.profile_kappa) / len(self.profile_kappa),
                                                          *self.profile_path, lane_change=lane_change,
-                                                         map_dist=map_dist, map_kappa=map_kappa)
+                                                         map_dist=map_dist, map_kappa=map_kappa, comfort_scale=comfort_scale)
     else:
-      self.profile_planner.reset()
+      self.profile_planner.reset(comfort_scale)
       self.profile_a_cmd = 0.
     self.profile_active = run and self.profile_planner.state != CurveSpeedPlanner.CRUISE
     self.profile_display_v = self.profile_planner.v_display

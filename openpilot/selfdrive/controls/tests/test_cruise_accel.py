@@ -17,7 +17,8 @@ from openpilot.selfdrive.controls.lib.longitudinal_planner import get_cruise_acc
                                                                   LEAD_CLOSE_ACCEL_TIME, LEAD_CLOSE_MIN_SPEED, \
                                                                   LEAD_CLOSE_LOST_TIME, LEAD_CLOSE_MAX_SPEED, LEAD_CLOSE_MIN_ACCEL, \
                                                                   LEAD_CLOSE_STOP_DECEL, LEAD_CLOSE_TIME, LEAD_CLOSE_RISE_TAU, \
-                                                                  LEAD_CLOSE_FILTER_TAU, E2EDeadband, E2E_DEADBAND_MARGIN
+                                                                  LEAD_CLOSE_FILTER_TAU, E2EDeadband, E2E_DEADBAND_MARGIN, \
+                                                                  RainAccelCap, RAIN_ACCEL_CAP, RAIN_ACCEL_CAP_RATE
 
 Personality = log.LongitudinalPersonality
 DT = 0.05
@@ -348,6 +349,45 @@ class TestE2EDeadband(unittest.TestCase):
     for lead in (self.radar_lead(60., radar=False), SimpleNamespace(present=False, radar=False, dRel=0., vLead=0., aLeadK=0.)):
       out, _ = self.follow(-0.1, lead, self.model(), Personality.aggressive)
       np.testing.assert_allclose(out, -0.1, atol=1e-9)
+
+
+def rain_state(rain_mode, rain_level=1):
+  return SimpleNamespace(rainMode=rain_mode, rainLevel=rain_level)
+
+
+class TestRainAccelCap(unittest.TestCase):
+  def feed(self, cap, seconds, rain_mode, rain_level=1, snap=False):
+    return [cap.update(rain_state(rain_mode, rain_level), snap) for _ in range(int(round(seconds / DT)))]
+
+  def started(self, rain_mode=False, rain_level=1):
+    cap = RainAccelCap(DT)
+    self.feed(cap, 1., rain_mode, rain_level)
+    return cap
+
+  def test_dry_is_uncapped(self):
+    self.assertEqual(self.feed(RainAccelCap(DT), 5., False)[-1], ACCEL_MAX)
+
+  def test_rain_and_heavy_rain(self):
+    for rain_level, expected in ((1, RAIN_ACCEL_CAP[0]), (2, RAIN_ACCEL_CAP[1])):
+      self.assertAlmostEqual(self.feed(self.started(), 5., True, rain_level)[-1], expected)
+
+  def test_rain_level_without_rain_mode(self):
+    # stepped off the rain following distance during rain: no cap, as no rain distance
+    self.assertEqual(self.feed(RainAccelCap(DT), 5., False, rain_level=2)[-1], ACCEL_MAX)
+
+  def test_ramps_in_and_out(self):
+    cap = self.started()
+    caps = [cap.cap] + self.feed(cap, 5., True) + self.feed(cap, 1., True, rain_level=2) + self.feed(cap, 5., False)
+    self.assertLessEqual(np.abs(np.diff(caps)).max(), RAIN_ACCEL_CAP_RATE * DT + 1e-9)
+    ramp = int(np.ceil((ACCEL_MAX - RAIN_ACCEL_CAP[0]) / (RAIN_ACCEL_CAP_RATE * DT)))
+    self.assertAlmostEqual(caps[ramp], RAIN_ACCEL_CAP[0])
+    self.assertGreater(caps[ramp - 1], RAIN_ACCEL_CAP[0])
+    self.assertEqual(caps[-1], ACCEL_MAX)
+
+  def test_follows_at_once_when_nothing_is_commanded(self):
+    # first update, or openpilot not in control
+    self.assertEqual(self.feed(RainAccelCap(DT), DT, True, rain_level=2)[-1], RAIN_ACCEL_CAP[1])
+    self.assertEqual(self.feed(self.started(), DT, True, snap=True)[-1], RAIN_ACCEL_CAP[0])
 
 
 class TestCoastBandHold(unittest.TestCase):
