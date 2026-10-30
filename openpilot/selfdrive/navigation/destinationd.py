@@ -495,7 +495,7 @@ def live_route():
   """navd's current route, for Destinations.live: read on each page poll, from any of the server's threads."""
   import threading
 
-  import cereal.messaging as messaging
+  import openpilot.cereal.messaging as messaging
   from openpilot.selfdrive.navigation.helpers import latest_gps_source
 
   sm = messaging.SubMaster(['navRouteIC', 'navInstruction', 'gpsLocation', 'gpsLocationExternal'])

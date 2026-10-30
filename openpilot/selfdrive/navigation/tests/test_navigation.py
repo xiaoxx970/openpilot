@@ -591,5 +591,13 @@ class TestRouteTracking(unittest.TestCase):
     self.assertAlmostEqual(RouteTracker(route).snap(9 * m, 150 * m)[2], 180, places=3)
 
 
+class TestDestinationdLive(unittest.TestCase):
+  def test_live_route_imports_and_reads(self):
+    from openpilot.selfdrive.navigation import destinationd
+    with OpenpilotPrefix():
+      get = destinationd.live_route()   # the real imports, as on the car
+      self.assertIsNone(get())   # no navd: no route
+
+
 if __name__ == '__main__':
   unittest.main()
