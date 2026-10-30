@@ -4,7 +4,6 @@ import tempfile
 import threading
 import unittest
 import urllib.error
-import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
@@ -32,69 +31,15 @@ class FakeParams:
     self.values.pop(key, None)
 
 
-def gcj_location(lat, lon):
-  dlat, dlon = baidu._gcj_delta(lat, lon)
-  return {"lat": lat + dlat, "lng": lon + dlon}
-
-
-SUGGESTIONS = {"status": 0, "message": "ok", "result": [
-  {"name": "北京西站", "location": gcj_location(39.8919, 116.3157), "uid": "e1bf", "city": "北京市", "district": "丰台区",
-   "address": "北京市-丰台区-莲花池东路118号"},
-  {"name": "北京西站-公交线路", "uid": "x"},   # no position: left out
-]}
-
-
 class TestDestinations(unittest.TestCase):
   def setUp(self):
     self.params = FakeParams({"NavigationEnabled": True, "IsOffroad": True, "LastGPSPositionLLK": json.dumps({"latitude": 39.9, "longitude": 116.4})})
-    self.queries = []
-
-    def fetch(pq):
-      self.queries.append(pq)
-      return SUGGESTIONS
-    self.dest = destinationd.Destinations(self.params, ("ak-test", "sk-test"), fetch, count_file=None)
-
-  def test_search_converts_to_wgs84(self):
-    places = self.dest.search(" 北京西站 ")["places"]
-    self.assertEqual(len(places), 1)
-    self.assertEqual((places[0]["name"], places[0]["address"]), ("北京西站", "北京市-丰台区-莲花池东路118号"))
-    self.assertAlmostEqual(places[0]["latitude"], 39.8919, places=5)
-    self.assertAlmostEqual(places[0]["longitude"], 116.3157, places=5)
-    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[0]).query)
-    self.assertEqual((query["query"][0], query["location"][0], query["coord_type"][0]), ("北京西站", "39.900000,116.400000", "1"))
-    self.assertTrue("sn" in query)
-
-  def test_pasted_coordinates_need_no_search(self):
-    for text in ("39.8946,116.3220", "39.8946， 116.3220", "39.8946 116.3220"):
-      self.assertEqual(self.dest.search(text)["places"][0]["latitude"], 39.8946)
-    self.assertEqual(self.queries, [])
-    no_keys = destinationd.Destinations(self.params, None, count_file=None)
-    self.assertTrue("error" in no_keys.search("北京西站"))
-    self.assertEqual(no_keys.search("39.8946,116.3220")["places"][0]["longitude"], 116.322)
-
-  def test_search_bias_without_a_position(self):
-    self.params.values.pop("LastGPSPositionLLK")
-    self.dest.search("x")
-    self.assertFalse("location" in urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[-1]).query))
-    self.dest.places.save("家", {"name": "家", "address": "", "latitude": 32.0, "longitude": 118.8})
-    self.dest.search("x")
-    self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[-1]).query)["location"][0], "32.000000,118.800000")
-
-  def test_daily_budget(self):
-    self.enterContext(patch.object(self.dest.daily, "left", return_value=0))
-    self.assertTrue("error" in self.dest.search("北京西站"))
-    self.assertEqual(self.queries, [])
-
-  def test_a_failed_search_keeps_the_url_out(self):
-    def fail(pq):
-      raise urllib.error.URLError("https://api.map.baidu.com/?ak=ak-test")
-    dest = destinationd.Destinations(self.params, ("ak-test", "sk-test"), fail, count_file=None)
-    self.assertFalse("ak-test" in json.dumps(dest.search("北京西站"), ensure_ascii=False))
+    self.dest = destinationd.Destinations(self.params)
 
   def test_set_and_clear(self):
     state = self.dest.set_destination({"latitude": 39.8946, "longitude": 116.322, "name": "北京西站"})
     self.assertEqual(self.params.values["NavDestination"], {"latitude": 39.8946, "longitude": 116.322, "place_name": "北京西站"})
-    self.assertEqual((state["destination"]["place_name"], state["onroad"]), ("北京西站", False))
+    self.assertEqual((state["destination"]["place_name"], state["onroad"], state["position"]), ("北京西站", False, (39.9, 116.4)))
     self.assertTrue("error" in self.dest.set_destination({"latitude": 91, "longitude": 0}))
     self.assertTrue("error" in self.dest.set_destination({"latitude": "x"}))
     self.assertIsNone(self.dest.clear()["destination"])
@@ -108,110 +53,6 @@ class TestDestinations(unittest.TestCase):
                         ("192.168.43.10", False), ("10.0.0.2", False), ("::ffff:192.168.1.2", False), ("garbage", False)):
       self.assertEqual(destinationd.allowed(address), ok, address)
 
-
-DETAIL = {"status": 0, "message": "ok", "result": {"name": "大行宫", "location": {"lat": 32.041503, "lng": 118.79482},
-                                                  "address": "地铁2号线;地铁3号线", "uid": "bda99fec8a4b6f474e776ef3"}}
-SHARE = "大行宫 大行宫 https://j.map.baidu.com/f9/Z3J"
-TARGET = "https://map.baidu.com/mobile/webapp/search/search/qt=inf&uid=bda99fec8a4b6f474e776ef3/vt=map"
-
-
-class TestShares(unittest.TestCase):
-  def setUp(self):
-    self.params = FakeParams({"NavigationEnabled": True, "IsOffroad": True})
-    self.queries, self.resolved = [], []
-
-    def fetch(pq):
-      self.queries.append(pq)
-      return SUGGESTIONS if pq.startswith(destinationd.SUGGESTION_PATH) else DETAIL
-
-    self.redirects = {}
-
-    def resolve(url):
-      self.resolved.append(url)
-      return self.redirects.get(url, TARGET)
-    self.dest = destinationd.Destinations(self.params, ("ak-test", "sk-test"), fetch, count_file=None, resolve=resolve)
-
-  def test_baidu_share_becomes_the_destination(self):
-    state = self.dest.share(SHARE)
-    self.assertEqual(self.resolved, ["https://j.map.baidu.com/f9/Z3J"])
-    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[0]).query)
-    self.assertEqual((urllib.parse.urlsplit(self.queries[0]).path, query["uid"][0]), (destinationd.DETAIL_PATH, "bda99fec8a4b6f474e776ef3"))
-    d = self.params.values["NavDestination"]
-    self.assertEqual(d["place_name"], "大行宫")
-    self.assertAlmostEqual(d["latitude"], 32.043565, places=4)   # WGS-84, as the Mac checked against the share
-    self.assertAlmostEqual(d["longitude"], 118.789626, places=4)
-    self.assertEqual(state["destination"], d)
-    self.assertEqual(self.dest.places.recent[0]["name"], "大行宫")
-
-  def test_uid_in_a_long_link_needs_no_redirect(self):
-    long_link = "https://map.baidu.com/?newmap=1&s=inf%26uid%3Dbda99fec8a4b6f474e776ef3%26c%3D315"
-    self.assertEqual(destinationd.share_uid(long_link, resolve=self._no_resolve), "bda99fec8a4b6f474e776ef3")
-
-  def test_other_hosts_are_not_fetched(self):
-    self.assertIsNone(destinationd.share_uid("https://example.com/?uid=bda99fec8a4b6f474e776ef3", resolve=self._no_resolve))
-    self.assertIsNone(destinationd.link_place("https://example.com/?ll=32.0,118.8", resolve=self._no_resolve))
-    self.assertTrue("error" in self.dest.share("https://example.com/a"))
-    self.assertEqual((self.queries, self.resolved), ([], []))
-
-  def test_apple_maps_link(self):
-    p = destinationd.link_place("https://maps.apple.com/?ll=32.052,118.783&q=%E6%96%B0%E8%A1%97%E5%8F%A3", resolve=self._no_resolve)
-    self.assertEqual(p["name"], "新街口")
-    self.assertAlmostEqual(p["latitude"], 32.052 + 0.0022, delta=0.001)   # GCJ-02 -> WGS-84: ~250 m off in Nanjing
-    self.assertAlmostEqual(p["longitude"], 118.783 - 0.0052, delta=0.001)
-
-  def test_amap_links(self):
-    p = destinationd.link_place("https://uri.amap.com/marker?position=118.783,32.052&name=X", resolve=self._no_resolve)
-    self.assertEqual(p["name"], "X")
-    self.assertAlmostEqual(p["latitude"], 32.0542, delta=0.001)   # lon,lat in amap's
-    self.redirects["https://surl.amap.com/abc"] = "https://www.amap.com/place/B0FF?p=B0FF,32.052,118.783,%E5%AE%B6,addr"
-    p = destinationd.link_place("https://surl.amap.com/abc", resolve=lambda u: self.redirects[u])
-    self.assertEqual(p["name"], "家")
-    self.assertAlmostEqual(p["longitude"], 118.7778, delta=0.001)
-
-  def test_route_links_go_to_the_end(self):
-    p = destinationd.link_place("https://maps.apple.com/?saddr=32.10,118.90&daddr=32.052,118.783&sll=32.10,118.90", resolve=self._no_resolve)
-    self.assertAlmostEqual(p["latitude"], 32.0542, delta=0.001)
-    p = destinationd.link_place("https://uri.amap.com/navigation?from=118.90,32.10,A&to=118.783,32.052,B&mode=car", resolve=self._no_resolve)
-    self.assertEqual(p["name"], "B")
-    self.assertAlmostEqual(p["longitude"], 118.7778, delta=0.001)
-    p = destinationd.link_place("https://www.amap.com/dir?from%5Blnglat%5D=118.9,32.1&to%5Blnglat%5D=118.783,32.052&to%5Bname%5D=C",
-                                resolve=self._no_resolve)
-    self.assertEqual(p["name"], "C")
-    p = destinationd.link_place("https://maps.apple.com/?saddr=X&daddr=%E5%AE%B6", resolve=self._no_resolve)
-    self.assertEqual(p, {"name": "家", "address": ""})   # only a name: searched
-
-  def test_apple_short_link_followed(self):
-    self.redirects["https://maps.apple/p/x1"] = "https://maps.apple.com/place?coordinate=32.052,118.783&name=Y"
-    state = self.dest.share("Y https://maps.apple/p/x1")
-    self.assertEqual(state["destination"]["place_name"], "Y")
-    self.assertEqual(self.queries, [])
-
-  def test_location_text_searched(self):
-    state = self.dest.share("南京市玄武区中山路18号\n中国")   # a Shortcut's 位置, as its address
-    self.assertTrue(self.queries[0].startswith(destinationd.SUGGESTION_PATH))
-    self.assertEqual((state["choose"], state["places"][0]["name"]), ("南京市玄武区中山路18号 中国", SUGGESTIONS["result"][0]["name"]))
-    self.assertFalse("NavDestination" in self.params.values)   # a search's guess is not sent: the phone picks
-    self.dest.share("地点 https://maps.apple.com/?address=%E5%8D%97%E4%BA%AC&q=Z")   # a link with only a name
-    self.assertTrue("query=Z" in self.queries[1])
-
-  def test_search_box_takes_a_share(self):
-    places = self.dest.search(SHARE)["places"]
-    self.assertEqual(places[0]["name"], "大行宫")
-    self.assertFalse("NavDestination" in self.params.values)   # the page shows it first
-
-  def test_saved_places(self):
-    self.assertTrue("error" in self.dest.go("家"))
-    self.dest.share(SHARE)
-    self.assertEqual(self.dest.save_place({"label": "公司"})["saved"]["公司"]["name"], "大行宫")   # the current destination
-    self.dest.clear()
-    state = self.dest.go("公司")
-    self.assertEqual((state["destination"]["place_name"], state["saved_as"]), ("大行宫", "公司"))
-    self.dest.set_destination({"latitude": 31.0, "longitude": 118.0, "name": "别处"})
-    self.dest.go("公司")
-    self.assertEqual([p["name"] for p in self.dest.places.recent], ["别处", "大行宫"])   # saved: not put first again
-    self.assertTrue("error" in self.dest.save_place({"label": ""}))
-    self.assertEqual(self.dest.delete_place({"label": "公司"})["saved"], {})
-
   def test_recent_newest_first_without_repeats(self):
     for i in range(10):
       self.dest.set_destination({"latitude": 32 + i * 0.01, "longitude": 118.8, "name": f"p{i}"})
@@ -219,15 +60,17 @@ class TestShares(unittest.TestCase):
     names = [p["name"] for p in self.dest.places.recent]
     self.assertEqual(names, ["p5", "p9", "p8", "p7", "p6", "p4", "p3", "p2"])
 
-  def test_places_kept_in_a_file(self):
+  def test_saved_places_kept(self):
     with tempfile.TemporaryDirectory() as d:
       path = os.path.join(d, "navigation", "places.json")
-      places = destinationd.Places(path)
-      places.save("家", {"name": "家", "address": "", "latitude": 32.0, "longitude": 118.8})
-      self.assertEqual(destinationd.Places(path).saved["家"]["latitude"], 32.0)
-
-  def _no_resolve(self, url):
-    raise AssertionError(url)
+      os.makedirs(os.path.dirname(path))
+      with open(path, "w") as f:
+        json.dump({"saved": {"家": {"name": "家", "address": "", "latitude": 32.0, "longitude": 118.8}}, "recent": []}, f)
+      dest = destinationd.Destinations(self.params, places=destinationd.Places(path))
+      state = dest.set_destination({"latitude": 32.0, "longitude": 118.8, "name": "家"})
+      self.assertEqual((state["saved_as"], dest.places.recent), ("家", []))   # saved: not in recent
+      dest.set_destination({"latitude": 31.0, "longitude": 118.0, "name": "别处"})
+      self.assertEqual([p["name"] for p in destinationd.Places(path).recent], ["别处"])
 
 
 def route_answer():
@@ -238,27 +81,12 @@ def route_answer():
   return answer(steps)
 
 
-class Clock:
-  def __init__(self):
-    self.t = 1000.
-
-  def __call__(self):
-    return self.t
-
-
 class TestRoute(unittest.TestCase):
   def setUp(self):
     lat, lon = latlon(0, 0)
     self.params = FakeParams({"NavigationEnabled": True, "IsOffroad": True, "LastGPSPositionLLK": json.dumps({"latitude": lat, "longitude": lon})})
-    self.queries, self.clock, self.live = [], Clock(), None
-
-    def fetch(pq):
-      self.queries.append(pq)
-      return SUGGESTIONS if pq.startswith(destinationd.SUGGESTION_PATH) else route_answer()
-    self.dest = destinationd.Destinations(self.params, ("ak-test", "sk-test"), fetch, count_file=None, live=lambda: self.live,
-                                          clock=self.clock)
-    lat, lon = latlon(800, 0)
-    self.dest.set_destination({"latitude": lat, "longitude": lon, "name": "终点"})
+    self.live = None
+    self.dest = destinationd.Destinations(self.params, live=lambda: self.live)
 
   def test_segments_by_traffic(self):
     segs = destinationd.route_segments(*baidu_route.parse(route_answer())[1:])
@@ -274,101 +102,44 @@ class TestRoute(unittest.TestCase):
     self.assertLess(len(segs[0]["points"]), destinationd.MAX_ROUTE_POINTS * 1.1)
     self.assertEqual(segs[0]["points"][-1], [round(pts[-1][0], 6), round(pts[-1][1], 6)])
 
-  def test_preview_once_then_cached(self):
+  def test_no_route_without_navd(self):
+    lat, lon = latlon(800, 0)
+    self.dest.set_destination({"latitude": lat, "longitude": lon, "name": "终点"})
     r = self.dest.route()
-    self.assertEqual((r["route"]["source"], r["route"]["distance"], r["route"]["duration"]), ("preview", 800, 100))
-    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[0]).query)
-    self.assertEqual(urllib.parse.urlsplit(self.queries[0]).path, baidu.ROUTE_PATH)
-    self.assertEqual(query["coord_type"][0], "wgs84")
-    self.clock.t += 60
-    self.assertEqual(self.dest.route()["route"]["age"], 60)
-    self.assertEqual(len(self.queries), 1)
-    self.clock.t += destinationd.PREVIEW_STALE
-    self.dest.route()
-    self.assertEqual(len(self.queries), 2)   # its traffic aged: planned again
-
-  def test_new_destination_new_preview(self):
-    self.dest.route()
-    self.dest.set_destination({"latitude": 32.1, "longitude": 118.9})
-    self.assertEqual(self.dest.route()["error"], "稍后再试")   # PREVIEW_MIN_GAP
-    self.clock.t += destinationd.PREVIEW_MIN_GAP
-    self.assertEqual(self.dest.route()["route"]["source"], "preview")
-    self.assertEqual(len(self.queries), 2)
-
-  def test_no_destination_or_position(self):
-    self.dest.clear()
-    self.assertIsNone(self.dest.route()["route"])
-    self.dest.set_destination({"latitude": 32.1, "longitude": 118.9})
+    self.assertIsNone(r["route"])   # previews are comma-link's
+    self.assertEqual(r["car"][:2], list(self.dest.near()))
     self.params.values.pop("LastGPSPositionLLK")
-    self.assertTrue("error" in self.dest.route())
-    self.assertEqual(self.queries, [])
+    self.assertEqual(self.dest.route(), {"route": None, "car": None})
 
   def test_navd_route_while_driving(self):
     _, points, jams = baidu_route.parse(route_answer())
     self.live = {"points": points, "jams": jams, "distance": 650, "duration": 80, "car": [32.0, 118.8, 90.]}
     r = self.dest.route()
     self.assertEqual((r["route"]["source"], r["route"]["distance"], r["car"]), ("nav", 650, [32.0, 118.8, 90.]))
-    self.assertEqual(self.queries, [])
-
-  def test_preview_before_sending(self):
-    lat, lon = latlon(800, 0)
-    self.dest.clear()
-    r = self.dest.preview_route({"latitude": lat, "longitude": lon})
-    self.assertEqual(r["route"]["distance"], 800)
-    self.dest.set_destination({"latitude": lat, "longitude": lon})
-    self.dest.route()
-    self.assertEqual(len(self.queries), 1)   # the same place: the preview is reused
-    self.assertTrue("error" in self.dest.preview_route({"latitude": "x"}))
-
-  def test_phone_as_the_start(self):
-    self.params.values.pop("LastGPSPositionLLK")
-    lat, lon = latlon(800, 0)
-    self.assertTrue("error" in self.dest.preview_route({"latitude": lat, "longitude": lon}))
-    self.clock.t += destinationd.PREVIEW_MIN_GAP
-    r = self.dest.preview_route({"latitude": lat, "longitude": lon, "origin": list(latlon(0, 0))})
-    self.assertEqual((r["route"]["from"], r["route"]["distance"], r["car"]), ("phone", 800, None))
-    self.assertEqual(self.dest.route(phone=latlon(0, 0))["route"]["from"], "phone")
-    self.assertIsNone(destinationd.as_origin(["x", 1]))
-    self.dest.search("x", phone=(31.5, 118.5))
-    self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[-1]).query)["location"][0], "31.500000,118.500000")
-
-  def test_preview_from_another_start_is_planned_again(self):
-    self.params.values.pop("LastGPSPositionLLK")
-    lat, lon = latlon(800, 0)
-    self.dest.preview_route({"latitude": lat, "longitude": lon, "origin": list(latlon(0, 0))})
-    self.clock.t += destinationd.PREVIEW_MIN_GAP
-    self.dest.preview_route({"latitude": lat, "longitude": lon, "origin": list(latlon(100, 0))})
-    self.assertEqual(len(self.queries), 1)   # 100 m on: the same start
-    self.dest.preview_route({"latitude": lat, "longitude": lon, "origin": list(latlon(0, 5000))})
-    self.assertEqual(len(self.queries), 2)   # 5 km away: planned from there
-    self.assertTrue("error" in self.dest.preview_route({"latitude": lat, "longitude": lon}))   # no start: none of them
-
-  def test_nav_only(self):
-    self.assertIsNone(self.dest.route(nav_only=True)["route"])
-    self.assertEqual(self.queries, [])
-    self.assertEqual(self.dest.state()["position"], self.dest.near())
-
-  def test_preview_budget(self):
-    self.enterContext(patch.object(self.dest.daily, "left", return_value=0))
-    self.assertTrue("error" in self.dest.route())
-    self.assertEqual(self.queries, [])
+    self.assertEqual([s["status"] for s in r["route"]["segments"]], [1, 3, 1])
 
 
 class TestServer(unittest.TestCase):
-  def test_page_and_api(self):
+  def test_api(self):
     params = FakeParams({"NavigationEnabled": True})
-    dest = destinationd.Destinations(params, None, count_file=None)
+    dest = destinationd.Destinations(params)
     server = ThreadingHTTPServer(("127.0.0.1", 0), destinationd.handler(dest))
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     self.addCleanup(server.server_close)
     self.addCleanup(server.shutdown)
     url = f"http://127.0.0.1:{server.server_port}"
-    with urllib.request.urlopen(url + "/") as r:
-      self.assertTrue("搜地点" in r.read().decode())
+    for gone in ("/", "/api/search"):   # the page and search are comma-link's
+      with self.assertRaises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(url + gone, b"{}" if gone != "/" else None)
+      self.assertEqual(e.exception.code, 404)
     body = json.dumps({"latitude": 39.8946, "longitude": 116.322}).encode()
     req = urllib.request.Request(url + "/api/destination", body, {"Content-Type": "application/json"})
     with urllib.request.urlopen(req) as r:
       self.assertEqual(json.loads(r.read())["destination"]["latitude"], 39.8946)
+    with urllib.request.urlopen(url + "/api/route?nav=1") as r:
+      self.assertIsNone(json.loads(r.read())["route"])
+    with urllib.request.urlopen(url + "/api/places") as r:
+      self.assertEqual(len(json.loads(r.read())["recent"]), 1)
     with patch.object(destinationd, "allowed", return_value=False), self.assertRaises(urllib.error.HTTPError) as e:
       urllib.request.urlopen(url + "/api/state")
     self.assertEqual(e.exception.code, 403)

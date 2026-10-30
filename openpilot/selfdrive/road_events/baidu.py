@@ -52,8 +52,7 @@ SN_SAFE = "/:=&?#+!$,;'@()*[]"   # characters Baidu's SN rule leaves unquoted
 
 KPH_TO_MS = 1 / 3.6
 DAILY_BUDGET = {"cruise": 90, "route": 1500,   # calls a Beijing day: the quotas are about 100 and 5000
-                "nav": 1000, "place": 200,    # navd's routes (also route planning) and destinationd's place search
-                "preview": 100}               # destinationd's route previews before a drive
+                "nav": 1000}                  # navd's routes (also route planning); search and previews are comma-link's
 LOW_BUDGET = 20            # cruise calls left today below which there are no routine detections
 BUDGET_PER_HOUR = {"cruise": 30, "route": 120}
 CRUISE_PERIOD = 300.       # s between routine cruise detections
