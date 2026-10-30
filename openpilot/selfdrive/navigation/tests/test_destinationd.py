@@ -168,6 +168,18 @@ class TestShares(unittest.TestCase):
     self.assertEqual(p["name"], "家")
     self.assertAlmostEqual(p["longitude"], 118.7778, delta=0.001)
 
+  def test_route_links_go_to_the_end(self):
+    p = destinationd.link_place("https://maps.apple.com/?saddr=32.10,118.90&daddr=32.052,118.783&sll=32.10,118.90", resolve=self._no_resolve)
+    self.assertAlmostEqual(p["latitude"], 32.0542, delta=0.001)
+    p = destinationd.link_place("https://uri.amap.com/navigation?from=118.90,32.10,A&to=118.783,32.052,B&mode=car", resolve=self._no_resolve)
+    self.assertEqual(p["name"], "B")
+    self.assertAlmostEqual(p["longitude"], 118.7778, delta=0.001)
+    p = destinationd.link_place("https://www.amap.com/dir?from%5Blnglat%5D=118.9,32.1&to%5Blnglat%5D=118.783,32.052&to%5Bname%5D=C",
+                                resolve=self._no_resolve)
+    self.assertEqual(p["name"], "C")
+    p = destinationd.link_place("https://maps.apple.com/?saddr=X&daddr=%E5%AE%B6", resolve=self._no_resolve)
+    self.assertEqual(p, {"name": "家", "address": ""})   # only a name: searched
+
   def test_apple_short_link_followed(self):
     self.redirects["https://maps.apple/p/x1"] = "https://maps.apple.com/place?coordinate=32.052,118.783&name=Y"
     state = self.dest.share("Y https://maps.apple/p/x1")
@@ -177,7 +189,8 @@ class TestShares(unittest.TestCase):
   def test_location_text_searched(self):
     state = self.dest.share("南京市玄武区中山路18号\n中国")   # a Shortcut's 位置, as its address
     self.assertTrue(self.queries[0].startswith(destinationd.SUGGESTION_PATH))
-    self.assertEqual(state["destination"]["place_name"], SUGGESTIONS["result"][0]["name"])
+    self.assertEqual((state["choose"], state["places"][0]["name"]), ("南京市玄武区中山路18号 中国", SUGGESTIONS["result"][0]["name"]))
+    self.assertFalse("NavDestination" in self.params.values)   # a search's guess is not sent: the phone picks
     self.dest.share("地点 https://maps.apple.com/?address=%E5%8D%97%E4%BA%AC&q=Z")   # a link with only a name
     self.assertTrue("query=Z" in self.queries[1])
 

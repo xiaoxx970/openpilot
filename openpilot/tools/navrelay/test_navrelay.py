@@ -7,7 +7,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 
 from openpilot.selfdrive.navigation import destinationd
-from openpilot.selfdrive.navigation.tests.test_destinationd import DETAIL, SHARE, TARGET, route_answer
+from openpilot.selfdrive.navigation.tests.test_destinationd import DETAIL, SHARE, SUGGESTIONS, TARGET, route_answer
 from openpilot.selfdrive.road_events.tests.test_road_events import latlon
 from openpilot.tools.navrelay import navrelay
 
@@ -105,6 +105,15 @@ class TestApp(unittest.TestCase):
     self.assertEqual(self.push.sent, [("等车上线", "车上线后自动导航去 甲"), ("车上线了", "开始导航去 甲")])
     self.app.post("/api/destination", {"latitude": 32.2, "longitude": 118.9, "name": "乙"})   # sent at once: not "late"
     self.assertEqual(len(self.push.sent), 2)
+
+  def test_searched_share_waits_for_a_pick(self):
+    self.app.dest.fetch = lambda pq: SUGGESTIONS
+    s = self.app.post("/api/share", {"text": "我分享了一条路线 https://example.com/r"}, notify=True)
+    self.assertIsNone(self.car.destination)   # not sent
+    self.assertEqual(self.push.sent[0][0], "选一下目的地")
+    inbox = self.app.get("/api/inbox")
+    self.assertEqual((inbox["query"], inbox["places"]), (s["choose"], s["places"]))
+    self.assertEqual(self.app.get("/api/inbox"), {})   # once
 
   def test_push_api(self):
     self.assertEqual(self.app.get("/api/push/key"), {"key": "PUB"})

@@ -13,6 +13,7 @@ for the drive at hand.
 """
 import fcntl
 import json
+import logging
 import math
 import os
 import re
@@ -150,27 +151,36 @@ def link_place(url: str, resolve=redirect_target) -> dict | None:
     if parts.fragment:   # amap's web links keep them after the #
       q = {**dict(urllib.parse.parse_qsl(parts.fragment.split("?")[-1])), **q}
     marker = dict(kv.split(":", 1) for kv in q.get("marker", "").split(";") if ":" in kv)   # tencent: coord:lat,lng;title:...
-    name = q.get("name") or q.get("title") or marker.get("title") or ("" if PAIR.match(q.get("q", "")) else q.get("q", ""))
-    at, lon_first = None, False
-    for key in ("ll", "coordinate", "coord", "sll", "q", "daddr"):   # lat,lon
-      if PAIR.match(q.get(key, "")):
-        at = q[key]
-        break
-    if at is None and PAIR.match(marker.get("coord", "")):
-      at = marker["coord"]
-    if at is None and "p" in q and len(q["p"].split(",")) >= 3:   # amap: poiid,lat,lon,name,address
-      fields = q["p"].split(",")
-      at, name = ",".join(fields[1:3]), name or (fields[3] if len(fields) > 3 else "")
-    for key in ("position", "to", "dest"):   # amap: lon,lat[,name]
+    at, lon_first, name = None, False, ""
+    # a route's end first: its start, or the map's centre (sll), is not where it goes
+    if PAIR.match(q.get("daddr", "")) or PAIR.match(q.get("tocoord", "")):   # apple, tencent: lat,lon
+      at, name = q.get("daddr") if PAIR.match(q.get("daddr", "")) else q["tocoord"], q.get("toname") or q.get("to") or ""
+    for key in ("to[lnglat]", "to", "dest"):   # amap: lon,lat[,name]
       if at is None and PAIR.match(q.get(key, "")):
         at, lon_first = q[key], True
-        name = name or ",".join(q[key].split(",")[2:])
+        name = q.get("to[name]") or q.get("destName") or ",".join(q[key].split(",")[2:])
+    route = at is not None or bool(q.get("daddr") or q.get("to[name]") or q.get("destName"))
+    if route:
+      name = name or q.get("daddr") or q.get("to[name]") or q.get("destName") or ""
+    else:
+      name = q.get("name") or q.get("title") or marker.get("title") or ("" if PAIR.match(q.get("q", "")) else q.get("q", ""))
+      for key in ("ll", "coordinate", "coord", "q"):   # lat,lon
+        if PAIR.match(q.get(key, "")):
+          at = q[key]
+          break
+      if at is None and PAIR.match(marker.get("coord", "")):
+        at = marker["coord"]
+      if at is None and "p" in q and len(q["p"].split(",")) >= 3:   # amap: poiid,lat,lon,name,address
+        fields = q["p"].split(",")
+        at, name = ",".join(fields[1:3]), name or (fields[3] if len(fields) > 3 else "")
+      if at is None and PAIR.match(q.get("position", "")):   # amap: lon,lat
+        at, lon_first = q["position"], True
     if at is not None:
       a, b = (float(v) for v in PAIR.match(at).groups())
       lat, lon = baidu.gcj02_to_wgs84(*((b, a) if lon_first else (a, b)))
       if -90 <= lat <= 90 and -180 <= lon <= 180:
         return {"name": name, "address": q.get("address", ""), "latitude": round(lat, 6), "longitude": round(lon, 6)}
-    name = name or q.get("address", "")
+    name = name or ("" if route else q.get("address", ""))
     if name:
       return {"name": name, "address": q.get("address", "")}
     target = resolve(url)
@@ -336,13 +346,13 @@ class Destinations:
       return {"places": [{"name": query, "address": "", "latitude": pasted[0], "longitude": pasted[1]}]}
     if ANY_URL.search(query):
       place = self.share_place(query)
-      return {"places": [place]} if "error" not in place else place
+      return place if "error" in place or "places" in place else {"places": [place]}
     resp = self._baidu(SUGGESTION_PATH, suggestion_params(query[:64], self.bias(phone)))
     return resp if "error" in resp else {"places": parse_suggestions(resp)}
 
   def share_place(self, text: str) -> dict:
-    """The place of a Baidu Maps share, another map app's link, pasted coordinates, or else the text's first match in a
-    search (an iOS Shortcut's 位置 arrives as its address), or {"error": ...}."""
+    """The place of a Baidu Maps share, another map app's link or pasted coordinates; or else a search for the text (an iOS
+    Shortcut's 位置 arrives as its address), {"query", "places"}, for the phone to choose from; or {"error": ...}."""
     pasted = parse_coordinates(text.strip())
     if pasted is not None:
       return {"name": "", "address": "", "latitude": pasted[0], "longitude": pasted[1]}
@@ -355,6 +365,8 @@ class Destinations:
     if uid is None:
       if linked is not None and "latitude" in linked:
         return linked
+      if ANY_URL.search(text):   # the link alone, not the text: to learn its format from the log
+        logging.getLogger("destinationd").warning("share link without a position: %s", " ".join(ANY_URL.findall(text))[:500])
       words = linked["name"] if linked is not None else " ".join(ANY_URL.sub(" ", text).split())
       if not words:
         return {"error": "没认出地点"}
@@ -362,7 +374,7 @@ class Destinations:
       if "error" in resp:
         return resp
       found = parse_suggestions(resp)
-      return found[0] if found else {"error": f"没找到“{words[:20]}”"}
+      return {"query": words[:64], "places": found} if found else {"error": f"没找到“{words[:20]}”"}
     resp = self._baidu(DETAIL_PATH, [("uid", uid), ("ret_coordtype", "gcj02ll"), ("scope", "1"), ("output", "json")])
     if "error" in resp:
       return resp
@@ -370,8 +382,11 @@ class Destinations:
     return place if place is not None else {"error": "这个地点没有坐标"}
 
   def share(self, text: str) -> dict:
-    """A share from the phone becomes the destination at once (iOS Shortcuts' share sheet)."""
+    """A share from the phone becomes the destination at once (iOS Shortcuts' share sheet); one that only a search could
+    place is not sent: {"choose": query, "places": [...]}, for the phone to pick from."""
     place = self.share_place(str(text)[:500])
+    if "places" in place:
+      return {"choose": place["query"], "places": place["places"]}
     return place if "error" in place else self.set_destination(place)
 
   def go(self, label: str) -> dict:

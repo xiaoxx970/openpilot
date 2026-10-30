@@ -250,11 +250,16 @@ $('f').onsubmit=async e=>{e.preventDefault();$('q').blur();const q=$('q').value.
   if(results.length===1&&/https?:\/\//.test(q))return pick(results[0]);   // a pasted share: straight to it
   render()};
 async function refresh(){try{state=await api('/api/state')}catch(e){return}if(view==='home')render()}
+async function inbox(){   // a share only a search could place (navrelay): its results, to pick from
+  let r;try{r=await api('/api/inbox')}catch(e){return}
+  if(!r||!r.places||!r.places.length)return;
+  results=r.places;view='results';msg='没认出准确位置，选一个：';$('q').value=r.query;fitKey='';render()}
 async function loadPlaces(){try{places=await api('/api/places')}catch(e){}}
 async function loadRoute(){if(view!=='home')return;try{route=await api('/api/route',null,phone?{'X-From':phone.join(',')}:null)}catch(e){return}
   if(view==='home')render()}
 locate();
-(async()=>{await Promise.all([refresh(),loadPlaces()]);render();loadRoute();initPush().catch(()=>{})})();
+(async()=>{await Promise.all([refresh(),loadPlaces()]);render();loadRoute();inbox();initPush().catch(()=>{})})();
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')inbox()});
 setInterval(()=>{if(document.visibilityState==='visible')refresh()},5000);
 setInterval(()=>{if(document.visibilityState==='visible')loadRoute()},15000);
 </script></body></html>

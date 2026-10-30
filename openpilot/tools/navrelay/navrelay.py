@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 import threading
 import time
@@ -41,6 +42,7 @@ CAR_TIMEOUT = 8.       # s for one call to the car
 POLL_TIMEOUT = 3.      # s for the background look at the car
 POLL = 10.             # s between looks at the car: its state, the queued destination
 QUEUE_TTL = 3 * 3600.  # s a queued destination waits for the car
+INBOX_TTL = 600.       # s a share that needs choosing waits for the page
 MAX_BODY = 4096
 COOKIE = "navkey"
 POSTS = ("/api/search", "/api/destination", "/api/clear", "/api/share", "/api/go", "/api/places", "/api/places/delete",
@@ -237,6 +239,7 @@ class App:
   """The page's API: Destinations on the server, the car behind it."""
   def __init__(self, relay: Relay, dest: destinationd.Destinations, push=None):
     self.relay, self.dest, self.push = relay, dest, push
+    self.inbox: dict | None = None   # a share only a search could place: {"query", "places", "time"}, for the page to show
     if push is not None:
       relay.on_late = lambda body: push.notify("车上线了", f"开始导航去 {body.get('name') or '目的地'}")
 
@@ -272,6 +275,10 @@ class App:
       return self.dest.places.as_dict()
     if path == "/api/route":
       return self.route(destinationd.as_origin(phone.split(",")) if phone else None)
+    if path == "/api/inbox":   # taken once
+      inbox, self.inbox = self.inbox, None
+      fresh = inbox is not None and self.relay.clock() - inbox["time"] < INBOX_TTL
+      return {"query": inbox["query"], "places": inbox["places"]} if fresh else {}
     if path == "/api/push/key":
       return {"key": self.push.public_key()} if self.push is not None else {"error": "服务器没开推送"}
     return None
@@ -279,9 +286,13 @@ class App:
   def post(self, path: str, body: dict, notify: bool = False) -> dict:
     """notify: from a Shortcut (the page sees its own answer), a destination set is pushed to the phone."""
     answer = self._with_car(self._post(path, body))
+    if "choose" in answer:
+      self.inbox = {"query": answer["choose"], "places": answer["places"], "time": self.relay.clock()}
     if notify and self.push is not None and path in SENT:
       d = answer.get("destination")
-      if "error" in answer:
+      if "choose" in answer:
+        self.push.notify("选一下目的地", f"没认出准确位置，按“{answer['choose'][:20]}”找到 {len(answer['places'])} 个地点，点开选一个")
+      elif "error" in answer:
         self.push.notify("没发到车上", str(answer["error"]))
       elif isinstance(d, dict):
         name = d.get("place_name") or "目的地"
@@ -461,6 +472,7 @@ def keys_from_env() -> tuple[str, str] | None:
 
 
 def main():
+  logging.basicConfig(format="%(name)s: %(message)s")   # to the journal: links shares were not understood from
   key = os.environ.get("NAVRELAY_KEY", "")
   if len(key) < 24:
     raise SystemExit("NAVRELAY_KEY must be set, at least 24 characters")
