@@ -9,8 +9,10 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
-from openpilot.selfdrive.navigation import destinationd
+from openpilot.selfdrive.navigation import baidu_route, destinationd
+from openpilot.selfdrive.navigation.tests.test_baidu_route import answer, line, step
 from openpilot.selfdrive.road_events import baidu
+from openpilot.selfdrive.road_events.tests.test_road_events import latlon
 
 
 class FakeParams:
@@ -174,6 +176,92 @@ class TestShares(unittest.TestCase):
 
   def _no_resolve(self, url):
     raise AssertionError(url)
+
+
+def route_answer():
+  """Baidu's driving answer for 0..800 m east along y=0, congested 300..500 m."""
+  steps = [step(line(0, 0, 800, 0), "A", 100., traffic=[{"status": 1, "geo_cnt": 15, "distance": 300.},
+                                                       {"status": 3, "geo_cnt": 10, "distance": 200.},
+                                                       {"status": 1, "geo_cnt": 15, "distance": 300.}])]
+  return answer(steps)
+
+
+class Clock:
+  def __init__(self):
+    self.t = 1000.
+
+  def __call__(self):
+    return self.t
+
+
+class TestRoute(unittest.TestCase):
+  def setUp(self):
+    lat, lon = latlon(0, 0)
+    self.params = FakeParams({"NavigationEnabled": True, "IsOffroad": True, "LastGPSPositionLLK": json.dumps({"latitude": lat, "longitude": lon})})
+    self.queries, self.clock, self.live = [], Clock(), None
+
+    def fetch(pq):
+      self.queries.append(pq)
+      return route_answer()
+    self.dest = destinationd.Destinations(self.params, ("ak-test", "sk-test"), fetch, count_file=None, live=lambda: self.live,
+                                          clock=self.clock)
+    lat, lon = latlon(800, 0)
+    self.dest.set_destination({"latitude": lat, "longitude": lon, "name": "终点"})
+
+  def test_segments_by_traffic(self):
+    segs = destinationd.route_segments(*baidu_route.parse(route_answer())[1:])
+    self.assertEqual([s["status"] for s in segs], [1, 3, 1])
+    path = baidu.as_path([tuple(p) for p in segs[1]["points"]])
+    self.assertAlmostEqual(path[-1][0], 200., delta=2.)
+    self.assertEqual(segs[0]["points"][-1], segs[1]["points"][0])   # runs join up
+    self.assertEqual(destinationd.route_segments([(32., 118.)], []), [])
+
+  def test_thinned(self):
+    pts = [latlon(x, 0) for x in range(0, 20000, 5)]
+    segs = destinationd.route_segments(pts, [])
+    self.assertLess(len(segs[0]["points"]), destinationd.MAX_ROUTE_POINTS * 1.1)
+    self.assertEqual(segs[0]["points"][-1], [round(pts[-1][0], 6), round(pts[-1][1], 6)])
+
+  def test_preview_once_then_cached(self):
+    r = self.dest.route()
+    self.assertEqual((r["route"]["source"], r["route"]["distance"], r["route"]["duration"]), ("preview", 800, 100))
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[0]).query)
+    self.assertEqual(urllib.parse.urlsplit(self.queries[0]).path, baidu.ROUTE_PATH)
+    self.assertEqual(query["coord_type"][0], "wgs84")
+    self.clock.t += 60
+    self.assertEqual(self.dest.route()["route"]["age"], 60)
+    self.assertEqual(len(self.queries), 1)
+    self.clock.t += destinationd.PREVIEW_STALE
+    self.dest.route()
+    self.assertEqual(len(self.queries), 2)   # its traffic aged: planned again
+
+  def test_new_destination_new_preview(self):
+    self.dest.route()
+    self.dest.set_destination({"latitude": 32.1, "longitude": 118.9})
+    self.assertEqual(self.dest.route()["error"], "稍后再试")   # PREVIEW_MIN_GAP
+    self.clock.t += destinationd.PREVIEW_MIN_GAP
+    self.assertEqual(self.dest.route()["route"]["source"], "preview")
+    self.assertEqual(len(self.queries), 2)
+
+  def test_no_destination_or_position(self):
+    self.dest.clear()
+    self.assertIsNone(self.dest.route()["route"])
+    self.dest.set_destination({"latitude": 32.1, "longitude": 118.9})
+    self.params.values.pop("LastGPSPositionLLK")
+    self.assertTrue("error" in self.dest.route())
+    self.assertEqual(self.queries, [])
+
+  def test_navd_route_while_driving(self):
+    _, points, jams = baidu_route.parse(route_answer())
+    self.live = {"points": points, "jams": jams, "distance": 650, "duration": 80, "car": [32.0, 118.8, 90.]}
+    r = self.dest.route()
+    self.assertEqual((r["route"]["source"], r["route"]["distance"], r["car"]), ("nav", 650, [32.0, 118.8, 90.]))
+    self.assertEqual(self.queries, [])
+
+  def test_preview_budget(self):
+    self.enterContext(patch.object(self.dest.daily, "left", return_value=0))
+    self.assertTrue("error" in self.dest.route())
+    self.assertEqual(self.queries, [])
 
 
 class TestServer(unittest.TestCase):

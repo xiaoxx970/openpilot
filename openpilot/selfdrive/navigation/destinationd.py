@@ -25,6 +25,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address, ip_network
 
+from openpilot.selfdrive.navigation import baidu_route
 from openpilot.selfdrive.road_events import baidu
 
 PORT = 8082
@@ -38,6 +39,9 @@ COUNT_FILE = "/data/baidu_place_calls"
 ALLOWED = (ip_network("100.64.0.0/10"), ip_network("fd7a:115c:a1e0::/48"), ip_network("127.0.0.0/8"), ip_network("::1/128"))
 MAX_RESULTS = 10
 INTERFACE = "tailscale0"
+PREVIEW_STALE = 600.     # s a route preview is shown before it is planned again: its traffic ages
+PREVIEW_MIN_GAP = 30.    # s between two previews
+MAX_ROUTE_POINTS = 600   # a route on the page, thinned: it goes over cellular
 SIOCGIFADDR = 0x8915
 
 
@@ -133,6 +137,28 @@ def same_place(a: dict, b: dict) -> bool:
   return abs(a["latitude"] - b["latitude"]) < 1e-4 and abs(a["longitude"] - b["longitude"]) < 1e-4
 
 
+def route_segments(points: list[tuple[float, float]], jams: list[tuple[float, float, int]]) -> list[dict]:
+  """The route as runs of one traffic status (1 smooth, 2 slow, 3 congested, 4 severe), each {status, points [[lat, lon]]},
+  split where the jams (start, length, status along it) start and end; thinned to at most about MAX_ROUTE_POINTS points."""
+  if len(points) < 2:
+    return []
+  path = baidu.as_path(points)
+  step = max(1, -(-len(path) // MAX_ROUTE_POINTS))
+  kept = path[::step] + ([path[-1]] if (len(path) - 1) % step else [])
+  cuts = sorted({0., path[-1][0], *(c for s0, n, _ in jams for c in (s0, s0 + n) if 0. < c < path[-1][0])})
+  out: list[dict] = []
+  for a, b in zip(cuts, cuts[1:], strict=False):
+    mid = (a + b) / 2
+    status = next((st for s0, n, st in jams if s0 <= mid < s0 + n), 1)
+    run = [baidu_route.point_at(path, a)] + [(la, lo) for s, la, lo in kept if a < s < b] + [baidu_route.point_at(path, b)]
+    run = [[round(la, 6), round(lo, 6)] for la, lo in run]
+    if out and out[-1]["status"] == status:
+      out[-1]["points"] += run[1:]
+    else:
+      out.append({"status": status, "points": run})
+  return out
+
+
 class Places:
   """Saved places by label and the recent destinations, in a file (in memory without one)."""
   def __init__(self, path: str | None = PLACES_FILE):
@@ -194,8 +220,12 @@ def as_place(body) -> dict | None:
 class Destinations:
   """What the page does, apart from HTTP: tests drive it with fake params and a fake fetch."""
   def __init__(self, params, keys=None, fetch=baidu.http_get, count_file: str | None = COUNT_FILE, places: Places | None = None,
-               resolve=redirect_target):
+               resolve=redirect_target, live=None, clock=time.monotonic):
     self.params = params
+    self.live = live      # navd's route while driving: {points, jams, distance, duration, car}, None without one
+    self.clock = clock
+    self.preview: dict | None = None
+    self.preview_tried = -math.inf
     self.keys = keys
     self.fetch = fetch
     self.resolve = resolve
@@ -216,14 +246,14 @@ class Destinations:
     except (ValueError, KeyError, TypeError):
       return None
 
-  def _baidu(self, path: str, params: list) -> dict:
-    """One place API call within the daily budget: the answer, or {"error": ...}."""
+  def _baidu(self, path: str, params: list, kind: str = "place") -> dict:
+    """One API call within the daily budget: the answer, or {"error": ...}."""
     if self.keys is None:
       return {"error": "没有百度 Key（/data/baidu_ak），只能粘贴“纬度,经度”"}
     now = baidu.unix_now()
-    if self.daily.left("place", now) <= 0:
-      return {"error": "今天的地点查询次数用完了"}
-    self.daily.add("place", now)
+    if self.daily.left(kind, now) <= 0:
+      return {"error": "今天的地点查询次数用完了" if kind == "place" else "今天的路线预览次数用完了"}
+    self.daily.add(kind, now)
     try:
       resp = self.fetch(baidu.signed_get(path, params, *self.keys))
     except Exception as e:   # only the type: a message could hold the signed URL
@@ -308,75 +338,46 @@ class Destinations:
     self.params.remove("NavDestination")
     return self.state()
 
+  def route(self) -> dict:
+    """The route to show on the page: navd's while it navigates, else a preview from where the car is."""
+    live = self.live() if self.live is not None else None
+    if live is not None:
+      return {"route": {"source": "nav", "segments": route_segments(live["points"], live["jams"]), "distance": live["distance"],
+                        "duration": live["duration"]}, "car": live["car"]}
+    near = self.near()
+    car = [near[0], near[1], None] if near is not None else None
+    d = self.current()
+    if d is None:
+      return {"route": None, "car": car}
+    preview = self._preview(d, near)
+    if "error" in preview:
+      return {"route": None, "car": car, "error": preview["error"]}
+    return {"route": {"source": "preview", "segments": preview["segments"], "distance": preview["distance"],
+                      "duration": preview["duration"], "age": round(self.clock() - preview["time"])}, "car": car}
 
-PAGE = """<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>导航目的地</title>
-<style>
-body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#0b1116;color:#e8eef2;max-width:640px}
-h1{font-size:20px;margin:0 0 12px}
-#state{background:#16222b;border-radius:10px;padding:12px;margin-bottom:12px;line-height:1.5}
-.muted{color:#93a4b0;font-size:14px}
-form{display:flex;gap:8px;margin-bottom:12px}
-input{flex:1;font-size:17px;padding:10px;border-radius:8px;border:1px solid #33454f;background:#0f1a21;color:#e8eef2}
-button{font-size:16px;padding:10px 14px;border-radius:8px;border:0;background:#2f8f5b;color:#fff}
-button.secondary{background:#3a4a55}
-.place{background:#16222b;border-radius:10px;padding:12px;margin-bottom:8px}
-.place b{display:block;margin-bottom:2px}
-.place button{margin-top:8px;margin-right:6px}
-h2{font-size:16px;margin:16px 0 8px;color:#93a4b0}
-#saved{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
-#saved button{background:#25607f}
-#msg{color:#f2b36b;margin-bottom:8px}
-</style></head><body>
-<h1>导航目的地</h1>
-<div id="state">读取中…</div>
-<div id="saved"></div>
-<form id="f"><input id="q" placeholder="搜地点或粘贴分享链接" autocomplete="off"><button>搜索</button></form>
-<div id="msg"></div><div id="list"></div>
-<h2>最近去过</h2><div id="recent" class="muted">还没有</div>
-<script>
-const $=id=>document.getElementById(id);
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-async function api(path,body){
-  const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});return r.json()}
-function show(s){
-  let h='';
-  if(!s.navigation)h+='<div class="muted">导航没开：设置 &gt; 开发者 &gt; navigation (alpha)</div>';
-  const d=s.destination;
-  if(d){h+='<div>当前目的地：<b>'+esc(d.place_name||(d.latitude.toFixed(5)+', '+d.longitude.toFixed(5)))+'</b></div>'
-    +'<button class="secondary" onclick="clearDest()">取消导航</button>'
-    +(s.saved_as?' <span class="muted">（常用地点：'+esc(s.saved_as)+'）</span>':' <button class="secondary" onclick="saveCur()">存为常用地点</button>')}
-  else h+='<div>还没有目的地</div>';
-  h+='<div class="muted">'+(s.onroad?'车已启动':'车没启动：熄火时目的地会被清掉，comma 重启也会')+'</div>';
-  $('state').innerHTML=h;
-}
-function card(p,act){return '<div class="place"><b>'+esc(p.name||(p.latitude.toFixed(5)+', '+p.longitude.toFixed(5)))+'</b><span class="muted">'
-  +esc(p.address||'')+'</span><br>'+act+'</div>'}
-function showPlaces(r){
-  window.saved=r.saved;window.recent=r.recent;
-  $('saved').innerHTML=Object.keys(r.saved).map(k=>'<button onclick="go(this.dataset.k)" data-k="'+esc(k)+'">'+esc(k)+'</button>').join('');
-  $('recent').innerHTML=r.recent.length?r.recent.map((p,i)=>card(p,'<button onclick="goRecent('+i+')">去这里</button>')).join(''):'还没有';
-}
-async function places(){showPlaces(await api('/api/places'))}
-async function go(k){const r=await api('/api/go',{label:k});if(r.error){$('msg').textContent=r.error;return}
-  show(r);places();$('msg').textContent='已设为目的地：'+k}
-async function goRecent(i){show(await api('/api/destination',window.recent[i]));places()}
-async function saveCur(){const k=prompt('起个名字，比如 家、公司');if(!k)return;const r=await api('/api/places',{label:k});
-  if(r.error){$('msg').textContent=r.error;return}showPlaces(r)}
-async function refresh(){try{show(await api('/api/state'))}catch(e){$('state').textContent='连不上车'}}
-async function clearDest(){show(await api('/api/clear',{}))}
-async function pick(i){const p=window.places[i];show(await api('/api/destination',p));$('list').innerHTML='';
-  $('msg').textContent='已设为目的地：'+p.name;places()}
-$('f').onsubmit=async e=>{e.preventDefault();$('msg').textContent='搜索中…';$('list').innerHTML='';
-  const r=await api('/api/search',{query:$('q').value});
-  if(r.error){$('msg').textContent=r.error;return}
-  window.places=r.places;$('msg').textContent=r.places.length?'':'没找到';
-  $('list').innerHTML=r.places.map((p,i)=>'<div class="place"><b>'+esc(p.name)+'</b><span class="muted">'+esc(p.address)+'</span><br>'
-    +'<button onclick="pick('+i+')">设为目的地</button></div>').join('')};
-refresh();places();setInterval(refresh,5000);
-</script></body></html>
-"""
+  def _preview(self, d: dict, near: tuple[float, float] | None) -> dict:
+    p, now = self.preview, self.clock()
+    if p is not None and same_place(p["to"], d) and now - p["time"] < PREVIEW_STALE:
+      return p
+    if near is None:
+      return {"error": "还不知道车在哪，没法预览路线"}
+    if now - self.preview_tried < PREVIEW_MIN_GAP:
+      return p if p is not None and same_place(p["to"], d) else {"error": "稍后再试"}
+    self.preview_tried = now
+    resp = self._baidu(baidu.ROUTE_PATH, baidu.route_params(near[0], near[1], 0., 0., (d["latitude"], d["longitude"])), "preview")
+    if "error" in resp:
+      return resp
+    parsed = baidu_route.parse(resp)
+    if parsed is None:
+      return {"error": "百度没有给出路线"}
+    steps, points, jams = parsed
+    self.preview = {"to": d, "time": now, "segments": route_segments(points, jams),
+                    "distance": round(sum(st["distance"] for st in steps)), "duration": round(sum(st["duration"] for st in steps))}
+    return self.preview
+
+
+PAGE = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "destination_page.html"), encoding="utf-8").read()   # also served
+# by tools/navrelay from the user's server, which puts the map's browser AK in: changes to it need no install on the car
 
 
 def handler(dest: Destinations):
@@ -408,6 +409,8 @@ def handler(dest: Destinations):
         self._json(dest.state())
       elif path == "/api/places":
         self._json(dest.places.as_dict())
+      elif path == "/api/route":
+        self._json(dest.route())
       else:
         self._send(404, b"", "text/plain")
 
@@ -445,10 +448,43 @@ def handler(dest: Destinations):
   return Handler
 
 
+LIVE_MAX_AGE = 15.   # s since navd last sent its route (it does every 10 s): older, it stopped navigating
+
+
+def live_route():
+  """navd's current route, for Destinations.live: read on each page poll, from any of the server's threads."""
+  import threading
+
+  import cereal.messaging as messaging
+  from openpilot.selfdrive.navigation.helpers import latest_gps_source
+
+  sm = messaging.SubMaster(['navRouteIC', 'navInstruction', 'gpsLocation', 'gpsLocationExternal'])
+  lock = threading.Lock()
+
+  def get() -> dict | None:
+    with lock:
+      sm.update(0)
+      now = time.monotonic()
+      r = sm['navRouteIC']
+      if now - sm.recv_time['navRouteIC'] > LIVE_MAX_AGE or not r.requestTime or now - r.requestTime * 1e-9 > baidu.NAV_STALE:
+        return None
+      points = [(c.latitude, c.longitude) for c in r.coordinates]
+      if len(points) < 2:
+        return None
+      ins = sm['navInstruction']
+      fresh = sm.valid['navInstruction'] and now - sm.recv_time['navInstruction'] < LIVE_MAX_AGE
+      source = latest_gps_source(sm)
+      gps = sm[source] if source is not None else None
+      return {"points": points, "jams": [(j.start, j.length, j.status) for j in r.jams],
+              "distance": round(ins.distanceRemaining) if fresh else None, "duration": round(ins.timeRemaining) if fresh else None,
+              "car": [gps.latitude, gps.longitude, gps.bearingDeg] if gps is not None else None}
+  return get
+
+
 def main():
   from openpilot.common.params import Params
 
-  dest = Destinations(Params(), baidu.load_keys(), places=Places())
+  dest = Destinations(Params(), baidu.load_keys(), places=Places(), live=live_route())
   while True:
     address = interface_ip()
     if address is not None:

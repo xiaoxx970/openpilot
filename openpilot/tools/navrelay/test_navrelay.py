@@ -17,6 +17,7 @@ class FakeCar:
     self.online = True
     self.calls = []
     self.destination = None
+    self.route = {"route": None, "car": None}
 
   def call(self, path, body=None):
     if not self.online:
@@ -26,6 +27,8 @@ class FakeCar:
       return 200, "<html>导航目的地</html>".encode(), "text/html; charset=utf-8"
     if path == "/api/places":
       return 200, json.dumps({"saved": {"家": {"name": "家"}}, "recent": []}).encode(), "application/json"
+    if path == "/api/route":
+      return 200, json.dumps(self.route).encode(), "application/json"
     if path == "/api/go" and body.get("label") == "没有":
       return 200, json.dumps({"error": "还没有存这个地点"}).encode(), "application/json"
     if path == "/api/destination":
@@ -92,6 +95,13 @@ class TestRelay(unittest.TestCase):
     self.assertTrue(self.relay.deliver())
     self.assertEqual(self.car.calls, [])
 
+  def test_route_kept_for_offline(self):
+    self.car.route = {"route": {"source": "nav", "segments": [], "distance": 5, "duration": 1}, "car": None}
+    self.relay.handle("GET", "/api/route", None)
+    self.car.online = False
+    r = json.loads(self.relay.handle("GET", "/api/route", None)[1])
+    self.assertEqual((r["route"]["source"], r["offline"]), ("nav", True))
+
   def test_no_page_yet(self):
     self.car.online = False
     self.assertEqual(self.relay.handle("GET", "/", None)[0], 503)
@@ -148,6 +158,17 @@ class TestServer(unittest.TestCase):
     with self.assertRaises(urllib.error.HTTPError) as e:
       self.open("/api/other", {}, {"X-Key": KEY})
     self.assertEqual(e.exception.code, 404)
+
+  def test_page_from_here_with_the_map_key(self):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), navrelay.handler(navrelay.Relay(self.car, None), KEY, "JSKEY123",
+                                                                    b"<html>const JSAK='__BAIDU_JS_AK__';</html>"))
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    self.addCleanup(server.server_close)
+    self.addCleanup(server.shutdown)
+    self.car.online = False
+    req = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/", headers={"X-Key": KEY})
+    with urllib.request.urlopen(req, timeout=5) as r:
+      self.assertEqual(r.read(), b"<html>const JSAK='JSKEY123';</html>")
 
   def test_key_required(self):
     self.assertFalse(navrelay.key_ok("", ""))

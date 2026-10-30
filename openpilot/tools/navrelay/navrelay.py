@@ -10,8 +10,10 @@ proxy (1Panel's openresty), which does https for the domain.
 
 - Key: typed into the page once (kept as a cookie), or the X-Key header (iOS Shortcuts). Never in a URL: access logs,
   history and Referer headers would keep it.
-- Car offline: share / go / destination / clear are queued (newest wins, QUEUE_TTL), the page is the last copy seen,
-  /api/state shows the queued one, search answers that the car is offline.
+- Car offline: share / go / destination / clear are queued (newest wins, QUEUE_TTL), the page, places and route are the
+  last ones seen, /api/state shows the queued one, search answers that the car is offline.
+- The page is served from here (NAVRELAY_PAGE, the car's selfdrive/navigation/destination_page.html), the car's own copy
+  without one. Its map takes Baidu's browser AK (NAVRELAY_JS_AK), put into the page here: it is kept off the car.
 - Python stdlib only. Config from the environment, see install.sh.
 """
 from __future__ import annotations
@@ -61,6 +63,7 @@ class Relay:
     self.pending: dict | None = None   # {"path", "body", "time"}
     self.page: bytes | None = None     # the car's page, last seen
     self.places: dict | None = None    # the car's places, last seen
+    self.route: dict | None = None     # the car's route for the page's map, last seen
     self.last_seen: float | None = None
     self._load()
 
@@ -73,13 +76,13 @@ class Relay:
         s = json.load(f)
     except (OSError, ValueError):
       return
-    self.pending, self.places, self.last_seen = s.get("pending"), s.get("places"), s.get("last_seen")
+    self.pending, self.places, self.route, self.last_seen = s.get("pending"), s.get("places"), s.get("route"), s.get("last_seen")
     self.page = s["page"].encode() if s.get("page") else None
 
   def _save(self):
     if self.state_path is None:
       return
-    s = {"pending": self.pending, "places": self.places, "last_seen": self.last_seen,
+    s = {"pending": self.pending, "places": self.places, "route": self.route, "last_seen": self.last_seen,
          "page": self.page.decode() if self.page else None}
     tmp = self.state_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -92,11 +95,15 @@ class Relay:
       return
     if path == "/":
       self.page = body
-    elif path in ("/api/places", "/api/places/delete"):
+    elif path in ("/api/places", "/api/places/delete", "/api/route"):
       try:
-        self.places = json.loads(body)
+        answer = json.loads(body)
       except ValueError:
-        pass
+        return
+      if path == "/api/route":
+        self.route = answer if answer.get("route") else None
+      else:
+        self.places = answer
 
   def _expired(self) -> bool:
     return self.pending is not None and self.clock() - self.pending["time"] > QUEUE_TTL
@@ -144,6 +151,8 @@ class Relay:
         return _json(self.offline_state())
       if path == "/api/places":
         return _json(self.places or {"saved": {}, "recent": []})
+      if path == "/api/route":   # the last one seen, as it was then
+        return _json({**self.route, "offline": True} if self.route else {"route": None, "car": None, "error": "车不在线"})
       if path == "/api/search":
         return _json({"error": "车不在线，现在搜不了。可以粘贴百度地图分享链接，或者点常用地点，车上线后自动发过去。"})
       return _json({"error": "车不在线"})
@@ -199,7 +208,7 @@ button{{font-size:16px;padding:10px 14px;border-radius:8px;border:0;background:#
 """
 
 
-def handler(relay: Relay, key: str):
+def handler(relay: Relay, key: str, js_ak: str = "", page: bytes | None = None):
   class Handler(BaseHTTPRequestHandler):
     server_version = "navrelay"
     timeout = 15.   # s; a stalled phone does not hold a thread
@@ -244,10 +253,16 @@ def handler(relay: Relay, key: str):
         else:
           self._send(403, b"", "text/plain")
         return
-      if path not in ("/", "/api/state", "/api/places"):
+      if path not in ("/", "/api/state", "/api/places", "/api/route"):
         self._send(404, b"", "text/plain")
         return
-      self._send(*relay.handle("GET", path, None))
+      if path == "/" and page is not None:   # the page lives here: it opens with the car offline, and changes to it need no install
+        status, body, kind = 200, page, "text/html; charset=utf-8"
+      else:
+        status, body, kind = relay.handle("GET", path, None)
+      if path == "/" and js_ak:   # the map's browser AK lives here, not on the car
+        body = body.replace(b"__BAIDU_JS_AK__", js_ak.encode())
+      self._send(status, body, kind)
 
     def do_POST(self):
       path = urllib.parse.urlsplit(self.path).path
@@ -283,7 +298,12 @@ def main():
     raise SystemExit("NAVRELAY_KEY must be set, at least 24 characters")
   relay = Relay(Car(os.environ.get("NAVRELAY_CAR", "http://100.69.175.43:8082")), os.environ.get("NAVRELAY_STATE", "/var/lib/navrelay"))
   address = (os.environ.get("NAVRELAY_BIND", "127.0.0.1"), int(os.environ.get("NAVRELAY_PORT", "8089")))
-  server = ThreadingHTTPServer(address, handler(relay, key))
+  js_ak = os.environ.get("NAVRELAY_JS_AK", "")
+  page = None
+  if os.environ.get("NAVRELAY_PAGE"):
+    with open(os.environ["NAVRELAY_PAGE"], "rb") as f:
+      page = f.read()
+  server = ThreadingHTTPServer(address, handler(relay, key, js_ak if js_ak.isalnum() else "", page))
   stop = threading.Event()
   threading.Thread(target=relay.run_deliveries, args=(stop,), daemon=True).start()
   try:

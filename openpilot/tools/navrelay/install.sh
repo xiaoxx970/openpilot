@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install or update navrelay on the server, behind a reverse proxy that does https (1Panel's openresty).
-# Run as root (sudo bash install.sh [port]) with navrelay.py next to it. Listens on 127.0.0.1 only, plain http.
+# Run as root (sudo bash install.sh [port]) with navrelay.py and destination_page.html next to it. Listens on 127.0.0.1 only, plain http.
 # Keeps an existing key, which it never prints: read it in /etc/navrelay/navrelay.env.
 set -euo pipefail
 
@@ -13,20 +13,24 @@ python3 -c 'import sys; assert sys.version_info >= (3, 8), sys.version'
 id navrelay >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin navrelay
 install -d -m 755 /opt/navrelay
 install -m 644 "$HERE/navrelay.py" /opt/navrelay/navrelay.py
+install -m 644 "$HERE/destination_page.html" /opt/navrelay/destination_page.html   # selfdrive/navigation/destination_page.html
 install -d -m 750 -o root -g navrelay "$ETC"
 install -d -m 700 -o navrelay -g navrelay /var/lib/navrelay
 
 if [ ! -f "$ETC/navrelay.env" ]; then
   echo "NAVRELAY_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')" > "$ETC/navrelay.env"
 fi
-# everything but the key is rewritten, so an older https setup is dropped
+# everything but the keys is rewritten, so an older https setup is dropped
 KEY_LINE="$(grep '^NAVRELAY_KEY=' "$ETC/navrelay.env")"
+JS_LINE="$(grep '^NAVRELAY_JS_AK=' "$ETC/navrelay.env" || echo "NAVRELAY_JS_AK=${NAVRELAY_JS_AK:-}")"
 cat > "$ETC/navrelay.env" <<EOF
 $KEY_LINE
+$JS_LINE
 NAVRELAY_CAR=$CAR
 NAVRELAY_BIND=127.0.0.1
 NAVRELAY_PORT=$PORT
 NAVRELAY_STATE=/var/lib/navrelay
+NAVRELAY_PAGE=/opt/navrelay/destination_page.html
 EOF
 chown root:navrelay "$ETC/navrelay.env"; chmod 640 "$ETC/navrelay.env"
 rm -f "$ETC"/server.key "$ETC"/server.crt "$ETC"/ca.crt "$ETC"/ca.srl

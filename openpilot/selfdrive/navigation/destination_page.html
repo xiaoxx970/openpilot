@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>导航目的地</title>
+<style>
+body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#0b1116;color:#e8eef2;max-width:640px}
+h1{font-size:20px;margin:0 0 12px}
+#state{background:#16222b;border-radius:10px;padding:12px;margin-bottom:12px;line-height:1.5}
+.muted{color:#93a4b0;font-size:14px}
+form{display:flex;gap:8px;margin-bottom:12px}
+input{flex:1;font-size:17px;padding:10px;border-radius:8px;border:1px solid #33454f;background:#0f1a21;color:#e8eef2}
+button{font-size:16px;padding:10px 14px;border-radius:8px;border:0;background:#2f8f5b;color:#fff}
+button.secondary{background:#3a4a55}
+.place{background:#16222b;border-radius:10px;padding:12px;margin-bottom:8px}
+.place b{display:block;margin-bottom:2px}
+.place button{margin-top:8px;margin-right:6px}
+h2{font-size:16px;margin:16px 0 8px;color:#93a4b0}
+#saved{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+#saved button{background:#25607f}
+#msg{color:#f2b36b;margin-bottom:8px}
+#map{height:45vh;border-radius:10px;margin-bottom:8px;display:none}
+#route{margin-bottom:12px}
+</style></head><body>
+<h1>导航目的地</h1>
+<div id="map"></div><div id="route" class="muted"></div>
+<div id="state">读取中…</div>
+<div id="saved"></div>
+<form id="f"><input id="q" placeholder="搜地点或粘贴分享链接" autocomplete="off"><button>搜索</button></form>
+<div id="msg"></div><div id="list"></div>
+<h2>最近去过</h2><div id="recent" class="muted">还没有</div>
+<script>
+const $=id=>document.getElementById(id);
+const JSAK='__BAIDU_JS_AK__';   // the browser AK, filled in by navrelay; without one there is no map
+const PI=Math.PI,A=6378245.0,EE=0.00669342162296594323,XPI=PI*3000/180;
+function gcjDelta(lat,lon){const x=lon-105,y=lat-35;
+  let dlat=-100+2*x+3*y+0.2*y*y+0.1*x*y+0.2*Math.sqrt(Math.abs(x));
+  dlat+=(20*Math.sin(6*x*PI)+20*Math.sin(2*x*PI))*2/3;dlat+=(20*Math.sin(y*PI)+40*Math.sin(y/3*PI))*2/3;
+  dlat+=(160*Math.sin(y/12*PI)+320*Math.sin(y*PI/30))*2/3;
+  let dlon=300+x+2*y+0.1*x*x+0.1*x*y+0.1*Math.sqrt(Math.abs(x));
+  dlon+=(20*Math.sin(6*x*PI)+20*Math.sin(2*x*PI))*2/3;dlon+=(20*Math.sin(x*PI)+40*Math.sin(x/3*PI))*2/3;
+  dlon+=(150*Math.sin(x/12*PI)+300*Math.sin(x/30*PI))*2/3;
+  const rad=lat/180*PI,magic=1-EE*Math.sin(rad)**2;
+  return [dlat*180/((A*(1-EE))/(magic*Math.sqrt(magic))*PI),dlon*180/(A/Math.sqrt(magic)*Math.cos(rad)*PI)]}
+function bdPoint(lat,lon){   // WGS-84 -> GCJ-02 -> BD-09, the map's
+  const d=gcjDelta(lat,lon),x=lon+d[1],y=lat+d[0];
+  const z=Math.sqrt(x*x+y*y)+0.00002*Math.sin(y*XPI),t=Math.atan2(y,x)+0.000003*Math.cos(x*XPI);
+  return new BMapGL.Point(z*Math.cos(t)+0.0065,z*Math.sin(t)+0.006)}
+function wgsOf(p){   // BD-09 -> GCJ-02 -> WGS-84
+  const x=p.lng-0.0065,y=p.lat-0.006,z=Math.sqrt(x*x+y*y)-0.00002*Math.sin(y*XPI),t=Math.atan2(y,x)-0.000003*Math.cos(x*XPI);
+  const glat=z*Math.sin(t),glon=z*Math.cos(t);let lat=glat,lon=glon;
+  for(let i=0;i<4;i++){const d=gcjDelta(lat,lon);lat-=lat+d[0]-glat;lon-=lon+d[1]-glon}
+  return [lat,lon]}
+const COLORS={1:'#2fb36b',2:'#f2c94c',3:'#eb5757',4:'#9b1c1c'};
+const CAR_ICON='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22">'
+  +'<circle cx="11" cy="11" r="8" fill="#2d7ff9" stroke="#fff" stroke-width="3"/></svg>');
+let map=null,routeLayer=[],resultLayer=[],routeKey='';
+function mapReady(){
+  $('map').style.display='block';
+  map=new BMapGL.Map('map');map.centerAndZoom(new BMapGL.Point(118.7969,32.0603),12);map.enableScrollWheelZoom(true);
+  try{map.setTrafficOn()}catch(e){}
+  map.addEventListener('click',e=>{const w=wgsOf(e.latlng);
+    const box=document.createElement('div');box.innerHTML='<button>设为目的地</button>';
+    box.firstChild.onclick=()=>{map.closeInfoWindow();setPlace({name:'地图上选的点',address:'',latitude:w[0],longitude:w[1]})};
+    map.openInfoWindow(new BMapGL.InfoWindow(box,{width:120,height:40}),e.latlng)});
+  loadRoute(true)}
+if(!JSAK.startsWith('__')){const sc=document.createElement('script');
+  sc.src='https://api.map.baidu.com/api?type=webgl&v=1.0&ak='+encodeURIComponent(JSAK)+'&callback=mapReady';document.head.appendChild(sc)}
+function km(m){return m>=1000?(m/1000).toFixed(1)+' km':Math.round(m)+' m'}
+function mins(s){return s>=3600?Math.floor(s/3600)+' 小时 '+Math.round(s%3600/60)+' 分钟':Math.max(1,Math.round(s/60))+' 分钟'}
+async function loadRoute(fit){
+  let r;try{r=await api('/api/route')}catch(e){return}
+  const ro=r.route;
+  if(!ro){$('route').textContent=r.error||''}
+  else{const head=ro.source==='nav'?'导航中：剩余 ':'路线预览：全程 ';
+    $('route').textContent=(ro.distance!=null?head+km(ro.distance):'')+(ro.duration!=null?'，约 '+mins(ro.duration):'')
+      +(ro.source==='preview'&&ro.age>60?'（'+Math.round(ro.age/60)+' 分钟前的路况）':'')}
+  if(!map)return;
+  routeLayer.forEach(o=>map.removeOverlay(o));routeLayer=[];
+  const all=[];
+  if(ro)for(const seg of ro.segments){const pts=seg.points.map(p=>bdPoint(p[0],p[1]));all.push(...pts);
+    const line=new BMapGL.Polyline(pts,{strokeColor:COLORS[seg.status]||COLORS[1],strokeWeight:6,strokeOpacity:0.9});
+    map.addOverlay(line);routeLayer.push(line)}
+  if(r.car){const c=bdPoint(r.car[0],r.car[1]);const m=new BMapGL.Marker(c,{icon:new BMapGL.Icon(CAR_ICON,new BMapGL.Size(22,22))});
+    map.addOverlay(m);routeLayer.push(m);all.push(c)}
+  const d=window.current;
+  if(d){const p=bdPoint(d.latitude,d.longitude);const m=new BMapGL.Marker(p);map.addOverlay(m);routeLayer.push(m);all.push(p)}
+  const key=(ro?ro.source+ro.distance:'')+(d?d.latitude+','+d.longitude:'');
+  if(all.length&&(fit||key!==routeKey))map.setViewport(all,{margins:[30,30,30,30]});
+  routeKey=key}
+function showResults(list){
+  if(!map)return;resultLayer.forEach(o=>map.removeOverlay(o));resultLayer=[];
+  const pts=list.map((p,i)=>{const pt=bdPoint(p.latitude,p.longitude);const m=new BMapGL.Marker(pt,{title:p.name});
+    m.addEventListener('click',()=>pick(i));map.addOverlay(m);resultLayer.push(m);
+    const l=new BMapGL.Label(String(i+1),{position:pt,offset:new BMapGL.Size(-4,-34)});
+    l.setStyle({border:'0',background:'transparent',color:'#fff',fontWeight:'bold'});map.addOverlay(l);resultLayer.push(l);return pt});
+  if(pts.length)map.setViewport(pts,{margins:[30,30,30,30]})}
+async function setPlace(p){const r=await api('/api/destination',p);if(r.error){$('msg').textContent=r.error;return}
+  show(r);places();$('msg').textContent='已设为目的地：'+(p.name||'地图上选的点');loadRoute(true)}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function api(path,body){
+  const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});return r.json()}
+function show(s){
+  let h='';
+  if(!s.navigation)h+='<div class="muted">导航没开：设置 &gt; 开发者 &gt; navigation (alpha)</div>';
+  const d=s.destination;window.current=d&&d.latitude?d:null;
+  if(d){h+='<div>当前目的地：<b>'+esc(d.place_name||(d.latitude.toFixed(5)+', '+d.longitude.toFixed(5)))+'</b></div>'
+    +'<button class="secondary" onclick="clearDest()">取消导航</button>'
+    +(s.saved_as?' <span class="muted">（常用地点：'+esc(s.saved_as)+'）</span>':' <button class="secondary" onclick="saveCur()">存为常用地点</button>')}
+  else h+='<div>还没有目的地</div>';
+  h+='<div class="muted">'+(s.onroad?'车已启动':'车没启动：熄火时目的地会被清掉，comma 重启也会')+'</div>';
+  $('state').innerHTML=h;
+}
+function card(p,act){return '<div class="place"><b>'+esc(p.name||(p.latitude.toFixed(5)+', '+p.longitude.toFixed(5)))+'</b><span class="muted">'
+  +esc(p.address||'')+'</span><br>'+act+'</div>'}
+function showPlaces(r){
+  window.saved=r.saved;window.recent=r.recent;
+  $('saved').innerHTML=Object.keys(r.saved).map(k=>'<button onclick="go(this.dataset.k)" data-k="'+esc(k)+'">'+esc(k)+'</button>').join('');
+  $('recent').innerHTML=r.recent.length?r.recent.map((p,i)=>card(p,'<button onclick="goRecent('+i+')">去这里</button>')).join(''):'还没有';
+}
+async function places(){showPlaces(await api('/api/places'))}
+async function go(k){const r=await api('/api/go',{label:k});if(r.error){$('msg').textContent=r.error;return}
+  show(r);places();$('msg').textContent='已设为目的地：'+k;loadRoute(true)}
+async function goRecent(i){setPlace(window.recent[i])}
+async function saveCur(){const k=prompt('起个名字，比如 家、公司');if(!k)return;const r=await api('/api/places',{label:k});
+  if(r.error){$('msg').textContent=r.error;return}showPlaces(r)}
+async function refresh(){try{show(await api('/api/state'))}catch(e){$('state').textContent='连不上车'}}
+async function clearDest(){show(await api('/api/clear',{}));loadRoute()}
+async function pick(i){const p=window.places[i];$('list').innerHTML='';showResults([]);setPlace(p)}
+$('f').onsubmit=async e=>{e.preventDefault();$('msg').textContent='搜索中…';$('list').innerHTML='';
+  const r=await api('/api/search',{query:$('q').value});
+  if(r.error){$('msg').textContent=r.error;return}
+  window.places=r.places;showResults(r.places);$('msg').textContent=r.places.length?'':'没找到';
+  $('list').innerHTML=r.places.map((p,i)=>'<div class="place"><b>'+(i+1)+'. '+esc(p.name)+'</b><span class="muted">'+esc(p.address)+'</span><br>'
+    +'<button onclick="pick('+i+')">设为目的地</button></div>').join('')};
+refresh();places();setInterval(refresh,5000);
+if(JSAK.startsWith('__'))loadRoute(true);
+setInterval(()=>{if(document.visibilityState==='visible')loadRoute()},15000);
+</script></body></html>
