@@ -8,7 +8,8 @@ proxy (1Panel's openresty), which does https for the domain.
 
   phone --https + key--> openresty --> this relay --tailnet--> car destinationd
 
-- Key: ?k=<key> once in the browser (kept as a cookie), or the X-Key header (iOS Shortcuts).
+- Key: typed into the page once (kept as a cookie), or the X-Key header (iOS Shortcuts). Never in a URL: access logs,
+  history and Referer headers would keep it.
 - Car offline: share / go / destination / clear are queued (newest wins, QUEUE_TTL), the page is the last copy seen,
   /api/state shows the queued one, search answers that the car is offline.
 - Python stdlib only. Config from the environment, see install.sh.
@@ -181,59 +182,88 @@ def key_ok(key: str, given: str | None) -> bool:
   return bool(key) and given is not None and hmac.compare_digest(key.encode(), given.encode())
 
 
+LOGIN = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>导航目的地</title>
+<style>
+body{{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#0b1116;color:#e8eef2;max-width:640px}}
+input{{width:100%;box-sizing:border-box;font-size:17px;padding:10px;border-radius:8px;border:1px solid #33454f;background:#0f1a21;color:#e8eef2;margin:8px 0}}
+button{{font-size:16px;padding:10px 14px;border-radius:8px;border:0;background:#2f8f5b;color:#fff}}
+.e{{color:#f2b36b}}
+</style></head><body>
+<h1>导航目的地</h1>{msg}
+<form method="post" action="/login"><input name="key" type="password" placeholder="密钥" autocomplete="current-password" autofocus>
+<button>进入</button></form>
+<p style="color:#93a4b0">输一次，这台手机就记住了。</p>
+</body></html>
+"""
+
+
 def handler(relay: Relay, key: str):
   class Handler(BaseHTTPRequestHandler):
     server_version = "navrelay"
     timeout = 15.   # s; a stalled phone does not hold a thread
     sys_version = ""
 
-    def _send(self, status: int, body: bytes, kind: str, cookie: str | None = None):
+    def _send(self, status: int, body: bytes, kind: str, cookie: str | None = None, location: str | None = None):
       self.send_response(status)
       self.send_header("Content-Type", kind)
       self.send_header("Content-Length", str(len(body)))
       self.send_header("Cache-Control", "no-store")
+      self.send_header("Referrer-Policy", "no-referrer")
       if cookie:
         self.send_header("Set-Cookie", f"{COOKIE}={cookie}; Max-Age=31536000; Path=/; HttpOnly; Secure; SameSite=Strict")
+      if location:
+        self.send_header("Location", location)
       self.end_headers()
       self.wfile.write(body)
 
-    def _given(self) -> tuple[str | None, str | None]:
-      """(the key given, the key to set as a cookie)"""
-      query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-      if "k" in query:
-        return query["k"][0], query["k"][0]
+    def _given(self) -> str | None:
       if self.headers.get("X-Key"):
-        return self.headers["X-Key"], None
+        return self.headers["X-Key"]
       for part in (self.headers.get("Cookie") or "").split(";"):
         name, _, value = part.strip().partition("=")
         if name == COOKIE:
-          return value, None
-      return None, None
+          return value
+      return None
 
-    def _authorized(self) -> str | None | bool:
-      given, cookie = self._given()
-      if key_ok(key, given):
-        return cookie or True
+    def _authorized(self) -> bool:
+      if key_ok(key, self._given()):
+        return True
       time.sleep(1.)   # slow down guessing
-      self._send(403, b"", "text/plain")
       return False
 
+    def _body(self) -> bytes:
+      return self.rfile.read(min(max(0, int(self.headers.get("Content-Length") or 0)), MAX_BODY))
+
     def do_GET(self):
-      auth = self._authorized()
-      if auth is False:
-        return
       path = urllib.parse.urlsplit(self.path).path
+      if not self._authorized():
+        if path == "/":   # the key is typed in once, never put in a URL (logs, history, Referer)
+          self._send(200, LOGIN.format(msg="").encode(), "text/html; charset=utf-8")
+        else:
+          self._send(403, b"", "text/plain")
+        return
       if path not in ("/", "/api/state", "/api/places"):
         self._send(404, b"", "text/plain")
         return
-      self._send(*relay.handle("GET", path, None), cookie=auth if isinstance(auth, str) else None)
+      self._send(*relay.handle("GET", path, None))
 
     def do_POST(self):
-      if self._authorized() is False:
-        return
       path = urllib.parse.urlsplit(self.path).path
+      if path == "/login":
+        given = urllib.parse.parse_qs(self._body().decode(errors="replace")).get("key", [""])[0].strip()
+        if key_ok(key, given):
+          self._send(303, b"", "text/plain", cookie=given, location="/")
+        else:
+          time.sleep(1.)
+          self._send(200, LOGIN.format(msg="<p class=e>密钥不对</p>").encode(), "text/html; charset=utf-8")
+        return
+      if not self._authorized():
+        self._send(403, b"", "text/plain")
+        return
       try:
-        body = json.loads(self.rfile.read(min(max(0, int(self.headers.get("Content-Length") or 0)), MAX_BODY)) or b"{}")
+        body = json.loads(self._body() or b"{}")
       except ValueError:
         body = None
       if path not in PASSED or not isinstance(body, dict):

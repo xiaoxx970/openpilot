@@ -112,15 +112,33 @@ class TestServer(unittest.TestCase):
     req = urllib.request.Request(self.url + path, data, {"Content-Type": "application/json", **(headers or {})})
     return urllib.request.urlopen(req, timeout=5)
 
+  def open_form(self, path, body):
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+      def redirect_request(self, *args, **kwargs):
+        return None
+    req = urllib.request.Request(self.url + path, body.encode(), {"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+      return urllib.request.build_opener(NoRedirect).open(req, timeout=5)
+    except urllib.error.HTTPError as e:   # the 303, not followed
+      return e
+
   def test_key(self):
     with self.assertRaises(urllib.error.HTTPError) as e:
       self.open("/api/state")
     self.assertEqual(e.exception.code, 403)
     with self.assertRaises(urllib.error.HTTPError):
       self.open("/api/state", headers={"X-Key": "wrong"})
-    with self.open("/?k=" + KEY) as r:
+    with self.open("/") as r:   # no key: the form, not the page
+      self.assertTrue('name="key"' in r.read().decode())
+    with self.open("/?k=" + KEY) as r:   # a key in the URL is not taken
+      self.assertTrue('name="key"' in r.read().decode())
+    with self.open_form("/login", "key=wrong") as r:
+      self.assertTrue("密钥不对" in r.read().decode())
+    with self.open_form("/login", "key=" + KEY) as r:
+      self.assertEqual((r.status, r.headers["Location"], r.headers["Referrer-Policy"]), (303, "/", "no-referrer"))
       cookie = r.headers["Set-Cookie"].split(";")[0]
-      self.assertTrue("导航目的地" in r.read().decode())
+    with self.open("/", headers={"Cookie": cookie}) as r:
+      self.assertEqual(r.read().decode(), "<html>导航目的地</html>")   # the car's page
     with self.open("/api/state", headers={"Cookie": cookie}) as r:
       self.assertTrue(json.loads(r.read())["navigation"])
 
