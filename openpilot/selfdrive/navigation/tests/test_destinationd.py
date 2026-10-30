@@ -288,6 +288,16 @@ class TestRoute(unittest.TestCase):
     self.dest.search("x", phone=(31.5, 118.5))
     self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(self.queries[-1]).query)["location"][0], "31.500000,118.500000")
 
+  def test_preview_from_another_start_is_planned_again(self):
+    self.params.values.pop("LastGPSPositionLLK")
+    lat, lon = latlon(800, 0)
+    self.dest.preview_route({"latitude": lat, "longitude": lon, "origin": list(latlon(0, 0))})
+    self.clock.t += destinationd.PREVIEW_MIN_GAP
+    self.dest.preview_route({"latitude": lat, "longitude": lon, "origin": list(latlon(100, 0))})
+    self.assertEqual(len(self.queries), 1)   # 100 m on: the same start
+    self.dest.preview_route({"latitude": lat, "longitude": lon, "origin": list(latlon(0, 5000))})
+    self.assertEqual(len(self.queries), 2)   # 5 km away: planned from there
+
   def test_nav_only(self):
     self.assertIsNone(self.dest.route(nav_only=True)["route"])
     self.assertEqual(self.queries, [])

@@ -41,6 +41,7 @@ MAX_RESULTS = 10
 INTERFACE = "tailscale0"
 PREVIEW_STALE = 600.     # s a route preview is shown before it is planned again: its traffic ages
 PREVIEW_MIN_GAP = 3.     # s between two previews: a tap at a time, not a script
+PREVIEW_MOVED = 300.     # m the start may move and a kept preview still be used
 PREVIEW_KEEP = 8         # places whose preview is kept, for going back and forth between them
 MAX_ROUTE_POINTS = 600   # a route on the page, thinned: it goes over cellular
 SIOCGIFADDR = 0x8915
@@ -392,7 +393,10 @@ class Destinations:
 
   def _preview(self, d: dict, near: tuple[float, float] | None) -> dict:
     now = self.clock()
-    p = next((q for q in self.previews if same_place(q["to"], d)), None)
+
+    def same_start(q: dict) -> bool:
+      return near is None or math.hypot(*baidu.ground(q["from"][0], q["from"][1], near[0], near[1])) < PREVIEW_MOVED
+    p = next((q for q in self.previews if same_place(q["to"], d) and same_start(q)), None)
     if p is not None and now - p["time"] < PREVIEW_STALE:
       return p
     if near is None:
@@ -407,9 +411,9 @@ class Destinations:
     if parsed is None:
       return {"error": "百度没有给出路线"}
     steps, points, jams = parsed
-    p = {"to": d, "time": now, "segments": route_segments(points, jams),
+    p = {"to": d, "from": near, "time": now, "segments": route_segments(points, jams),
          "distance": round(sum(st["distance"] for st in steps)), "duration": round(sum(st["duration"] for st in steps))}
-    self.previews = ([p] + [q for q in self.previews if not same_place(q["to"], d)])[:PREVIEW_KEEP]
+    self.previews = ([p] + [q for q in self.previews if not (same_place(q["to"], d) and same_start(q))])[:PREVIEW_KEEP]
     return p
 
 
