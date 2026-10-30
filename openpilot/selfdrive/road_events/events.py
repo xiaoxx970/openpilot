@@ -75,8 +75,9 @@ class RoadEvents:
     jams = baidu.jams if jams_online else []
     jam_event, jam_distance, jam_length = EVENT_NONE, 0., 0.
     if v >= MIN_SPEED:   # crawling or stopped the car is in the queue already
-      jam_event, jam_distance, jam_length = self.jam.update(t, jams, fast, gone=baidu is not None and not jams_online)
-    out["jamFollow"], out["jamFollowDistance"] = self.jam_ahead.update(t, jams if baidu is not None else None, fast, v >= MIN_SPEED)
+      jam_event, jam_distance, jam_length = self.jam.update(t, jams, fast, v, gone=baidu is not None and not jams_online)
+    out["jamFollow"], out["jamFollowDistance"] = self.jam_ahead.update(t, jams if baidu is not None else None, fast, v,
+                                                                       v >= MIN_SPEED)
     camera_event, camera_distance, camera_limit = self.camera.update(t, v, baidu.camera_distance if online else 0.,
                                                                      baidu.camera_limit if online else 0., v >= MIN_SPEED,
                                                                      reported=baidu is not None)
