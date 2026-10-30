@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or update navrelay on the server, behind a reverse proxy that does https (1Panel's openresty).
 # Run as root (sudo bash install.sh [port]) with navrelay.py next to it. Listens on 127.0.0.1 only, plain http.
-# Keeps an existing key; prints it at the end.
+# Keeps an existing key, which it never prints: read it in /etc/navrelay/navrelay.env.
 set -euo pipefail
 
 PORT="${1:-8089}"
@@ -61,4 +61,3 @@ systemctl is-active navrelay
 . "$ETC/navrelay.env"
 echo "car reachable from here: $(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$NAVRELAY_CAR/api/state" || echo no)"
 echo "relay: $(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "X-Key: $NAVRELAY_KEY" "http://127.0.0.1:$PORT/api/state" || echo no)"
-echo "key: $NAVRELAY_KEY"
