@@ -1,7 +1,4 @@
 import json
-import os
-import ssl
-import subprocess
 import tempfile
 import threading
 import unittest
@@ -104,24 +101,16 @@ class TestServer(unittest.TestCase):
   def setUp(self):
     self.car = FakeCar()
     relay = navrelay.Relay(self.car, None)
-    d = self.enterContext(tempfile.TemporaryDirectory())
-    self.cert, key = os.path.join(d, "c.pem"), os.path.join(d, "k.pem")
-    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", self.cert, "-days", "1",
-                    "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"], check=True, capture_output=True)
     server = ThreadingHTTPServer(("127.0.0.1", 0), navrelay.handler(relay, KEY))
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(self.cert, key)
-    server.socket = ctx.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     self.addCleanup(server.server_close)
     self.addCleanup(server.shutdown)
-    self.url = f"https://127.0.0.1:{server.server_port}"
-    self.ctx = ssl.create_default_context(cafile=self.cert)
+    self.url = f"http://127.0.0.1:{server.server_port}"
 
   def open(self, path, body=None, headers=None):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(self.url + path, data, {"Content-Type": "application/json", **(headers or {})})
-    return urllib.request.urlopen(req, context=self.ctx, timeout=5)
+    return urllib.request.urlopen(req, timeout=5)
 
   def test_key(self):
     with self.assertRaises(urllib.error.HTTPError) as e:

@@ -3,21 +3,21 @@
 
 Runs on the user's server, which is on the tailnet with the car. It passes the car's destination page and its API
 (destinationd, port 8082, Tailscale only) through to the phone behind a secret key, and keeps the last destination
-sent while the car is offline until the car is back.
+sent while the car is offline until the car is back. It listens on 127.0.0.1, plain http, behind the server's reverse
+proxy (1Panel's openresty), which does https for the domain.
 
-  phone --https + key--> this server --tailnet--> car destinationd
+  phone --https + key--> openresty --> this relay --tailnet--> car destinationd
 
 - Key: ?k=<key> once in the browser (kept as a cookie), or the X-Key header (iOS Shortcuts).
 - Car offline: share / go / destination / clear are queued (newest wins, QUEUE_TTL), the page is the last copy seen,
   /api/state shows the queued one, search answers that the car is offline.
-- Python stdlib only. Config from the environment, see navrelay.env.example.
+- Python stdlib only. Config from the environment, see install.sh.
 """
 from __future__ import annotations
 
 import hmac
 import json
 import os
-import ssl
 import threading
 import time
 import urllib.error
@@ -181,7 +181,7 @@ def key_ok(key: str, given: str | None) -> bool:
   return bool(key) and given is not None and hmac.compare_digest(key.encode(), given.encode())
 
 
-def handler(relay: Relay, key: str, ca: str | None = None):
+def handler(relay: Relay, key: str):
   class Handler(BaseHTTPRequestHandler):
     server_version = "navrelay"
     timeout = 15.   # s; a stalled phone does not hold a thread
@@ -219,10 +219,6 @@ def handler(relay: Relay, key: str, ca: str | None = None):
       return False
 
     def do_GET(self):
-      if urllib.parse.urlsplit(self.path).path == "/ca.crt" and ca:   # public, for the phone to trust this server
-        with open(ca, "rb") as f:
-          self._send(200, f.read(), "application/x-x509-ca-cert")
-        return
       auth = self._authorized()
       if auth is False:
         return
@@ -256,14 +252,8 @@ def main():
   if len(key) < 24:
     raise SystemExit("NAVRELAY_KEY must be set, at least 24 characters")
   relay = Relay(Car(os.environ.get("NAVRELAY_CAR", "http://100.69.175.43:8082")), os.environ.get("NAVRELAY_STATE", "/var/lib/navrelay"))
-  address = (os.environ.get("NAVRELAY_BIND", "0.0.0.0"), int(os.environ.get("NAVRELAY_PORT", "443")))
-  server = ThreadingHTTPServer(address, handler(relay, key, os.environ.get("NAVRELAY_CA")))
-  cert, cert_key = os.environ.get("NAVRELAY_CERT"), os.environ.get("NAVRELAY_CERT_KEY")
-  if cert and cert_key:
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(cert, cert_key)
-    server.socket = ctx.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)   # in the request's thread
+  address = (os.environ.get("NAVRELAY_BIND", "127.0.0.1"), int(os.environ.get("NAVRELAY_PORT", "8089")))
+  server = ThreadingHTTPServer(address, handler(relay, key))
   stop = threading.Event()
   threading.Thread(target=relay.run_deliveries, args=(stop,), daemon=True).start()
   try:
