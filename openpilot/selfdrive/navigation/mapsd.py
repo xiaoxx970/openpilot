@@ -12,7 +12,7 @@ from openpilot.selfdrive.navigation.helpers import latest_gps_source
 from openpilot.selfdrive.navigation.pmtiles import PMTiles
 from openpilot.selfdrive.navigation.renderer import SIZE, MapRenderer
 from openpilot.selfdrive.navigation.route import RouteTracker
-from openpilot.selfdrive.navigation.tiles import RemoteTiles
+from openpilot.selfdrive.navigation.tiles import open_tiles
 
 RETRY_SECONDS = 10
 
@@ -38,7 +38,7 @@ class MapsD:
     try:
       if self.tracker is not None and now >= self.retry_at:
         if self.renderer is None:
-          self.renderer = MapRenderer(PMTiles(RemoteTiles()))
+          self.renderer = MapRenderer(PMTiles(open_tiles()))
         if not self.prefetched:
           # TODO: fetch the tiles more intelligently on demand
           # Every tile the route can show is fetched up front, so each render below is a cache hit.

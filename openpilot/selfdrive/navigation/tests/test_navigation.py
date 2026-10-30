@@ -21,7 +21,7 @@ from openpilot.selfdrive.navigation.navd import REROUTE_COUNTER_MIN, ROUTE_RESEN
 from openpilot.selfdrive.navigation.pmtiles import PMTiles, decode_directory, tile_id
 from openpilot.selfdrive.navigation.renderer import MAJOR, MEDIUM, MINOR, SIZE, STREET, TRACK, MapRenderer, draw_segments, mercator, project, stroke_widths
 from openpilot.selfdrive.navigation.route import RouteTracker
-from openpilot.selfdrive.navigation.tiles import RemoteTiles
+from openpilot.selfdrive.navigation.tiles import LocalTiles, RemoteTiles, open_tiles
 from openpilot.selfdrive.navigation.vector_tile import decode_lines, decode_roads
 
 METER = 1 / 111319.49079327358  # degrees of latitude
@@ -136,11 +136,13 @@ class TileServerCase(unittest.TestCase):
     threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True).start()
     self.addCleanup(self.server.server_close)
     self.addCleanup(self.server.shutdown)
-    self.api = MagicMock(dongle_id='test-dongle')
+    self.api = MagicMock()
     self.api.get_token.return_value = 'device-token'
     self.url = f'http://127.0.0.1:{self.server.server_port}/planet.pmtiles?sig=secret'
     self.api.get.return_value.json.return_value = {'url': self.url, 'expires': time.time() + 86400}  # noqa: TID251
-    for name, value in [('Api', MagicMock(return_value=self.api)), ('Params', MagicMock()), ('PC', True)]:
+    params = MagicMock()
+    params.return_value.get.return_value = 'test-dongle'
+    for name, value in [('Api', MagicMock(return_value=self.api)), ('Params', params), ('PC', True)]:
       self.enterContext(patch(f'openpilot.selfdrive.navigation.tiles.{name}', value))
     self.enterContext(patch('openpilot.selfdrive.navigation.tiles.Paths.comma_home', return_value=self.directory.name))
 
@@ -205,7 +207,34 @@ class TestEndToEnd(TileServerCase):
       self.assertEqual((self.cache / 'version').read_text().split()[0], '"new-version"')
 
 
+class TestLocalTiles(unittest.TestCase):
+  def setUp(self):
+    self.directory = tempfile.TemporaryDirectory()
+    self.addCleanup(self.directory.cleanup)
+    self.enterContext(patch('openpilot.selfdrive.navigation.tiles.PC', True))
+    self.enterContext(patch('openpilot.selfdrive.navigation.tiles.Paths.comma_home', return_value=self.directory.name))
+    self.remote = self.enterContext(patch('openpilot.selfdrive.navigation.tiles.RemoteTiles'))
+
+  def test_device_archive(self):
+    path = Path(self.directory.name) / 'navigation' / 'basemap.pmtiles'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(make_archive(leaf=True))
+    source = open_tiles()
+    self.assertIsInstance(source, LocalTiles)
+    with closing(PMTiles(source)) as archive:
+      self.assertEqual(archive.get(0, 0, 0), road_tile())
+    self.remote.assert_not_called()  # no account or network needed
+
+  def test_hosted_without_archive(self):
+    self.assertIs(open_tiles(), self.remote.return_value)
+
+
 class TestRemoteTiles(TileServerCase):
+  def test_device_dongle_id(self):
+    with closing(RemoteTiles()):
+      pass
+    self.assertEqual(self.api.get.call_args.args[0], 'v1/test-dongle/nav/tiles')
+
   def test_shared_cache_and_refresh(self):
     with closing(PMTiles(RemoteTiles())) as archive:
       archive.source.expires = 0  # the signed URL is refreshed before the next fetch
