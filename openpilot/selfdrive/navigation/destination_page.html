@@ -76,8 +76,8 @@ function km(m){return m>=1000?(m/1000).toFixed(m>=100000?0:1)+' 公里':Math.rou
 function mins(s){return s>=3600?Math.floor(s/3600)+' 小时 '+Math.round(s%3600/60)+' 分':Math.max(1,Math.round(s/60))+' 分钟'}
 function ago(t){const m=Math.round((Date.now()/1000-t)/60);return m<1?'刚刚':m<60?m+' 分钟前':Math.round(m/60)+' 小时前'}
 function nameOf(p){return p.name||p.place_name||(p.latitude.toFixed(5)+', '+p.longitude.toFixed(5))}
-async function api(path,body){
-  const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});
+async function api(path,body,headers){   // the phone's position goes in headers or bodies, never a URL: access logs keep URLs
+  const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{headers:headers||{}});
   if(r.status===403){location.reload();throw new Error('key')}
   return r.json()}
 
@@ -186,7 +186,7 @@ $('f').onsubmit=async e=>{e.preventDefault();$('q').blur();const q=$('q').value.
   render()};
 async function refresh(){try{state=await api('/api/state')}catch(e){return}if(view==='home')render()}
 async function loadPlaces(){try{places=await api('/api/places')}catch(e){}}
-async function loadRoute(){if(view!=='home')return;try{route=await api('/api/route'+(phone?'?from='+phone[0].toFixed(6)+','+phone[1].toFixed(6):''))}catch(e){return}
+async function loadRoute(){if(view!=='home')return;try{route=await api('/api/route',null,phone?{'X-From':phone.join(',')}:null)}catch(e){return}
   if(view==='home')render()}
 locate();
 (async()=>{await Promise.all([refresh(),loadPlaces()]);render();loadRoute()})();

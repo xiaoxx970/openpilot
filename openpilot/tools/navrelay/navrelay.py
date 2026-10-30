@@ -243,14 +243,13 @@ class App:
       return {**self.relay.route, "offline": True}   # the last navd route seen
     return r
 
-  def get(self, path: str, query: dict | None = None) -> dict | None:
+  def get(self, path: str, phone: str | None = None) -> dict | None:
     if path == "/api/state":
       return self.state()
     if path == "/api/places":
       return self.dest.places.as_dict()
     if path == "/api/route":
-      phone = (query or {}).get("from")
-      return self.route(destinationd.as_origin(phone[0].split(",")) if phone else None)
+      return self.route(destinationd.as_origin(phone.split(",")) if phone else None)
     return None
 
   def post(self, path: str, body: dict) -> dict:
@@ -373,7 +372,7 @@ def handler(app: App, key: str, page: bytes, js_ak: str = ""):
       if path == "/":
         self._send(200, page, "text/html; charset=utf-8")
         return
-      answer = app.get(path, urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query))
+      answer = app.get(path, self.headers.get("X-From"))
       if answer is None:
         self._send(404, b"", "text/plain")
       else:

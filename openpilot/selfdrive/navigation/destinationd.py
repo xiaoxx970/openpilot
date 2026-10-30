@@ -447,9 +447,8 @@ def handler(dest: Destinations):
       elif path == "/api/places":
         self._json(dest.places.as_dict())
       elif path == "/api/route":
-        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-        phone = as_origin(query["from"][0].split(",")) if "from" in query else None
-        self._json(dest.route(nav_only="nav" in query, phone=phone))
+        phone = self.headers.get("X-From")   # the phone's position: a header, never in a URL
+        self._json(dest.route(nav_only="nav=1" in urllib.parse.urlsplit(self.path).query, phone=as_origin(phone.split(",")) if phone else None))
       else:
         self._send(404, b"", "text/plain")
 
