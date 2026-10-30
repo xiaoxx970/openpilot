@@ -4,8 +4,10 @@ import pyray as rl
 from msgq.visionipc import VisionIpcClient
 from openpilot.cereal.visionipc import VisionStreamType
 from openpilot.common.constants import CV
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
-from openpilot.selfdrive.navigation.renderer import EGO, ROUTE_INTENSITY, SIZE
+from openpilot.selfdrive.navigation.renderer import EGO, ROUTE_INTENSITY, SIZE, jam_mask
+from openpilot.selfdrive.navigation.route import RouteTracker
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CONNECTION_RETRY_INTERVAL
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import FontWeight, TextAlignmentVertical
@@ -20,6 +22,17 @@ MARKER_MARGIN = 18  # pixels kept below the ego so its marker stays visible
 # exact level (and its neighbors) is recolored, so antialiased road edges passing through that grey stay grey.
 MAP_COLORS = np.repeat(np.round(np.arange(256) * 0.45).astype(np.uint8)[:, None], 3, axis=1)
 MAP_COLORS[ROUTE_INTENSITY - 1:ROUTE_INTENSITY + 2] = (72, 235, 132)
+JAM_COLORS = {2: (242, 201, 76), 3: (235, 87, 87), 4: (176, 32, 32)}  # Baidu's slow, congested, blocked, on the route
+
+
+def colorize(gray: np.ndarray, jams: np.ndarray | None) -> np.ndarray:
+  """The frame for people; the route's pixels in a jam (jam_mask) take the jam's colour."""
+  rgb = MAP_COLORS[gray]
+  if jams is not None:
+    on_route = (gray >= ROUTE_INTENSITY - 1) & (gray <= ROUTE_INTENSITY + 1)
+    for status, color in JAM_COLORS.items():
+      rgb[on_route & (jams == status)] = color
+  return rgb
 
 
 def format_distance(meters: float) -> str:
@@ -41,6 +54,8 @@ class NavigationPanel(Widget):
     self._eta_label = UnifiedLabel('', 34, FontWeight.BOLD, rl.WHITE, scroll=True)
     self._accent = rl.Color(155, 230, 185, 255)
     self._muted = rl.Color(162, 175, 185, 255)
+    self._route_key = None
+    self._tracker = None   # along navd's Baidu route, as mapsd follows it, to place its jams in the frame
 
   def _update_state(self):
     if not self._client.is_connected():
@@ -54,9 +69,33 @@ class NavigationPanel(Widget):
     frame = self._client.recv(timeout_ms=0)
     if frame is not None:
       gray = np.frombuffer(frame.data, dtype=np.uint8, count=SIZE * SIZE)
-      rl.update_texture(self._texture, rl.ffi.cast("void *", rl.ffi.from_buffer(MAP_COLORS[gray])))
+      try:
+        jams = self._jams()
+      except Exception:  # the traffic is an extra: never the map's end
+        cloudlog.exception('navigation_panel.jams_failed')
+        jams = None
+      rgb = np.ascontiguousarray(colorize(gray.reshape(SIZE, SIZE), jams))
+      rl.update_texture(self._texture, rl.ffi.cast("void *", rl.ffi.from_buffer(rgb)))
       # Without a usable map, mapsd publishes black frames with a zero timestamp.
       self._frame_time = rl.get_time() if self._client.timestamp_sof else 0.0
+
+  def _jams(self) -> np.ndarray | None:
+    """Where the route's jams are in the current frame, None without any."""
+    sm = ui_state.sm
+    if not sm.recv_frame['navRouteIC']:
+      return None
+    msg = sm['navRouteIC']
+    jams = [(j.start, j.length, j.status) for j in msg.jams if j.status >= 2]
+    source = latest_gps_source(sm)
+    if not jams or source is None or len(msg.coordinates) < 2:
+      return None
+    key = (msg.requestTime, len(msg.coordinates))
+    if key != self._route_key:
+      self._route_key = key
+      self._tracker = RouteTracker(np.array([(c.longitude, c.latitude) for c in msg.coordinates], dtype=np.float64))
+    gps = sm[source]
+    progress = self._tracker.project(gps.longitude, gps.latitude)
+    return jam_mask(self._tracker.route, jams, *self._tracker.pose(progress), progress)
 
   @property
   def routing(self):
