@@ -67,6 +67,15 @@ def user_soft_disable_alert(alert_text_2: str) -> AlertCallbackType:
     return UserSoftDisableAlert(alert_text_2)
   return func
 
+# Below this speed leaving drive is parking or reversing: disengage silently instead of chiming every time
+SILENT_GEAR_DISENGAGE_SPEED = 10. * CV.KPH_TO_MS
+
+
+def gear_disengage_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+  if CS.vEgo < SILENT_GEAR_DISENGAGE_SPEED:
+    return EngagementAlert(AudibleAlert.none)
+  return EngagementAlert(AudibleAlert.disengage)
+
 def startup_master_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   branch = get_short_branch()  # Ensure get_short_branch is cached to avoid lags on startup
   if "REPLAY" in os.environ:
@@ -642,9 +651,9 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.NO_ENTRY: NoEntryAlert("System Overheated"),
   },
 
-  # leaving drive disengages like other cars' cruise and assist do: one disengage chime, no countdown
+  # leaving drive disengages like other cars' cruise and assist do: one disengage chime, no countdown, silent when parking
   EventName.wrongGear: {
-    ET.USER_DISABLE: EngagementAlert(AudibleAlert.disengage),
+    ET.USER_DISABLE: gear_disengage_alert,
     ET.NO_ENTRY: NoEntryAlert("Gear not D"),
   },
 
@@ -807,7 +816,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       "",
       AlertStatus.normal, AlertSize.full,
       Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2, creation_delay=0.5),
-    ET.USER_DISABLE: EngagementAlert(AudibleAlert.disengage),
+    ET.USER_DISABLE: gear_disengage_alert,
     ET.NO_ENTRY: NoEntryAlert("Reverse Gear"),
   },
 
@@ -938,7 +947,7 @@ if HARDWARE.get_device_type() == 'mici':
         "",
         AlertStatus.normal, AlertSize.full,
         Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2, creation_delay=0.5),
-      ET.USER_DISABLE: EngagementAlert(AudibleAlert.disengage),
+      ET.USER_DISABLE: gear_disengage_alert,
       ET.NO_ENTRY: NoEntryAlert("Reverse"),
     },
   })
