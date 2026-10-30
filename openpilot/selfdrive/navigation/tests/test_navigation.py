@@ -485,6 +485,41 @@ class TestBaiduRoutes(unittest.TestCase):
     self.assertEqual(self.engine.recompute_hold, BAIDU_RETRY)
     self.assertEqual(len(self.last_message('navRouteIC').navRouteIC.coordinates), 0)
 
+  def drive(self, x, y, updates=1):
+    lat, lon = latlon(x, y)
+    self.engine.last_position = (lon, lat)
+    for _ in range(updates):
+      self.engine.send_instruction()
+
+  def test_wrong_turn_on_the_last_step_reroutes(self):
+    self.route()
+    self.drive(420, 0)
+    self.drive(715, 0)
+    self.drive(700, -50)  # on the last step, 150 m before the destination
+    self.assertEqual(self.engine.step_idx, len(self.engine.route) - 1)
+    self.assertFalse(self.engine.should_recompute())
+    self.drive(1000, -50, updates=5)  # a wrong turn: 300 m down another road
+    self.assertIn('NavDestination', self.values)  # not taken for arrived
+    self.assertIsNotNone(self.engine.route)
+    self.assertTrue(any(self.engine.should_recompute() for _ in range(REROUTE_COUNTER_MIN + 1)))
+
+  def test_arrived_then_driving_away(self):
+    self.route()
+    for x, y in ((420, 0), (715, 0), (700, -150), (700, -215)):  # 15 m past the destination
+      self.drive(x, y)
+    self.assertTrue(self.engine.arrived)
+    self.assertFalse(self.engine.should_recompute())  # circling for a parking spot is no reroute
+    self.drive(700, -260)
+    self.assertNotIn('NavDestination', self.values)
+    self.assertIsNone(self.engine.route)
+
+  def test_no_next_step_while_off_route(self):
+    self.route()
+    self.drive(690, 300)  # far off the first step: its "along" is past its end, but the car is not on the next one
+    self.assertEqual(self.engine.step_idx, 0)
+    self.drive(700, -20)  # on the next step
+    self.assertEqual(self.engine.step_idx, 1)
+
   def test_daily_budget(self):
     self.engine.baidu_daily.left = MagicMock(return_value=0)
     get = self.route()

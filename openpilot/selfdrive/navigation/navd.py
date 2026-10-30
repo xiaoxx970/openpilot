@@ -17,6 +17,8 @@ from openpilot.selfdrive.navigation.route import along_path, local_meters
 from openpilot.selfdrive.road_events import baidu
 
 REROUTE_DISTANCE = 25
+ARRIVE_DISTANCE = 50  # m from the destination (or the route's end): arrived, and no rerouting. Baidu's last step runs from the last maneuver to
+# the destination, often km: being on it is not being nearly there
 MANEUVER_TRANSITION_THRESHOLD = 10
 REROUTE_COUNTER_MIN = 3
 ROUTE_RESEND_PERIOD = 10  # updates (seconds); a restarted mapsd gets the route within this
@@ -240,20 +242,27 @@ class RouteEngine:
 
     self.pm.send('navInstruction', msg)
 
-    # Transition to next route segment
-    if distance_to_maneuver_along_geometry < -MANEUVER_TRANSITION_THRESHOLD:
-      if self.step_idx + 1 < len(self.route):
+    # Transition to next route segment, once the car is on it: off the route "along" keeps growing with the distance from it
+    passed = distance_to_maneuver_along_geometry < -MANEUVER_TRANSITION_THRESHOLD
+    if self.step_idx + 1 < len(self.route):
+      if passed and along_path(self.route_geometry[self.step_idx + 1], self.last_position)[1] <= REROUTE_DISTANCE:
         self.step_idx += 1
         self.recompute_hold = 0
-      else:
-        if not self.arrived:
-          cloudlog.info("Destination reached")
-          self.arrived = True
+      return
+    to_destination = self.distance_to_destination()
+    if passed and to_destination <= ARRIVE_DISTANCE and not self.arrived:
+      cloudlog.info("Destination reached")
+      self.arrived = True
+    # Clear route if driving away from destination
+    if self.arrived and to_destination > REROUTE_DISTANCE:
+      self.params.remove("NavDestination")
+      self.clear_route()
 
-        # Clear route if driving away from destination
-        if np.linalg.norm(local_meters(self.last_position, self.nav_destination)) > REROUTE_DISTANCE:
-          self.params.remove("NavDestination")
-          self.clear_route()
+  def distance_to_destination(self) -> float:
+    """From the destination or the route's end, the nearer: a destination off the road network is reached where the road ends."""
+    assert self.route_geometry is not None
+    ends = np.array([self.nav_destination, self.route_geometry[-1][-1]])
+    return float(np.linalg.norm(local_meters(ends, self.last_position), axis=1).min())
 
   def send_route(self):
     coords = np.concatenate(self.route_geometry) if self.route_geometry is not None else np.empty((0, 2))
@@ -285,8 +294,8 @@ class RouteEngine:
       return True
 
     assert self.route is not None and self.route_geometry is not None and self.last_position is not None
-    # Don't recompute in last segment, assume destination is reached
-    if self.step_idx == len(self.route) - 1:
+    # Don't recompute at the destination
+    if self.step_idx == len(self.route) - 1 and (self.arrived or self.distance_to_destination() <= ARRIVE_DISTANCE):
       return False
 
     # TODO: Check for going wrong way in segment
