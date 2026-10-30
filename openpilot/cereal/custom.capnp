@@ -522,7 +522,22 @@ struct RoadEventsIC @0xcb9fd56c7057593a {
   }
 }
 
-struct CustomReserved11 @0xc2243c65e0340384 {
+struct NavRouteIC @0xc2243c65e0340384 {
+  # navd's Baidu route with its traffic, for roadeventd's traffic jams ahead (it plans no road ahead of its own meanwhile)
+  requestTime @0 :UInt64;              # monotonic ns when the route was asked: its traffic is as old as that
+  coordinates @1 :List(Coordinate);    # the route from the car to the destination, WGS-84, as navRoute
+  jams @2 :List(Jam);                  # slow or worse runs of its traffic, by distance along the coordinates
+
+  struct Coordinate {
+    latitude @0 :Float64;
+    longitude @1 :Float64;
+  }
+
+  struct Jam {
+    start @0 :Float32;   # m along the route from its first coordinate
+    length @1 :Float32;  # m
+    status @2 :UInt8;    # Baidu's traffic status: 2 slow, 3 congested, 4 severely congested
+  }
 }
 
 struct CustomReserved12 @0x9ccdc8676701b412 {

@@ -4,7 +4,8 @@ mapd's offline OSM tiles, and with Baidu online data a speed camera ("speed limi
 traffic jam ahead (route planning along the road ahead), and the cameras' limits for sunnypilot's speed limit resolver
 (they replace the offline map's near a camera). card shows the prompts in openpilot's ACC HUD; the resolver's limits only
 reach the cruise speed through Speed Limit Assist, which asks the driver every time. A traffic jam ahead also asks
-selfdrived for the relaxed following distance until the car reaches it (prompts.JamAhead).
+selfdrived for the relaxed following distance until the car reaches it (prompts.JamAhead). While navigating with Baidu,
+the traffic comes with navd's route (navRouteIC) and no route planning of our own is asked meanwhile.
 
 Opt-in: param VwRoadEventPrompts for the prompts (1 while openpilot's ACC is on, 2 always: in ACC standby and with the main
 switch off too), VwBaiduOnline (and a key file, see baidu.py) for Baidu; the jam following distance needs both. Light:
@@ -23,6 +24,7 @@ RATE = 2.             # Hz
 INPUT_TIMEOUT = 1.0   # s
 PARAMS_PERIOD = 5.    # s
 KEY_RETRY = 60.       # s between looks for the Baidu key file
+NAV_TIMEOUT = 30.     # s: navd sends its route every 10 s, a route not sent again for this long is gone
 LITTLE_CORES = {0, 1, 2, 3}
 SOURCES = ("none", "model", "map", "baidu")   # RoadEventsIC.Source by events.SOURCE_*
 PROMPTS_OFF, PROMPTS_ENGAGED, PROMPTS_ALWAYS = 0, 1, 2   # VwRoadEventPrompts
@@ -55,6 +57,12 @@ def model_path(model) -> ModelPath | None:
   if len(model.position.x) != 33:
     return None
   return list(model.position.x), list(model.position.y), list(model.position.z)
+
+
+def nav_inputs(route) -> tuple:
+  """(asked at, monotonic s; [(lat, lon), ...]; [(start, length, status), ...]) of navd's navRouteIC."""
+  return (route.requestTime * 1e-9, [(c.latitude, c.longitude) for c in route.coordinates],
+          [(j.start, j.length, j.status) for j in route.jams])
 
 
 def fill_message(ev, out: dict, snap=None) -> None:
@@ -93,6 +101,7 @@ def main():
   params = Params()
   model_sock = messaging.sub_sock("modelV2", conflate=True)
   pose_sock = messaging.sub_sock("liveLocationKalman", conflate=True)
+  nav_sock = messaging.sub_sock("navRouteIC", conflate=True)
   pm = messaging.PubMaster(["roadEventsIC"])
   core = RoadEvents(os.path.join(Paths.mapd_root(), "offline"))
   map_failed = False
@@ -110,7 +119,8 @@ def main():
       return None
 
   model = pose = None
-  model_t = pose_t = -math.inf
+  model_t = pose_t = nav_t = -math.inf
+  nav = None
   prompts, baidu_on = PROMPTS_OFF, False
   online: baidu.BaiduOnline | None = None
   params_t = key_t = -math.inf
@@ -139,6 +149,11 @@ def main():
     msg = messaging.recv_one_or_none(pose_sock)
     if msg is not None:
       pose, pose_t = msg.liveLocationKalman, now
+    msg = messaging.recv_one_or_none(nav_sock)
+    if msg is not None:
+      if nav is None or msg.navRouteIC.requestTime * 1e-9 != nav[0]:
+        nav = nav_inputs(msg.navRouteIC) if len(msg.navRouteIC.coordinates) >= 2 else None
+      nav_t = now
 
     out = snap = None
     inputs = pose_inputs(pose) if pose is not None and now - pose_t < INPUT_TIMEOUT else None
@@ -149,7 +164,7 @@ def main():
       if online is None:
         snap = baidu.Snapshot()   # Baidu off: no jam ahead, so no jam following distance either
       elif position_ok:
-        snap = online.update(odo, lat, lon, course, v, road_key, road_ahead)
+        snap = online.update(odo, lat, lon, course, v, road_key, road_ahead, nav if now - nav_t < NAV_TIMEOUT else None)
       out = dict(NO_PROMPT)
       if prompts_on or online is not None:
         path = model_path(model) if model is not None and now - model_t < INPUT_TIMEOUT else None

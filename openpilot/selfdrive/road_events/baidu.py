@@ -20,6 +20,8 @@ are counted in COUNT_FILE, across drives and reboots, and stop at DAILY_BUDGET.
   is expected to take (the cruise route while it follows it, else the offline map's road ahead, else straight on), and at
   once (ROUTE_MIN_GAP) when the car leaves that route or nears its end. An answer that leaves the expected road within its
   first ROUTE_CHECK m (a detour, another carriageway) is not used.
+- While navigating (navd's Baidu route, NavRouteIC), the traffic comes with that route instead: no route planning of its own
+  while the car follows a navigation route asked less than NAV_STALE ago, and navd asks again every navd.BAIDU_REFRESH.
 - Off a route its data is dropped at once, so nothing from the road the car left reaches a prompt or the speed limit.
 Errors and rate limits back off up to 5 min; a spent quota waits until midnight Beijing time, logged once.
 
@@ -60,6 +62,7 @@ STALE = CRUISE_PARKED + 60.  # s a cruise answer is used for, from when it was a
 ROUTE_PERIOD = 60.         # s between route plannings while moving (at PARKED_SPEED or faster)
 ROUTE_MIN_GAP = 20.        # s, also when the car leaves the planned route or nears its end
 ROUTE_STALE = 150.         # s a route planning is used for
+NAV_STALE = 180.           # s the traffic of a navigation route is used for (navd asks again every 120 s while moving)
 ROUTE_AHEAD = (2000., 5000.)   # m planned ahead: at least, and at most (at speed: the jam range plus a ROUTE_PERIOD's drive)
 ROUTE_MIN = 800.           # m: a shorter expected road (cruise route nearly used up, the map ending) falls to the next source
 ROUTE_CHECK = 300.         # m of a planned route that must stay on the expected road (ROUTE_CHECK_STRAIGHT when that is
@@ -334,6 +337,20 @@ class PlannedRoute:
   length: float
   path: Path
   jams: list[tuple[float, float, int]]        # (start, length, status 2 slow / 3 congested / 4 severe)
+  nav: bool = False                           # navd's navigation route, not one of ours
+
+
+def nav_route(t: float, points: list[tuple[float, float]], jams: list[tuple[float, float, int]], odo: float, lat: float,
+              lon: float) -> PlannedRoute | None:
+  """navd's route (asked at t, WGS-84 (lat, lon) points, jams by distance from its first point) moved to start at the car,
+  None when the car is not on it."""
+  path = as_path(points)
+  start = project(path, lat, lon) if len(path) >= 2 else None
+  if start is None or start[1] > OFF_ROUTE_DIST:
+    return None
+  s0 = start[0]
+  return PlannedRoute(odo, t, path[-1][0] - s0, [(d - s0, la, lo) for d, la, lo in path],
+                      [(a - s0, n, st) for a, n, st in jams if a + n > s0], nav=True)
 
 
 def parse_route(resp: dict, odo: float, t: float, lat: float, lon: float) -> PlannedRoute | None:
@@ -427,6 +444,7 @@ class BaiduOnline:
     self.last_plan = -math.inf
     self.want_plan = True
     self.discarded = 0                          # plannings that left the expected road
+    self.nav_asked = None                       # request time of the last navigation route looked at
     self.call_times: dict[str, collections.deque] = {k: collections.deque() for k in BUDGET_PER_HOUR}
     self.road_key = None
     self.backoff: dict[str, float] = dict.fromkeys(BUDGET_PER_HOUR, 0.)
@@ -434,12 +452,19 @@ class BaiduOnline:
     self.calls: collections.Counter = collections.Counter()
 
   # -- inputs
-  def update(self, odo: float, lat: float, lon: float, course: float, v: float, road: tuple | None, road_ahead=None) -> Snapshot:
+  def update(self, odo: float, lat: float, lon: float, course: float, v: float, road: tuple | None, road_ahead=None,
+             nav=None) -> Snapshot:
     """odo: m driven since start; course: rad from north, clockwise; road: (name, OSM class) the car is matched to, or None.
     road_ahead(lat, lon, course, length): the offline map's road ahead of the car as [(lat, lon), ...], None off the map;
-    route planning asks along it when there is no cruise route to follow."""
+    route planning asks along it when there is no cruise route to follow.
+    nav: navd's navigation route as (asked at, in this clock; [(lat, lon), ...]; [(start, length, status), ...]), or None."""
     t = self.clock()
     self._collect(t, odo)
+    if nav is not None and nav[0] != self.nav_asked:
+      self.nav_asked = nav[0]
+      planned = nav_route(nav[0], nav[1], nav[2], odo, lat, lon) if t - nav[0] < NAV_STALE else None
+      if planned is not None:
+        self.planned, self.off_planned, self.want_plan = planned, 0, False
     if not self.history or math.hypot(*ground(self.history[-1][0], self.history[-1][1], lat, lon)) > 2.:
       self.history.append((lat, lon, v, math.degrees(course) % 360., t))
 
@@ -467,6 +492,11 @@ class BaiduOnline:
     self.off_route = self._off(r.path, odo - r.odo, lat, lon, v, self.off_route)
     if self.off_route >= OFF_ROUTE_CYCLES:
       self.route, self.off_route, self.want_detect = None, 0, True
+
+  def _navigating(self, t: float, odo: float) -> bool:
+    """Is the car on a navigation route fresh enough for its traffic, with more of it ahead than a jam prompt looks?"""
+    p = self.planned
+    return p is not None and p.nav and t - p.t < NAV_STALE and p.length - (odo - p.odo) > JAM_RANGE[self._fast()]
 
   def _follow_planned(self, odo: float, lat: float, lon: float, v: float):
     """Is the car still on the planned route? Off it, its jams are dropped at once and the road ahead is planned again."""
@@ -529,7 +559,7 @@ class BaiduOnline:
 
     # route planning: the traffic on the road ahead, while moving
     due = t - self.last_plan >= ROUTE_PERIOD or (self.want_plan and t - self.last_plan >= ROUTE_MIN_GAP)
-    if due and v >= PARKED_SPEED and self._can_call("route", t, now):
+    if due and v >= PARKED_SPEED and not self._navigating(t, odo) and self._can_call("route", t, now):
       expected, check = self._road_ahead(t, odo, lat, lon, course, v, road_ahead)
       params = route_params(lat, lon, course, v, expected[-1])
       if self._submit("route", t, now, ROUTE_PATH, params, (t, odo, lat, lon, expected, check)):
@@ -592,6 +622,8 @@ class BaiduOnline:
           continue   # bound to another road: keep the followed route until the car leaves it or it ages out
         self.route, self.off_route = route, 0
       elif kind == "route":
+        if self._navigating(t, odo):
+          continue   # asked before the navigation route came: that one has the traffic now
         planned = parse_route(resp, meta[1], meta[0], meta[2], meta[3])
         if planned is None or leaves(planned.path, meta[4], meta[5]):
           self.discarded += 1   # a detour or another road: not the traffic ahead of the car
@@ -609,7 +641,7 @@ class BaiduOnline:
       if ahead is not None:
         s.camera_distance, s.camera_limit = ahead
     p = self.planned
-    if p is not None and t - p.t < ROUTE_STALE:
+    if p is not None and t - p.t < (NAV_STALE if p.nav else ROUTE_STALE):
       s.jams_online = True
       done = odo - p.odo
       s.jams = [(start - done, length, st) for start, length, st in p.jams if start + length - done > 0.]
