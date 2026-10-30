@@ -14,6 +14,8 @@ https for the domain; it listens on 127.0.0.1, plain http.
   QUEUE_TTL), sent when it is back: comma's "next destination". While the car navigates, its route comes from navd.
 - Key: typed into the page once (kept as a cookie), or the X-Key header (iOS Shortcuts). Never in a URL: access logs,
   history and Referer headers would keep it.
+- Push (webpush.py, with python3-cryptography): a destination from a Shortcut, and one the car takes when it is back
+  online, notify the page added to the phone's home screen; a tap opens it (a Shortcut's own notification opens Shortcuts).
 - Python stdlib plus destinationd, baidu_route and road_events/baidu (pure python), copied next to it by install.sh.
 """
 from __future__ import annotations
@@ -30,6 +32,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from openpilot.selfdrive.navigation import destinationd
 
+try:
+  from openpilot.tools.navrelay import webpush
+except ImportError:   # no cryptography: no push
+  webpush = None  # type: ignore[assignment]
+
 CAR_TIMEOUT = 8.       # s for one call to the car
 POLL_TIMEOUT = 3.      # s for the background look at the car
 POLL = 10.             # s between looks at the car: its state, the queued destination
@@ -37,7 +44,17 @@ QUEUE_TTL = 3 * 3600.  # s a queued destination waits for the car
 MAX_BODY = 4096
 COOKIE = "navkey"
 POSTS = ("/api/search", "/api/destination", "/api/clear", "/api/share", "/api/go", "/api/places", "/api/places/delete",
-         "/api/preview")
+         "/api/preview", "/api/push/subscribe", "/api/push/test")
+SENT = ("/api/destination", "/api/share", "/api/go")   # what sets a destination
+MANIFEST = json.dumps({"name": "导航", "short_name": "导航", "start_url": "/", "scope": "/", "display": "standalone",
+                       "background_color": "#0b1116", "theme_color": "#0b1116"}, ensure_ascii=False).encode()
+SERVICE_WORKER = """// navrelay's service worker: push only, no caching
+self.addEventListener('push',e=>{let d={};try{d=e.data.json()}catch(x){}
+  e.waitUntil(self.registration.showNotification(d.title||'导航',{body:d.body||'',data:{url:d.url||'/'},tag:'navrelay'}))});
+self.addEventListener('notificationclick',e=>{e.notification.close();const url=(e.notification.data&&e.notification.data.url)||'/';
+  e.waitUntil(clients.matchAll({type:'window',includeUncontrolled:true}).then(cs=>{for(const c of cs){if('focus' in c)return c.focus()}
+    return clients.openWindow(url)}))});
+""".encode()
 
 
 class Car:
@@ -69,9 +86,10 @@ def as_car_body(destination: dict) -> dict:
 
 class Relay:
   """What the server knows of the car, and the destination waiting for it. Kept in a file across restarts."""
-  def __init__(self, car, state_dir: str | None = None, clock=time.time):  # noqa: TID251  # queued times are kept across restarts
+  def __init__(self, car, state_dir: str | None = None, clock=time.time, on_late=None):  # noqa: TID251  # queued times are kept across restarts
     self.car = car
     self.clock = clock
+    self.on_late = on_late               # called with a destination's body the car took after it had waited for it
     self.lock = threading.RLock()
     self.state_path = os.path.join(state_dir, "navrelay.json") if state_dir else None
     self.pending: dict | None = None     # {"path", "body", "time"}: /api/destination or /api/clear
@@ -135,9 +153,9 @@ class Relay:
       self.pending = {"path": path, "body": body, "time": self.clock()}
       self._save()
     if self.online:   # else the next poll finds out: no phone waits on a car that is off
-      self.deliver(POLL_TIMEOUT)
+      self.deliver(POLL_TIMEOUT, late=False)
 
-  def deliver(self, timeout: float = CAR_TIMEOUT) -> bool:
+  def deliver(self, timeout: float = CAR_TIMEOUT, late: bool = True) -> bool:
     """Send the queued destination to the car, True once it is no longer queued."""
     with self.lock:
       if self.pending is None:
@@ -157,6 +175,8 @@ class Relay:
       if self.pending is not None and self.pending["time"] == p["time"]:
         self.pending = None   # sent, or the car turned it down (an answer is final)
       self._save()
+    if late and self.on_late is not None and p["path"] == "/api/destination" and "error" not in answer:
+      self.on_late(p["body"])
     return True
 
   def poll(self):
@@ -215,8 +235,10 @@ class CarParams:
 
 class App:
   """The page's API: Destinations on the server, the car behind it."""
-  def __init__(self, relay: Relay, dest: destinationd.Destinations):
-    self.relay, self.dest = relay, dest
+  def __init__(self, relay: Relay, dest: destinationd.Destinations, push=None):
+    self.relay, self.dest, self.push = relay, dest, push
+    if push is not None:
+      relay.on_late = lambda body: push.notify("车上线了", f"开始导航去 {body.get('name') or '目的地'}")
 
   def state(self) -> dict:
     return self._with_car(self.dest.state())
@@ -250,12 +272,33 @@ class App:
       return self.dest.places.as_dict()
     if path == "/api/route":
       return self.route(destinationd.as_origin(phone.split(",")) if phone else None)
+    if path == "/api/push/key":
+      return {"key": self.push.public_key()} if self.push is not None else {"error": "服务器没开推送"}
     return None
 
-  def post(self, path: str, body: dict) -> dict:
-    return self._with_car(self._post(path, body))
+  def post(self, path: str, body: dict, notify: bool = False) -> dict:
+    """notify: from a Shortcut (the page sees its own answer), a destination set is pushed to the phone."""
+    answer = self._with_car(self._post(path, body))
+    if notify and self.push is not None and path in SENT:
+      d = answer.get("destination")
+      if "error" in answer:
+        self.push.notify("没发到车上", str(answer["error"]))
+      elif isinstance(d, dict):
+        name = d.get("place_name") or "目的地"
+        if answer.get("queued"):
+          self.push.notify("等车上线", f"车上线后自动导航去 {name}")
+        else:
+          self.push.notify("已发到车上", name)
+    return answer
 
   def _post(self, path: str, body: dict) -> dict:
+    if path.startswith("/api/push/"):
+      if self.push is None:
+        return {"error": "服务器没开推送"}
+      if path == "/api/push/subscribe":
+        return self.push.subscribe(body)
+      self.push.notify("推送开好了", "发到车上的地点会在这里提醒")
+      return {"sent": True}
     d = self.dest
     if d.keys is None and path in ("/api/search", "/api/share"):   # no key here: the car searches
       try:
@@ -363,6 +406,12 @@ def handler(app: App, key: str, page: bytes, js_ak: str = ""):
 
     def do_GET(self):
       path = urllib.parse.urlsplit(self.path).path
+      if path == "/manifest.json":   # no secrets: fetched without the cookie
+        self._send(200, MANIFEST, "application/manifest+json")
+        return
+      if path == "/sw.js":
+        self._send(200, SERVICE_WORKER, "text/javascript")
+        return
       if not self._authorized():
         if path == "/":   # the key is typed in once, never put in a URL (logs, history, Referer)
           self._send(200, LOGIN.format(msg="").encode(), "text/html; charset=utf-8")
@@ -398,7 +447,7 @@ def handler(app: App, key: str, page: bytes, js_ak: str = ""):
       if path not in POSTS or not isinstance(body, dict):
         self._send(400 if path in POSTS else 404, b"", "text/plain")
         return
-      self._json(app.post(path, body))
+      self._json(app.post(path, body, notify=bool(self.headers.get("X-Key"))))   # the page sends the cookie
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002  # keys and places stay off the logs
       pass
@@ -419,7 +468,10 @@ def main():
   relay = Relay(Car(os.environ.get("NAVRELAY_CAR", "http://100.69.175.43:8082")), state)
   dest = destinationd.Destinations(CarParams(relay), keys_from_env(), count_file=os.path.join(state, "baidu_calls"),
                                    places=destinationd.Places(os.path.join(state, "places.json")))
-  app = App(relay, dest)
+  push = None
+  if webpush is not None:
+    push = webpush.Push(state, os.environ.get("NAVRELAY_PUSH_SUBJECT", "https://comma.cd.xiaoxx.cc"))
+  app = App(relay, dest, push)
   with open(os.environ.get("NAVRELAY_PAGE", "/opt/navrelay/destination_page.html"), "rb") as f:
     page = f.read()
   js_ak = os.environ.get("NAVRELAY_JS_AK", "")

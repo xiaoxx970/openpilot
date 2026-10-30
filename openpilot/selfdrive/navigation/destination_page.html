@@ -3,6 +3,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>导航</title>
+<link rel="manifest" href="/manifest.json">
 <style>
 :root{--bg:#0b1116;--card:#16222b;--line:#2a3a45;--text:#e8eef2;--muted:#93a4b0;--accent:#2f8f5b;--warn:#f2b36b;--blue:#2d7ff9}
 *{box-sizing:border-box}
@@ -125,6 +126,29 @@ function showTraffic(on){traffic=on;$('fabtraffic').classList.toggle('on',on);tr
   if(!map)return;try{on?map.setTrafficOn():map.setTrafficOff()}catch(e){}}
 addEventListener('resize',placeFabs)
 
+// push (navrelay, the page added to the home screen): what a Shortcut sent shows up as a notification that opens this page
+let pushMode='';   // '', 'off' (can be turned on here), 'on'
+async function initPush(){
+  if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))return;   // iOS: only from the home screen
+  let k;try{k=await api('/api/push/key')}catch(e){return}
+  if(!k||!k.key)return;   // the car's own page: no push
+  pushKey=k.key;
+  const reg=await navigator.serviceWorker.register('/sw.js');
+  const sub=await reg.pushManager.getSubscription();
+  if(sub&&Notification.permission==='granted'){pushMode='on';api('/api/push/subscribe',sub.toJSON()).catch(()=>{})}
+  else pushMode=Notification.permission==='denied'?'':'off';
+  if(view==='home')render()}
+let pushKey='';
+function keyBytes(k){const b=atob(k.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-k.length%4)%4));return Uint8Array.from(b,c=>c.charCodeAt(0))}
+async function enablePush(){
+  try{
+    if(await Notification.requestPermission()!=='granted'){pushMode='';msg='没有允许通知：设置 > 通知 里可以再打开';render();return}
+    const reg=await navigator.serviceWorker.ready;
+    const sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:keyBytes(pushKey)});
+    const r=await api('/api/push/subscribe',sub.toJSON());
+    if(r.error){msg=r.error;render();return}
+    pushMode='on';msg='';await api('/api/push/test',{});render();
+  }catch(e){msg='开不了通知（'+e.name+'）';render()}}
 function statusLine(){
   if(!state)return'';
   const on=state.car_online!==false;
@@ -166,6 +190,7 @@ function render(){
         +'<div class="row"><button class="sec" onclick="clearDest()">取消导航</button>'
         +(state.saved_as?'':'<button class="sec" onclick="saveCur()">存为常用地点</button>')+'</div>';
     }else if(state){h+='<div class="sub">还没有目的地。搜一个地点，或者在地图上点一下。</div>'+(msg?'<div class="msg">'+esc(msg)+'</div>':'')}
+    if(pushMode==='off')h+='<div class="row"><button class="sec" onclick="enablePush()">开启通知：发到车上的地点在这里提醒</button></div>';
     if(places.recent.length)h+='<h3>最近去过</h3>'+list(places.recent,'pickRecent');
   }
   $('body').innerHTML=h;
@@ -229,7 +254,7 @@ async function loadPlaces(){try{places=await api('/api/places')}catch(e){}}
 async function loadRoute(){if(view!=='home')return;try{route=await api('/api/route',null,phone?{'X-From':phone.join(',')}:null)}catch(e){return}
   if(view==='home')render()}
 locate();
-(async()=>{await Promise.all([refresh(),loadPlaces()]);render();loadRoute()})();
+(async()=>{await Promise.all([refresh(),loadPlaces()]);render();loadRoute();initPush().catch(()=>{})})();
 setInterval(()=>{if(document.visibilityState==='visible')refresh()},5000);
 setInterval(()=>{if(document.visibilityState==='visible')loadRoute()},15000);
 </script></body></html>

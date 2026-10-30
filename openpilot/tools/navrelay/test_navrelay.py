@@ -46,6 +46,20 @@ class FakeCar:
     return self.state()
 
 
+class FakePush:
+  def __init__(self):
+    self.sent = []
+
+  def notify(self, title, body, url="/"):
+    self.sent.append((title, body))
+
+  def public_key(self):
+    return "PUB"
+
+  def subscribe(self, sub):
+    return {"subscribed": True}
+
+
 class Clock:
   def __init__(self):
     self.t = 1000.
@@ -72,7 +86,31 @@ class TestApp(unittest.TestCase):
     dest = destinationd.Destinations(navrelay.CarParams(relay), keys, fetch_for(self.queries), count_file=None,
                                      places=destinationd.Places(None), resolve=lambda url: TARGET, clock=self.clock)
     relay.poll()
-    return navrelay.App(relay, dest)
+    self.push = FakePush()
+    return navrelay.App(relay, dest, self.push)
+
+  def test_shortcut_pushed(self):
+    self.app.post("/api/share", {"text": SHARE}, notify=True)
+    self.app.post("/api/go", {"label": "nope"}, notify=True)
+    self.app.post("/api/destination", {"latitude": 32.1, "longitude": 118.9, "name": "页面"})   # the page: no push
+    self.assertEqual(self.push.sent, [("已发到车上", "大行宫"), ("没发到车上", "没有叫“nope”的地点")])
+
+  def test_queued_then_taken_pushed(self):
+    self.car.online = False
+    self.app.relay.poll()
+    self.app.post("/api/go", {"label": "nope"})
+    self.app.post("/api/destination", {"latitude": 32.1, "longitude": 118.9, "name": "甲"}, notify=True)
+    self.car.online = True
+    self.app.relay.poll()
+    self.assertEqual(self.push.sent, [("等车上线", "车上线后自动导航去 甲"), ("车上线了", "开始导航去 甲")])
+    self.app.post("/api/destination", {"latitude": 32.2, "longitude": 118.9, "name": "乙"})   # sent at once: not "late"
+    self.assertEqual(len(self.push.sent), 2)
+
+  def test_push_api(self):
+    self.assertEqual(self.app.get("/api/push/key"), {"key": "PUB"})
+    self.assertEqual(self.app.post("/api/push/subscribe", {}), {"subscribed": True})
+    self.app.post("/api/push/test", {})
+    self.assertEqual(self.push.sent[-1][0], "推送开好了")
 
   def test_share_resolved_here_then_sent(self):
     s = self.app.post("/api/share", {"text": SHARE})
@@ -207,6 +245,12 @@ class TestServer(unittest.TestCase):
     with self.assertRaises(urllib.error.HTTPError) as e:
       self.open("/api/other", {}, {"X-Key": KEY})
     self.assertEqual(e.exception.code, 404)
+
+  def test_manifest_and_worker_without_key(self):
+    with self.open("/manifest.json") as r:
+      self.assertEqual(json.loads(r.read())["display"], "standalone")
+    with self.open("/sw.js") as r:
+      self.assertTrue(b"notificationclick" in r.read())
 
   def test_key_required(self):
     self.assertFalse(navrelay.key_ok("", ""))
