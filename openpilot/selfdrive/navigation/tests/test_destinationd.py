@@ -297,6 +297,7 @@ class TestRoute(unittest.TestCase):
     self.assertEqual(len(self.queries), 1)   # 100 m on: the same start
     self.dest.preview_route({"latitude": lat, "longitude": lon, "origin": list(latlon(0, 5000))})
     self.assertEqual(len(self.queries), 2)   # 5 km away: planned from there
+    self.assertTrue("error" in self.dest.preview_route({"latitude": lat, "longitude": lon}))   # no start: none of them
 
   def test_nav_only(self):
     self.assertIsNone(self.dest.route(nav_only=True)["route"])

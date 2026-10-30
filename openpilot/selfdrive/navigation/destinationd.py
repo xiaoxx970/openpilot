@@ -395,7 +395,7 @@ class Destinations:
     now = self.clock()
 
     def same_start(q: dict) -> bool:
-      return near is None or math.hypot(*baidu.ground(q["from"][0], q["from"][1], near[0], near[1])) < PREVIEW_MOVED
+      return near is not None and math.hypot(*baidu.ground(q["from"][0], q["from"][1], near[0], near[1])) < PREVIEW_MOVED
     p = next((q for q in self.previews if same_place(q["to"], d) and same_start(q)), None)
     if p is not None and now - p["time"] < PREVIEW_STALE:
       return p
