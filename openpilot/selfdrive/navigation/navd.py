@@ -21,6 +21,11 @@ MANEUVER_TRANSITION_THRESHOLD = 10
 REROUTE_COUNTER_MIN = 3
 ROUTE_RESEND_PERIOD = 10  # updates (seconds); a restarted mapsd gets the route within this
 RECOMPUTE_HOLD = 10  # updates (seconds) between route requests
+# Off the route, slow and hardly moving (a garage, a car park, off the road network), asking again finds no better route:
+# a reroute wants some speed or some distance from where the last route was asked, and waits longer each time in a row.
+REROUTE_MIN_SPEED = 3.  # m/s
+REROUTE_MIN_MOVED = 30.  # m
+REROUTE_BACKOFF = (10, 30, 60)  # updates (seconds) after the 1st, 2nd, 3rd and later reroutes in a row
 # With Baidu's key file (road_events/baidu.py) routes come from Baidu's driving route planning, with China's roads and traffic:
 # asked again every BAIDU_REFRESH while moving for fresh traffic and times, which roadeventd takes for its jams ahead.
 BAIDU_REFRESH = 120.  # s
@@ -59,6 +64,9 @@ class RouteEngine:
 
     self.recompute_hold = 0
     self.reroute_counter = 0
+    self.reroutes = 0  # off-route reroutes in a row, since the car was last on its route
+    self.request_position = None  # where the last route was asked
+    self.arrived = False
 
     self.last_speed = 0.
     self.route_time = None  # monotonic s when a Baidu route was asked, for its traffic
@@ -105,14 +113,28 @@ class RouteEngine:
 
     self.recompute_hold -= 1
     refresh = self.route_time is not None and time.monotonic() - self.route_time >= BAIDU_REFRESH and self.last_speed >= BAIDU_REFRESH_SPEED
-    if (self.should_recompute() or new_destination != self.nav_destination or refresh) and self.recompute_hold <= 0:
-      self.recompute_hold = RECOMPUTE_HOLD
+    new = new_destination != self.nav_destination
+    reroute = self.should_recompute() and (self.step_idx is None or self.reroute_worthwhile())
+    if (reroute or new or refresh) and self.recompute_hold <= 0:
+      if new or refresh or self.step_idx is None:
+        self.recompute_hold = RECOMPUTE_HOLD
+        self.reroutes = 0
+      else:
+        self.recompute_hold = REROUTE_BACKOFF[min(self.reroutes, len(REROUTE_BACKOFF) - 1)]
+        self.reroutes += 1
+      self.request_position = self.last_position
       self.calculate_route(new_destination)
       self.reroute_counter = 0
 
+  def reroute_worthwhile(self) -> bool:
+    if self.last_speed >= REROUTE_MIN_SPEED or self.request_position is None:
+      return True
+    return bool(np.linalg.norm(local_meters(self.last_position, self.request_position)) >= REROUTE_MIN_MOVED)
+
   def calculate_route(self, destination):
     assert self.last_position is not None
-    cloudlog.warning(f"Calculating route {self.last_position} -> {destination}")
+    cloudlog.info(f"Calculating route {self.last_position} -> {destination}")
+    self.arrived = False
     self.nav_destination = destination
     if self.baidu_keys is not None:
       self.calculate_baidu_route(destination)
@@ -224,7 +246,9 @@ class RouteEngine:
         self.step_idx += 1
         self.recompute_hold = 0
       else:
-        cloudlog.warning("Destination reached")
+        if not self.arrived:
+          cloudlog.info("Destination reached")
+          self.arrived = True
 
         # Clear route if driving away from destination
         if np.linalg.norm(local_meters(self.last_position, self.nav_destination)) > REROUTE_DISTANCE:
@@ -270,6 +294,7 @@ class RouteEngine:
       self.reroute_counter += 1
     else:
       self.reroute_counter = 0
+      self.reroutes = 0  # back on the route
     return self.reroute_counter > REROUTE_COUNTER_MIN
 
 

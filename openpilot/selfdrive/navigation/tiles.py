@@ -139,6 +139,14 @@ class LocalTiles:
     self.file.close()
 
 
+class NoTiles(Exception):
+  """No archive on the device, and no prime for the hosted one (its API answers 403 without)."""
+
+
 def open_tiles():
-  """The device's own archive when there is one, else the hosted basemap."""
-  return LocalTiles() if local_archive().is_file() else RemoteTiles()
+  """The device's own archive when there is one, else the hosted basemap with prime."""
+  if local_archive().is_file():
+    return LocalTiles()
+  if (Params().get('PrimeType') or 0) <= 0:
+    raise NoTiles
+  return RemoteTiles()

@@ -23,7 +23,7 @@ from openpilot.selfdrive.navigation.navd import BAIDU_REFRESH, BAIDU_RETRY, RERO
 from openpilot.selfdrive.navigation.pmtiles import PMTiles, decode_directory, tile_id
 from openpilot.selfdrive.navigation.renderer import MAJOR, MEDIUM, MINOR, SIZE, STREET, TRACK, MapRenderer, draw_segments, mercator, project, stroke_widths
 from openpilot.selfdrive.navigation.route import RouteTracker
-from openpilot.selfdrive.navigation.tiles import LocalTiles, RemoteTiles, open_tiles
+from openpilot.selfdrive.navigation.tiles import LocalTiles, NoTiles, RemoteTiles, open_tiles
 from openpilot.selfdrive.navigation.tests.test_baidu_route import answer as baidu_answer, line, step as baidu_step
 from openpilot.selfdrive.navigation.vector_tile import decode_lines, decode_roads
 from openpilot.selfdrive.road_events.tests.test_road_events import latlon
@@ -147,7 +147,7 @@ class TileServerCase(unittest.TestCase):
     self.url = f'http://127.0.0.1:{self.server.server_port}/planet.pmtiles?sig=secret'
     self.api.get.return_value.json.return_value = {'url': self.url, 'expires': time.time() + 86400}  # noqa: TID251
     params = MagicMock()
-    params.return_value.get.return_value = 'test-dongle'
+    params.return_value.get.side_effect = {'DongleId': 'test-dongle', 'PrimeType': 3}.get   # hosted tiles come with prime
     for name, value in [('Api', MagicMock(return_value=self.api)), ('Params', params), ('PC', True)]:
       self.enterContext(patch(f'openpilot.selfdrive.navigation.tiles.{name}', value))
     self.enterContext(patch('openpilot.selfdrive.navigation.tiles.Paths.comma_home', return_value=self.directory.name))
@@ -232,7 +232,14 @@ class TestLocalTiles(unittest.TestCase):
     self.remote.assert_not_called()  # no account or network needed
 
   def test_hosted_without_archive(self):
-    self.assertIs(open_tiles(), self.remote.return_value)
+    with patch('openpilot.selfdrive.navigation.tiles.Params') as params:
+      params.return_value.get.return_value = 2  # prime lite
+      self.assertIs(open_tiles(), self.remote.return_value)
+      for prime in (None, 0, -2):
+        params.return_value.get.return_value = prime
+        with self.assertRaises(NoTiles):
+          open_tiles()
+    self.remote.assert_called_once()
 
 
 class TestRemoteTiles(TileServerCase):
@@ -370,6 +377,24 @@ class TestRouteEngine(unittest.TestCase):
     self.engine.send_instruction()
     self.assertIsNone(self.engine.route)
     self.assertNotIn('NavDestination', self.values)
+
+  def test_no_reroute_storm_when_slow(self):
+    self.load_route()
+    self.engine.nav_destination = (0.002, 0)
+    self.engine.request_position = (0, 0)
+    self.engine.last_position, self.engine.last_speed = (0.00005, 0.00025), 1.  # 28 m off the route, crawling in a car park
+    with patch('requests.get', return_value=self.response) as get:
+      for _ in range(60):
+        self.engine.recompute_route(gps_ok=True)
+      get.assert_not_called()
+      self.engine.last_position = (0.0001, 0.0006)  # 67 m off and 50 m on from where the route was asked: worth asking
+      for _ in range(REROUTE_COUNTER_MIN + 1):
+        self.engine.recompute_route(gps_ok=True)
+      self.assertEqual(get.call_count, 1)
+      self.engine.last_speed = 10.
+      for _ in range(90):  # still off: later reroutes wait longer, 10 s then 30 s then 60 s
+        self.engine.recompute_route(gps_ok=True)
+      self.assertEqual(get.call_count, 3)
 
   def test_failed_request_clears_route(self):
     self.load_route()

@@ -12,9 +12,10 @@ from openpilot.selfdrive.navigation.helpers import latest_gps_source
 from openpilot.selfdrive.navigation.pmtiles import PMTiles
 from openpilot.selfdrive.navigation.renderer import SIZE, MapRenderer
 from openpilot.selfdrive.navigation.route import RouteTracker
-from openpilot.selfdrive.navigation.tiles import open_tiles
+from openpilot.selfdrive.navigation.tiles import NoTiles, open_tiles
 
 RETRY_SECONDS = 10
+NO_TILES_RETRY_SECONDS = 60  # until an archive is put on the device
 
 
 class MapsD:
@@ -50,6 +51,10 @@ class MapsD:
           image, valid = self.renderer.render(*self.tracker.snap(gps.longitude, gps.latitude), self.route)
           if valid:
             return image, sm.logMonoTime[source]
+    except NoTiles:
+      if self.retry_at == 0.0:
+        cloudlog.warning('mapsd: no basemap on the device and no prime for the hosted one')
+      self.retry_at = now + NO_TILES_RETRY_SECONDS
     except Exception:  # a failed fetch, or a corrupt cached tile
       cloudlog.exception('mapsd.render_failed')
       self.close()  # a changed archive needs a fresh reader
