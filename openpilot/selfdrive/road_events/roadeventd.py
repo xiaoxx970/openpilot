@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Road prompts for the VW cluster (ACC_Events): uphill / downhill ahead from the model, roundabout / crossing ahead from
 mapd's offline OSM tiles, and with Baidu online data a speed camera ("speed limit ahead" with its limit, cruise API) and a
-traffic jam ahead (route planning along the road ahead), and Baidu's speed limits for sunnypilot's speed limit resolver
-(they replace the offline map's while fresh). card shows the prompts in openpilot's ACC HUD; the resolver's limits only
+traffic jam ahead (route planning along the road ahead), and the cameras' limits for sunnypilot's speed limit resolver
+(they replace the offline map's near a camera). card shows the prompts in openpilot's ACC HUD; the resolver's limits only
 reach the cruise speed through Speed Limit Assist, which asks the driver every time. A traffic jam ahead also asks
 selfdrived for the relaxed following distance until the car reaches it (prompts.JamAhead).
 
@@ -72,8 +72,6 @@ def fill_message(ev, out: dict, snap=None) -> None:
   ev.rampNear = out.get("rampNear", False)
   if snap is not None:
     ev.baiduOnline = snap.online or snap.jams_online
-    ev.speedLimit = snap.speed_limit
-    ev.speedLimitValid = snap.speed_limit_valid
     ev.speedLimitAhead = snap.camera_limit
     ev.speedLimitAheadDistance = snap.camera_distance
 
@@ -162,7 +160,7 @@ def main():
           cloudlog.exception("roadeventd: map lookup failed, map prompts off for this drive")
           map_failed = True
         road_key = out["roadKey"]
-        if not prompts_on:   # Baidu's speed limits only: the map just tells it which road the car is on
+        if not prompts_on:   # Baidu's speed cameras for the resolver only: the map just tells it which road the car is on
           out.update(event=0, distance=0., source=0, jamLength=0., eventSpeedLimit=0., jamFollow=False, jamFollowDistance=0.)
     else:
       odo_t = None

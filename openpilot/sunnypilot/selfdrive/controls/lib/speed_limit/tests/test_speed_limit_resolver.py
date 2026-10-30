@@ -149,15 +149,14 @@ class TestSpeedLimitResolverValidation(OpenpilotTestCase):
 
 
 def setup_baidu_sm_mock(mocker, map_limit, car_limit=0., road=None, age=0.2, set_kph=100.):
-  """Fork: roadeventd's Baidu limits next to the car's and the offline map's."""
+  """Fork: roadeventd's Baidu speed cameras next to the car's limits and the offline map's."""
   sm_mock = setup_sm_mock(mocker)
   items = {key: sm_mock[key] for key in ('carState', 'liveMapDataSP', 'carStateSP', 'gpsLocation')}
   items['liveMapDataSP'].speedLimit = map_limit
   items['carStateSP'].speedLimit = car_limit
   items['carState'].vCruiseCluster = set_kph
   if road is not None:
-    items['roadEventsIC'] = create_mock({'speedLimit': 0., 'speedLimitValid': False, 'speedLimitAhead': 0., 'speedLimitAheadDistance': 0.,
-                                         **road}, mocker)
+    items['roadEventsIC'] = create_mock({'speedLimitAhead': 0., 'speedLimitAheadDistance': 0., **road}, mocker)
   sm_mock.__getitem__.side_effect = lambda key: items[key]
   sm_mock.services = list(items)
   sm_mock.seen = dict.fromkeys(items, True)
@@ -167,17 +166,18 @@ def setup_baidu_sm_mock(mocker, map_limit, car_limit=0., road=None, age=0.2, set
 
 class TestSpeedLimitResolverBaidu(OpenpilotTestCase):
   MAP, BAIDU = 80 / 3.6, 60 / 3.6
+  CAMERA = {'speedLimitAhead': BAIDU, 'speedLimitAheadDistance': 200.}
 
   @parameterized.expand([(Policy.map_data_only,), (Policy.map_data_priority,), (Policy.car_state_priority,)], names=["policy"])
-  def test_baidu_replaces_the_map(self, resolver_class, policy, mocker):
+  def test_speed_camera_replaces_the_map(self, resolver_class, policy, mocker):
     resolver = resolver_class()
     resolver.policy = policy
-    resolver.update(20., setup_baidu_sm_mock(mocker, self.MAP, road={'speedLimit': self.BAIDU, 'speedLimitValid': True}))
+    resolver.update(20., setup_baidu_sm_mock(mocker, self.MAP, road=self.CAMERA))
     assert resolver.source == SpeedLimitSource.baidu
     assert resolver.speed_limit == self.BAIDU
 
-  @parameterized.expand([({'speedLimitValid': False},), (None,)], names=["road"])
-  def test_the_map_without_a_baidu_limit(self, resolver_class, road, mocker):
+  @parameterized.expand([({},), (None,)], names=["road"])
+  def test_the_map_without_a_speed_camera(self, resolver_class, road, mocker):
     resolver = resolver_class()
     resolver.policy = Policy.map_data_only
     resolver.update(20., setup_baidu_sm_mock(mocker, self.MAP, road=road))
@@ -187,7 +187,7 @@ class TestSpeedLimitResolverBaidu(OpenpilotTestCase):
   def test_the_map_when_baidu_is_stale(self, resolver_class, mocker):
     resolver = resolver_class()
     resolver.policy = Policy.map_data_only
-    sm_mock = setup_baidu_sm_mock(mocker, self.MAP, road={'speedLimit': self.BAIDU, 'speedLimitValid': True}, age=2.)
+    sm_mock = setup_baidu_sm_mock(mocker, self.MAP, road=self.CAMERA, age=2.)
     resolver.update(20., sm_mock)
     assert resolver.source == SpeedLimitSource.map
 
@@ -268,13 +268,13 @@ class TestSpeedLimitResolverBaidu(OpenpilotTestCase):
   def test_car_state_only_unchanged(self, resolver_class, mocker):
     resolver = resolver_class()
     resolver.policy = Policy.car_state_only
-    resolver.update(20., setup_baidu_sm_mock(mocker, self.MAP, car_limit=50 / 3.6, road={'speedLimit': self.BAIDU, 'speedLimitValid': True}))
+    resolver.update(20., setup_baidu_sm_mock(mocker, self.MAP, car_limit=50 / 3.6, road=self.CAMERA))
     assert resolver.source == SpeedLimitSource.car
     assert resolver.speed_limit == 50 / 3.6
 
-  def test_combined_takes_baidu_in_place_of_the_map(self, resolver_class, mocker):
+  def test_combined_takes_the_speed_camera_in_place_of_the_map(self, resolver_class, mocker):
     resolver = resolver_class()
     resolver.policy = Policy.combined
-    resolver.update(20., setup_baidu_sm_mock(mocker, 40 / 3.6, car_limit=90 / 3.6, road={'speedLimit': self.BAIDU, 'speedLimitValid': True}))
+    resolver.update(20., setup_baidu_sm_mock(mocker, 40 / 3.6, car_limit=90 / 3.6, road=self.CAMERA))
     assert resolver.source == SpeedLimitSource.baidu
     assert resolver.speed_limit == self.BAIDU

@@ -1,6 +1,7 @@
 """Baidu Maps online data for roadeventd: speed cameras and traffic lights on the road the car is predicted to take
-(passenger-car cruise API, 小客车巡航API), the traffic on the road ahead (driving route planning, 驾车路线规划), and the
-speed limit of the road the car is on (road info API, 道路信息API).
+(passenger-car cruise API, 小客车巡航API) and the traffic on the road ahead (driving route planning, 驾车路线规划). Baidu sells
+road speed limits (road info API, 道路信息API) to companies only (2026-10-30): those come from the car's sign recognition and
+the offline map.
 
 Opt-in (param VwBaiduOnline) and inert without a key file: /data/baidu_ak with the lines AK=... and SK=... of a Baidu server
 AK set to SN check. Not a Param, those can be backed up off the car. The keys stay in this module: requests are SN signed and
@@ -20,9 +21,7 @@ are counted in COUNT_FILE, across drives and reboots, and stop at DAILY_BUDGET.
   once (ROUTE_MIN_GAP) when the car leaves that route or nears its end. An answer that leaves the expected road within its
   first ROUTE_CHECK m (a detour, another carriageway) is not used.
 - Off a route its data is dropped at once, so nothing from the road the car left reaches a prompt or the speed limit.
-- A road info query when the road changes and every ROADINFO_PERIOD.
-Errors and rate limits back off up to 5 min; a refused road info permission waits 30 min, so road info switches on by itself
-once the AK gets it; a spent quota waits until midnight Beijing time; both logged once.
+Errors and rate limits back off up to 5 min; a spent quota waits until midnight Beijing time, logged once.
 
 At a tunnel portal a detection bound the car to the surface road beside and then above the tunnel, traffic lights and all.
 Positions cannot tell stacked roads apart, Baidu's link ids can: a route that does not start on a link of the route the car
@@ -52,7 +51,7 @@ SN_SAFE = "/:=&?#+!$,;'@()*[]"   # characters Baidu's SN rule leaves unquoted
 KPH_TO_MS = 1 / 3.6
 DAILY_BUDGET = {"cruise": 90, "route": 1500}   # calls a Beijing day: the quotas are about 100 and 5000
 LOW_BUDGET = 20            # cruise calls left today below which there are no routine detections
-BUDGET_PER_HOUR = {"cruise": 30, "route": 120, "roadinfo": 120}
+BUDGET_PER_HOUR = {"cruise": 30, "route": 120}
 CRUISE_PERIOD = 300.       # s between routine cruise detections
 CRUISE_MIN_GAP = 60.       # s between two detections, also when the car leaves the route or nears its end
 CRUISE_PARKED = 300.       # s: below PARKED_SPEED at most one detection in this time
@@ -66,9 +65,6 @@ ROUTE_MIN = 800.           # m: a shorter expected road (cruise route nearly use
 ROUTE_CHECK = 300.         # m of a planned route that must stay on the expected road (ROUTE_CHECK_STRAIGHT when that is
 ROUTE_CHECK_STRAIGHT = 100.  # only the course straight on)
 JAM_RANGE = (500., 1500.)  # m ahead a jam is announced in town and on fast roads, as prompts.JamPrompt
-ROADINFO_PERIOD = 60.      # s between road info queries on the same road
-ROADINFO_MIN_GAP = 10.     # s
-DENIED_RETRY = 1800.       # s before asking again after a refused permission
 ANSWER_MAX_AGE = 10.       # s: an answer picked up later (the loop is not fed without GPS, e.g. in a tunnel) is dropped
 CLOCK_SET = 1735689600.    # 2025-01-01: before the clock is set there is no day to count calls against
 OFF_ROUTE_DIST = 40.       # m off a route's polyline (GPS, lane and polyline errors stay below ~20 m)
@@ -85,9 +81,7 @@ EXT_INFO = 0x01 | 0x02 | 0x04 | 0x10   # keep the session, traffic lights, camer
 CAMERA_RANGE = 1000.       # m
 CAMERA_PASSED = 50.        # m after a speed camera it is still reported (its limit holds until then)
 CAMERA_SPEED = 1           # camera_list type with a speed limit, the only one with a limit (types 2/3/4/8/10/17 have none)
-DENIED = frozenset((240, 241, 4, 210, 211))  # service not enabled / no permission / IP or SN check failed
 QUOTA = frozenset((301, 302))                # quota spent (401 / 402, too many requests at once, back off like errors)
-NO_ROAD = 1001                               # road info: the points did not bind to a road
 BEIJING = datetime.timezone(datetime.timedelta(hours=8))
 
 
@@ -357,17 +351,6 @@ def parse_route(resp: dict, odo: float, t: float, lat: float, lon: float) -> Pla
   return PlannedRoute(odo, t, path[-1][0] - s0, [(d - s0, la, lo) for d, la, lo in path], traffic_runs(steps, s0))
 
 
-def parse_roadinfo(resp: dict) -> float | None:
-  """Speed limit m/s of the road at the latest point, 0 when Baidu binds the road but has no limit for it; None without one."""
-  if resp.get("status") != 0:
-    return None
-  info = resp.get("road_base_info") or {}
-  try:
-    return max(0., float(info.get("speed_limit") or 0.)) * KPH_TO_MS
-  except (TypeError, ValueError):
-    return None
-
-
 @dataclass
 class Snapshot:
   online: bool = False                                          # a cruise answer younger than STALE: lamps and camera
@@ -376,8 +359,6 @@ class Snapshot:
   jams: list = field(default_factory=list)                      # (distance ahead, length, status)
   camera_limit: float = 0.                                      # m/s, next speed camera ahead, or passed less than CAMERA_PASSED ago
   camera_distance: float = 0.                                   # m to it, negative once passed
-  speed_limit: float = 0.                                       # m/s, road the car is on; 0 = none
-  speed_limit_valid: bool = False                               # a fresh road info limit for this road
 
 
 # ---- network ---------------------------------------------------------------------------------------------------------------
@@ -448,9 +429,6 @@ class BaiduOnline:
     self.discarded = 0                          # plannings that left the expected road
     self.call_times: dict[str, collections.deque] = {k: collections.deque() for k in BUDGET_PER_HOUR}
     self.road_key = None
-    self.roadinfo: tuple[float, object, float] | None = None   # (t, road key, limit m/s)
-    self.last_roadinfo = -math.inf
-    self.roadinfo_denied_until = -math.inf
     self.backoff: dict[str, float] = dict.fromkeys(BUDGET_PER_HOUR, 0.)
     self.retry_at: dict[str, float] = dict.fromkeys(BUDGET_PER_HOUR, -math.inf)
     self.calls: collections.Counter = collections.Counter()
@@ -557,15 +535,6 @@ class BaiduOnline:
       if self._submit("route", t, now, ROUTE_PATH, params, (t, odo, lat, lon, expected, check)):
         self.last_plan, self.want_plan = t, False
 
-    road_changed = self.roadinfo is not None and self.roadinfo[1] != self.road_key
-    due = t - self.last_roadinfo >= ROADINFO_PERIOD or (road_changed and t - self.last_roadinfo >= ROADINFO_MIN_GAP)
-    if due and t >= self.roadinfo_denied_until and self._can_call("roadinfo", t, now):
-      pts = [{"latitude": round(h[0], 6), "longitude": round(h[1], 6), "coord_type_input": "wgs84", "loc_time": int(now - (t - h[4])),
-              "speed": round(h[2] * 3.6, 1), "direction": int(h[3])} for h in list(self.history)[-10:]]
-      params = [("point_list", json.dumps(pts, separators=(",", ":"))), ("coord_type_output", "gcj02"), ("options", "vehicle_type:car")]
-      if self._submit("roadinfo", t, now, "/api_roadinfo/v1/track", params, (t, self.road_key)):
-        self.last_roadinfo = t
-
   def _road_ahead(self, t, odo, lat, lon, course, v, road_ahead) -> tuple[list[tuple[float, float]], float]:
     """The road the car is expected to take, as far as a route planning goes: the cruise route while the car follows it,
     else the offline map's road ahead, else straight on along the course; and how much of a planned route must stay on it."""
@@ -602,13 +571,8 @@ class BaiduOnline:
       status = resp.get("status") if isinstance(resp, dict) else None
       if err is None and status is None:
         err = "BadAnswer"
-      if kind == "roadinfo" and status == NO_ROAD:
-        self.roadinfo = None   # off the road network: no Baidu limit, the offline map may still have one
-        continue
       if err is not None or status != 0:
-        if kind == "roadinfo" and status in DENIED:
-          self.roadinfo_denied_until = t + DENIED_RETRY   # not enabled for this AK (yet)
-        elif status in QUOTA:   # spent for today: nothing more until it starts again
+        if status in QUOTA:   # spent for today: nothing more until it starts again
           self.retry_at[kind] = t + until_beijing_midnight(unix_now())
           self._log_once(f"quota {kind}", f"roadeventd: Baidu {kind} quota spent (status {status}), no more requests until midnight Beijing time")
         else:   # network, timeouts, Baidu's own errors: again soon, then less and less often
@@ -633,10 +597,6 @@ class BaiduOnline:
           self.discarded += 1   # a detour or another road: not the traffic ahead of the car
           continue
         self.planned, self.off_planned = planned, 0
-      elif kind == "roadinfo":
-        limit = parse_roadinfo(resp)
-        if limit is not None:
-          self.roadinfo = (meta[0], meta[1], limit)
 
   def _snapshot(self, t, odo) -> Snapshot:
     s = Snapshot()
@@ -653,6 +613,4 @@ class BaiduOnline:
       s.jams_online = True
       done = odo - p.odo
       s.jams = [(start - done, length, st) for start, length, st in p.jams if start + length - done > 0.]
-    if self.roadinfo is not None and t - self.roadinfo[0] < STALE and self.roadinfo[1] == self.road_key and self.roadinfo[2] > 0.:
-      s.speed_limit, s.speed_limit_valid = self.roadinfo[2], True
     return s

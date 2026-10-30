@@ -50,10 +50,10 @@ DESCRIPTIONS = {
     "Traffic a traffic jam ahead selects the relaxed following distance until the car reaches it, like rain's."
   ),
   "VwBaiduOnline": tr_noop(
-    "Baidu Maps' live data for the road ahead: speed limits in place of the offline map's (Speed Limit Assist still asks " +
-    "before each change), and with Road Event Prompts a traffic jam ahead, shown and approached at the relaxed following " +
-    "distance. Sends the car's recent positions to Baidu a few times a minute over mobile data. Needs your Baidu Maps key " +
-    "in /data/baidu_ak."
+    "Baidu Maps' live data for the road ahead: speed cameras' limits in place of the offline map's near a camera (Speed " +
+    "Limit Assist still asks before each change), and with Road Event Prompts a traffic jam ahead, shown and approached at " +
+    "the relaxed following distance. Sends the car's recent positions to Baidu about once a minute over mobile data. Needs " +
+    "your Baidu Maps key in /data/baidu_ak."
   ),
   "EnableSpeedLimitPredicative": tr_noop(
     "Enables setting predicative speed limit"

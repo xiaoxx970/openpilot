@@ -153,9 +153,6 @@ def plan_straight(pq):
   return planned(points, traffic), None
 
 
-ROADINFO_DISABLED = {"status": 240, "message": "APP 服务被禁用"}
-
-
 class TestRequests(unittest.TestCase):
   def test_sn_matches_baidus_example(self):
     pq = baidu.signed_get("/geocoder/v2/", [("address", "百度大厦"), ("output", "json")], "yourak", "yoursk")
@@ -196,13 +193,6 @@ class TestAnswers(unittest.TestCase):
     self.assertIsNone(baidu.parse_cruise({"status": 2, "message": "参数错误, 必须传入轨迹点序列"}, 0., 0., *here))
     self.assertIsNone(baidu.parse_cruise({"status": 0, "result": {"routes": []}}, 0., 0., *here))
     self.assertIsNone(baidu.parse_cruise(east_route(), 0., 0., *latlon(0., 100.)))   # bound to a road 100 m away
-
-  def test_road_info(self):
-    limit = baidu.parse_roadinfo({"status": 0, "road_base_info": {"road_name": "Main Rd", "road_grade": 3, "speed_limit": 60}})
-    assert limit is not None
-    self.assertAlmostEqual(limit, 60 / 3.6)
-    self.assertEqual(baidu.parse_roadinfo({"status": 0, "road_base_info": {"speed_limit": 0}}), 0.)
-    self.assertIsNone(baidu.parse_roadinfo(ROADINFO_DISABLED))
 
 
 class TestBaiduOnline(unittest.TestCase):
@@ -246,12 +236,12 @@ class TestBaiduOnline(unittest.TestCase):
 
   # -- cruise: speed cameras
   def test_a_routine_detection_every_cruise_period_along_the_route(self):
-    self.start({"cruise": follow_long_route, "roadinfo": lambda pq: (ROADINFO_DISABLED, None)})
+    self.start({"cruise": follow_long_route})
     times = self.detection_times(1240, lambda i: (2.5 * i, 0., EAST, 5.))   # 620 s at 5 m/s, the route never near its end
     self.assertEqual(times, [0.5, 0.5 + baidu.CRUISE_PERIOD, 0.5 + 2 * baidu.CRUISE_PERIOD])
     self.assertTrue(self.step(2.5 * 1240, v=5.).online)
-    self.assertEqual(len(self.sent("roadinfo")), 1)    # not enabled for the AK: asked again only after 30 min
-    for pq in self.sent() + self.sent("roadinfo") + self.sent("route"):
+    self.assertEqual(self.sent("roadinfo"), [])        # Baidu's road info API is not used: companies only
+    for pq in self.sent() + self.sent("route"):
       self.assertTrue("&sn=" in pq)
       self.assertNotIn("sk-test", pq)
 
@@ -346,7 +336,7 @@ class TestBaiduOnline(unittest.TestCase):
 
   def test_spent_quota_waits_until_midnight_in_beijing_and_logs_once(self):
     spent = {"status": 302, "message": "天配额超限，限制访问"}
-    answer = {"cruise": spent, "roadinfo": spent}
+    answer = {"cruise": spent}
     logged: list[str] = []
     self.clock = Clock()
     self.worker = FakeWorker({k: (lambda pq, k=k: (answer[k], None)) for k in answer})
@@ -358,19 +348,18 @@ class TestBaiduOnline(unittest.TestCase):
       times = self.detection_times(600, lambda i: (3. * i, 0., EAST, 6.))
       self.assertEqual(times, [0.5])
       self.assertAlmostEqual(self.online.retry_at["cruise"], midnight, delta=0.01)
-      self.assertAlmostEqual(self.online.retry_at["roadinfo"], midnight, delta=0.01)
-      self.assertEqual(len(logged), 2)                 # once for each API
+      self.assertEqual(len(logged), 1)                 # once
       self.assertTrue(all("sk-test" not in line and "ak-test" not in line for line in logged))
 
       self.clock.t = midnight                          # answered again the next day
-      answer.update(cruise=east_route(1800., 2000.), roadinfo=ROADINFO_DISABLED)
+      answer["cruise"] = east_route(1800., 2000.)
       self.assertEqual(len(self.detection_times(4, lambda i: (1800. + 3. * i, 0., EAST, 6.))), 1)
       self.assertTrue(self.step(1812.).online)
-      self.assertEqual(len(logged), 2)
+      self.assertEqual(len(logged), 1)
       answer["cruise"] = spent                         # and spent again later that day: logged again
       self.clock.t += baidu.CRUISE_PERIOD
       self.detection_times(4, lambda i: (1900. + 3. * i, 0., EAST, 6.))
-      self.assertEqual(len(logged), 3)
+      self.assertEqual(len(logged), 2)
 
   def test_parked_at_most_one_detection_in_cruise_parked(self):
     self.start({"cruise": follow_long_route})
@@ -420,23 +409,6 @@ class TestBaiduOnline(unittest.TestCase):
     self.assertAlmostEqual(snap.camera_limit, 60 / 3.6)
     snap = self.step(15. + baidu.CAMERA_PASSED + 2.)
     self.assertAlmostEqual(snap.camera_distance, 500. - 15. - baidu.CAMERA_PASSED - 2., delta=0.5)   # the next one
-
-  def test_speed_limit_for_the_road_it_was_asked_on(self):
-    self.step(0.)
-    self.worker.answer("roadinfo", {"status": 0, "road_base_info": {"road_name": "Main Rd", "speed_limit": 60}})
-    snap = self.step(7.5)
-    self.assertTrue(snap.speed_limit_valid)
-    self.assertAlmostEqual(snap.speed_limit, 60 / 3.6)
-    self.assertFalse(self.step(15., road=("Other Rd", 5)).speed_limit_valid)
-    while len(self.sent("roadinfo")) < 2:
-      self.step(15., road=("Other Rd", 5))
-    self.worker.answer("roadinfo", {"status": 0, "road_base_info": {"road_name": "Other Rd", "speed_limit": 0}})
-    self.assertFalse(self.step(15., road=("Other Rd", 5)).speed_limit_valid)   # bound, but Baidu has no limit for it
-    while len(self.sent("roadinfo")) < 3:
-      self.step(15., road=("Other Rd", 5))
-    self.worker.answer("roadinfo", {"status": 1001, "message": "绑路失败"})
-    self.step(15., road=("Other Rd", 5))
-    self.assertIsNone(self.online.roadinfo)
 
   # -- daily budget
   def test_daily_budget_kept_across_drives_until_the_next_day(self):

@@ -504,8 +504,8 @@ struct RoadEventsIC @0xcb9fd56c7057593a {
   roadClass @6 :UInt8;        # its OSM highway class, as in mapd's offline tiles (1 motorway ... 13 living street)
   jamLength @7 :Float32;      # m, length of the jam ahead while event is 12
   baiduOnline @8 :Bool;       # a fresh Baidu cruise answer for the road ahead (asked less than baidu.STALE ago)
-  speedLimit @9 :Float32;     # m/s, Baidu's speed limit of the road the car is on (road info API), 0 = none
-  speedLimitValid @10 :Bool;  # a fresh Baidu answer for that road: then it stands in for the offline map's limit
+  speedLimit @9 :Float32;     # unused (always 0): Baidu sells its road info API, a road's speed limit, to companies only
+  speedLimitValid @10 :Bool;  # unused (always false), see speedLimit
   speedLimitAhead @11 :Float32;          # m/s, limit of the next Baidu speed camera on the road ahead, 0 = none
   speedLimitAheadDistance @12 :Float32;  # m to it, negative once passed (reported until 50 m behind)
   jamFollow @13 :Bool;           # a traffic jam ahead asks for the relaxed following distance (Baidu, see prompts.JamAhead)

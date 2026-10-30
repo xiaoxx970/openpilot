@@ -22,7 +22,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.ramp_sign_filter im
 SpeedLimitSource = custom.LongitudinalPlanSP.SpeedLimit.Source
 
 ALL_SOURCES = tuple(SpeedLimitSource.schema.enumerants.values())
-BAIDU_MAX_AGE = 1.5  # s without a roadEventsIC message (2 Hz) before Baidu's limits are dropped
+BAIDU_MAX_AGE = 1.5  # s without a roadEventsIC message (2 Hz) before Baidu's speed cameras are dropped
 
 
 class SpeedLimitResolver:
@@ -60,8 +60,7 @@ class SpeedLimitResolver:
       Policy.combined: [SpeedLimitSource.car, SpeedLimitSource.map],
     }
     self.source = SpeedLimitSource.none
-    self.baidu_in_use = False
-    self.baidu_camera = False   # Baidu's limit is the speed camera's (fork)
+    self.baidu_in_use = False   # a Baidu speed camera's limit stands in for the offline map's (fork)
     self.camera = False         # the resolved limit is a Baidu speed camera's (fork)
     self._camera: tuple[float, float] | None = None   # (m to it, limit m/s) of the speed camera in use
     self._last_before_camera = (0., 0.)              # speed_limit_last, speed_limit_final_last from before it
@@ -163,25 +162,19 @@ class SpeedLimitResolver:
         self.distance_solutions[SpeedLimitSource.map] = distance_to_speed_limit_ahead
 
   def _get_from_baidu(self, sm: messaging.SubMaster) -> bool:
-    """Baidu Maps' limits from roadeventd (fork): True when they stand in for the offline map's, i.e. with a fresh limit for the
-    road the car is on or a speed camera in use. Otherwise the offline map stays."""
+    """Baidu Maps' speed cameras from roadeventd (fork): True while one is in use, then it stands in for the offline map's limit.
+    Baidu's road limits (road info API) are sold to companies only, so the offline map keeps the road's own limit."""
     self._reset_limit_sources(SpeedLimitSource.baidu)
-    self.baidu_camera = False
     if 'roadEventsIC' not in getattr(sm, 'services', ()) or not sm.seen['roadEventsIC'] or \
        time.monotonic() - sm.recv_time['roadEventsIC'] > BAIDU_MAX_AGE:
       self._camera = None
       return False
-    road = sm['roadEventsIC']
-    in_use = False
-    if road.speedLimitValid:
-      self.limit_solutions[SpeedLimitSource.baidu] = road.speedLimit
-      in_use = True
-    camera = self._update_camera(sm, road, time.monotonic() - sm.recv_time['roadEventsIC'])
-    if camera is not None:
-      distance, self.limit_solutions[SpeedLimitSource.baidu] = camera
-      self.distance_solutions[SpeedLimitSource.baidu] = max(0., distance)
-      self.baidu_camera = in_use = True
-    return in_use
+    camera = self._update_camera(sm, sm['roadEventsIC'], time.monotonic() - sm.recv_time['roadEventsIC'])
+    if camera is None:
+      return False
+    distance, self.limit_solutions[SpeedLimitSource.baidu] = camera
+    self.distance_solutions[SpeedLimitSource.baidu] = max(0., distance)
+    return True
 
   def _update_camera(self, sm: messaging.SubMaster, road, age: float) -> tuple[float, float] | None:
     """A Baidu speed camera's limit, as a limit ahead: taken up LOOK_AHEAD s before the camera (as its cluster prompt) when the
@@ -239,7 +232,7 @@ class SpeedLimitResolver:
     self.speed_limit, self.distance, self.source = self._resolve_limit_sources(sm)
     self.speed_limit_offset = self._get_speed_limit_offset()
 
-    camera = self.source == SpeedLimitSource.baidu and self.baidu_camera
+    camera = self.source == SpeedLimitSource.baidu
     if camera and not self.camera:
       self._last_before_camera = (self.speed_limit_last, self.speed_limit_final_last)
     self.update_speed_limit_states()
