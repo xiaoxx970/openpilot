@@ -16,9 +16,9 @@ install -m 644 "$HERE/navrelay.py" /opt/navrelay/navrelay.py
 install -d -m 750 -o root -g navrelay "$ETC"
 install -d -m 700 -o navrelay -g navrelay /var/lib/navrelay
 
-# a private CA the phone trusts once, and a server certificate for the IP under it (iOS: at most 825 days). The CA may only
-# vouch for this IP (name constraints), and its key is shredded once the server certificate is signed: root on this box
-# can't mint certificates for other sites the phone visits. A new certificate means a new CA, installed on the phone again.
+# a private CA the phone trusts once, and a server certificate for the IP under it (iOS: at most 825 days). Its key is shredded
+# once the server certificate is signed, so root on this box can't mint certificates for other sites the phone visits (the
+# name constraint only limits IP names, not DNS ones). A new certificate means a new CA, installed on the phone again.
 if [ ! -f "$ETC/server.crt" ] || [ ! -f "$ETC/ca.crt" ] || ! openssl x509 -in "$ETC/server.crt" -noout -text | grep -q "IP Address:$IP"; then
   openssl req -x509 -newkey rsa:2048 -nodes -keyout "$ETC/ca.key" -out "$ETC/ca.crt" -days 3650 -subj "/CN=navrelay CA $IP" \
     -addext "basicConstraints=critical,CA:TRUE,pathlen:0" -addext "keyUsage=critical,keyCertSign,cRLSign" \
