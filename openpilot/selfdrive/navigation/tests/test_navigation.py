@@ -539,7 +539,7 @@ class TestBaiduRoutes(unittest.TestCase):
       self.assertEqual(get.call_count, 3)
       self.assertNotIn('waypoints', urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query))
     with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', side_effect=OSError('down')):  # a failed request
-      self.engine.route_time = None
+      self.engine.route_time -= BAIDU_REFRESH
       self.engine.recompute_hold = 0
       self.engine.recompute_route(gps_ok=True)
     self.assertIsNone(self.engine.route)
@@ -554,14 +554,22 @@ class TestBaiduRoutes(unittest.TestCase):
 
   def test_waypoints_given_up_off_the_route(self):
     self.values['NavDestination'] = dict(self.values['NavDestination'], waypoints=[list(latlon(400, 300))])
-    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', return_value=self.answer) as get:
+
+    at = [0., 0.]
+
+    def from_car(_):   # each answer starts where the car is, east then south to the destination
+      x, y = at
+      return baidu_answer([baidu_step(line(x, y, 700, y), 'A', 40.), baidu_step(line(700, y, 700, -200), 'C', 20.)])
+    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', side_effect=from_car) as get:
       self.engine.recompute_route(gps_ok=True)
-      lat, lon = latlon(200, -300)  # off the route, away from the waypoint, at speed
-      self.engine.last_position = (lon, lat)
-      for _ in range(45):
-        self.engine.recompute_route(gps_ok=True)
+      for y in (-60, -120, -180):   # the driver leaves the route three times, rerouted from where the car is each time
+        at[:] = [300., y]
+        lat, lon = latlon(300, y)
+        self.engine.last_position = (lon, lat)
+        for _ in range(12):
+          self.engine.recompute_route(gps_ok=True)
       queries = [urllib.parse.parse_qs(urllib.parse.urlsplit(c.args[0]).query) for c in get.call_args_list]
-    self.assertEqual(['waypoints' in q for q in queries], [True, True, False])   # the second reroute in a row goes without
+    self.assertEqual(['waypoints' in q for q in queries][:3], [True, True, False])   # the second reroute goes without
 
   def test_daily_budget(self):
     self.engine.baidu_daily.left = MagicMock(return_value=0)

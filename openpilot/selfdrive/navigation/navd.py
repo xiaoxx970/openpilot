@@ -38,7 +38,7 @@ BAIDU_RETRY = 60  # updates (seconds) before asking again after a failed request
 # refresh and reroute; one is passed once the car comes this close to it
 WAYPOINT_REACHED = 100.  # m
 MAX_WAYPOINTS = 5
-WAYPOINTS_GIVEN_UP = 2  # off-route reroutes in a row after which the rest are dropped
+WAYPOINTS_GIVEN_UP = 2  # off-route reroutes since a waypoint was passed after which the rest are dropped
 
 
 def as_waypoints(value) -> tuple[tuple[float, float], ...]:
@@ -77,6 +77,7 @@ class RouteEngine:
     self.nav_waypoints = ()  # NavDestination's, as last routed to
     self.target = None  # NavDestination's (destination, waypoints) as last seen
     self.waypoints = []  # its waypoints still ahead, (lat, lon): kept when a request fails, so a passed one is not asked again
+    self.waypoint_misses = 0  # off-route reroutes since the target was set or a waypoint passed
     self.step_idx = None
     self.route = None
     self.route_geometry = None  # an (n, 2) array of (longitude, latitude) per step
@@ -128,7 +129,7 @@ class RouteEngine:
     new_destination = (destination['longitude'], destination['latitude'])
     waypoints = as_waypoints(destination.get('waypoints'))
     if (new_destination, waypoints) != self.target:
-      self.target, self.waypoints = (new_destination, waypoints), list(waypoints)
+      self.target, self.waypoints, self.waypoint_misses = (new_destination, waypoints), list(waypoints), 0
     self.pass_waypoints()
 
     # Don't recompute when GPS drifts in tunnels
@@ -146,8 +147,10 @@ class RouteEngine:
       else:
         self.recompute_hold = REROUTE_BACKOFF[min(self.reroutes, len(REROUTE_BACKOFF) - 1)]
         self.reroutes += 1
-        if self.reroutes >= WAYPOINTS_GIVEN_UP:  # off the picked route again, after a reroute back to it: the driver goes another way
-          self.waypoints = []
+        if self.waypoints:
+          self.waypoint_misses += 1
+          if self.waypoint_misses >= WAYPOINTS_GIVEN_UP:  # left the picked route again after a reroute back to it: another way
+            self.waypoints = []
       self.request_position = self.last_position
       self.nav_waypoints = waypoints
       self.calculate_route(new_destination)
@@ -159,7 +162,7 @@ class RouteEngine:
     for i in range(len(self.waypoints) - 1, -1, -1):
       lat, lon = self.waypoints[i]
       if np.linalg.norm(local_meters(self.last_position, (lon, lat))) < WAYPOINT_REACHED:
-        self.waypoints = self.waypoints[i + 1:]
+        self.waypoints, self.waypoint_misses = self.waypoints[i + 1:], 0
         return
 
   def reroute_worthwhile(self) -> bool:
