@@ -45,6 +45,14 @@ class TestDestinations(unittest.TestCase):
     self.assertIsNone(self.dest.clear()["destination"])
     self.assertNotIn("NavDestination", self.params.values)
 
+  def test_waypoints_of_a_picked_route(self):
+    self.dest.set_destination({"latitude": 32.0, "longitude": 118.8, "waypoints": [[32.05, 118.85], ["32.1", 118.9]]})
+    self.assertEqual(self.params.values["NavDestination"]["waypoints"], [[32.05, 118.85], [32.1, 118.9]])
+    self.dest.set_destination({"latitude": 32.0, "longitude": 118.8})
+    self.assertNotIn("waypoints", self.params.values["NavDestination"])
+    for bad in ([[91, 0]], [[1]], "x", [[0, 0]] * 6):
+      self.assertTrue("error" in self.dest.set_destination({"latitude": 32.0, "longitude": 118.8, "waypoints": bad}), bad)
+
   def test_no_interface(self):
     self.assertIsNone(destinationd.interface_ip("no-such-if0"))
 

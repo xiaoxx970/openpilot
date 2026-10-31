@@ -4,7 +4,8 @@ map-app shares, saved places and route previews all happen there, with its own B
 and says where it is:
 
   GET /api/state          navigation on, the destination, onroad, position
-  POST /api/destination   {latitude, longitude, name, address} (WGS-84) becomes NavDestination, the param navd routes to
+  POST /api/destination   {latitude, longitude, name, address, waypoints?} (WGS-84) becomes NavDestination, the param navd
+                          routes to (through the waypoints [[lat, lon], ...] of a route picked on the phone)
   POST /api/clear
   GET /api/route?nav=1    navd's live route and traffic while navigating
   GET /api/places         the recent destinations (comma-link imports them once)
@@ -133,6 +134,21 @@ def as_place(body) -> dict | None:
   return {"name": name[:64], "address": address[:96], "latitude": lat, "longitude": lon}
 
 
+MAX_WAYPOINTS = 5
+
+
+def as_waypoints(value) -> list[list[float]] | None:
+  """A body's waypoints, [[lat, lon], ...]: [] without, None when they are not valid."""
+  if value is None:
+    return []
+  try:
+    out = [[float(lat), float(lon)] for lat, lon in value]
+  except (TypeError, ValueError):
+    return None
+  ok = len(out) <= MAX_WAYPOINTS and all(-90 <= la <= 90 and -180 <= lo <= 180 and math.isfinite(la + lo) for la, lo in out)
+  return out if ok else None
+
+
 class Destinations:
   """What the API does, apart from HTTP: tests drive it with fake params."""
   def __init__(self, params, places: Places | None = None, live=None):
@@ -169,6 +185,11 @@ class Destinations:
       destination["place_name"] = place["name"]
     if place["address"]:
       destination["place_address"] = place["address"]
+    waypoints = as_waypoints(body.get("waypoints"))
+    if waypoints is None:
+      return {"error": "途经点不对"}
+    if waypoints:
+      destination["waypoints"] = waypoints   # the route picked on the phone: navd keeps to it
     self.params.put("NavDestination", destination, block=True)   # the answer reads it back
     self.places.visited(place)
     return self.state()

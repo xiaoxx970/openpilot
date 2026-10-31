@@ -253,10 +253,15 @@ def leaves(path: Path, expected: list[tuple[float, float]], check: float, step: 
   return False
 
 
-def route_params(lat: float, lon: float, course: float, v: float, destination: tuple[float, float]) -> list[tuple[str, str]]:
-  """A driving route planning from the car (its course in rad, speed m/s) to destination (lat, lon), all WGS-84."""
-  return [("origin", f"{lat:.6f},{lon:.6f}"), ("destination", f"{destination[0]:.6f},{destination[1]:.6f}"), ("coord_type", "wgs84"),
-          ("ret_coordtype", "gcj02"), ("gps_direction", str(int(round(math.degrees(course))) % 360)), ("speed", f"{v:.2f}")]
+def route_params(lat: float, lon: float, course: float, v: float, destination: tuple[float, float],
+                 waypoints: list[tuple[float, float]] | tuple = ()) -> list[tuple[str, str]]:
+  """A driving route planning from the car (its course in rad, speed m/s) to destination (lat, lon), through waypoints (lat, lon)
+  on the way, all WGS-84."""
+  params = [("origin", f"{lat:.6f},{lon:.6f}"), ("destination", f"{destination[0]:.6f},{destination[1]:.6f}"), ("coord_type", "wgs84"),
+            ("ret_coordtype", "gcj02"), ("gps_direction", str(int(round(math.degrees(course))) % 360)), ("speed", f"{v:.2f}")]
+  if waypoints:
+    params.append(("waypoints", "|".join(f"{la:.6f},{lo:.6f}" for la, lo in waypoints)))
+  return params
 
 
 # ---- answers -------------------------------------------------------------------------------------------------------------

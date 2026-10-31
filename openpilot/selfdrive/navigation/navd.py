@@ -34,6 +34,19 @@ BAIDU_REFRESH = 120.  # s
 BAIDU_REFRESH_SPEED = 2.  # m/s
 BAIDU_COUNT_FILE = "/data/baidu_nav_calls"
 BAIDU_RETRY = 60  # updates (seconds) before asking again after a failed request
+# NavDestination's waypoints [[lat, lon], ...]: the route picked on the phone among Baidu's alternatives, kept through every
+# refresh and reroute; one is passed once the car comes this close to it
+WAYPOINT_REACHED = 100.  # m
+MAX_WAYPOINTS = 5
+
+
+def as_waypoints(value) -> tuple[tuple[float, float], ...]:
+  """NavDestination's waypoints as (lat, lon) pairs; a malformed list is none."""
+  try:
+    out = tuple((float(lat), float(lon)) for lat, lon in (value or [])[:MAX_WAYPOINTS])
+  except (TypeError, ValueError):
+    return ()
+  return out if all(-90 <= la <= 90 and -180 <= lo <= 180 for la, lo in out) else ()
 
 
 def set_banner(instruction, banners, distance_to_maneuver):
@@ -60,6 +73,8 @@ class RouteEngine:
     self.last_bearing = None
 
     self.nav_destination = None
+    self.nav_waypoints = None  # NavDestination's, as last routed to
+    self.waypoints = []  # those still ahead, (lat, lon)
     self.step_idx = None
     self.route = None
     self.route_geometry = None  # an (n, 2) array of (longitude, latitude) per step
@@ -108,6 +123,8 @@ class RouteEngine:
       self.recompute_hold = 0
       return
     new_destination = (destination['longitude'], destination['latitude'])
+    waypoints = as_waypoints(destination.get('waypoints'))
+    self.pass_waypoints()
 
     # Don't recompute when GPS drifts in tunnels
     if not gps_ok and self.step_idx is not None:
@@ -115,7 +132,7 @@ class RouteEngine:
 
     self.recompute_hold -= 1
     refresh = self.route_time is not None and time.monotonic() - self.route_time >= BAIDU_REFRESH and self.last_speed >= BAIDU_REFRESH_SPEED
-    new = new_destination != self.nav_destination
+    new = new_destination != self.nav_destination or waypoints != self.nav_waypoints
     reroute = self.should_recompute() and (self.step_idx is None or self.reroute_worthwhile())
     if (reroute or new or refresh) and self.recompute_hold <= 0:
       if new or refresh or self.step_idx is None:
@@ -125,8 +142,19 @@ class RouteEngine:
         self.recompute_hold = REROUTE_BACKOFF[min(self.reroutes, len(REROUTE_BACKOFF) - 1)]
         self.reroutes += 1
       self.request_position = self.last_position
+      if waypoints != self.nav_waypoints:
+        self.nav_waypoints, self.waypoints = waypoints, list(waypoints)
       self.calculate_route(new_destination)
       self.reroute_counter = 0
+
+  def pass_waypoints(self):
+    """Drop the waypoints the car has come to, and those before them."""
+    assert self.last_position is not None
+    for i in range(len(self.waypoints) - 1, -1, -1):
+      lat, lon = self.waypoints[i]
+      if np.linalg.norm(local_meters(self.last_position, (lon, lat))) < WAYPOINT_REACHED:
+        self.waypoints = self.waypoints[i + 1:]
+        return
 
   def reroute_worthwhile(self) -> bool:
     if self.last_speed >= REROUTE_MIN_SPEED or self.request_position is None:
@@ -193,7 +221,8 @@ class RouteEngine:
       return
     lon, lat = self.last_position
     course = math.radians(self.last_bearing or 0.)
-    query = baidu.signed_get(baidu.ROUTE_PATH, baidu.route_params(lat, lon, course, self.last_speed, (destination[1], destination[0])),
+    query = baidu.signed_get(baidu.ROUTE_PATH, baidu.route_params(lat, lon, course, self.last_speed, (destination[1], destination[0]),
+                                                                       self.waypoints),
                              *self.baidu_keys)
     self.baidu_daily.add("nav", now)
     asked = time.monotonic()
@@ -286,6 +315,8 @@ class RouteEngine:
     self.route_geometry = None
     self.step_idx = None
     self.nav_destination = None
+    self.nav_waypoints = None
+    self.waypoints = []
     self.route_time = None
     self.traffic = []
 

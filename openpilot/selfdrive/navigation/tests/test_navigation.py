@@ -520,6 +520,29 @@ class TestBaiduRoutes(unittest.TestCase):
     self.drive(700, -30)  # on the next step
     self.assertEqual(self.engine.step_idx, 1)
 
+  def test_through_the_picked_route(self):
+    via = latlon(400, 300)
+    self.values['NavDestination'] = dict(self.values['NavDestination'], waypoints=[list(via)])
+    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', return_value=self.answer) as get:
+      self.engine.recompute_route(gps_ok=True)
+      query = urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query)
+      self.assertEqual(query['waypoints'][0], f"{via[0]:.6f},{via[1]:.6f}")
+      self.engine.route_time -= BAIDU_REFRESH  # kept through a refresh
+      self.engine.recompute_hold = 0
+      self.engine.recompute_route(gps_ok=True)
+      self.assertIn('waypoints', urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query))
+      lat, lon = latlon(400, 250)  # 50 m from it: passed, and not asked for again
+      self.engine.last_position = (lon, lat)
+      self.engine.route_time -= BAIDU_REFRESH
+      self.engine.recompute_hold = 0
+      self.engine.recompute_route(gps_ok=True)
+      self.assertEqual(get.call_count, 3)
+      self.assertNotIn('waypoints', urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query))
+      self.values['NavDestination'] = {k: v for k, v in self.values['NavDestination'].items() if k != 'waypoints'}
+      self.engine.recompute_hold = 0
+      self.engine.recompute_route(gps_ok=True)  # another route picked: asked at once
+      self.assertEqual(get.call_count, 4)
+
   def test_daily_budget(self):
     self.engine.baidu_daily.left = MagicMock(return_value=0)
     get = self.route()
