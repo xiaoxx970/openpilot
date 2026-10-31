@@ -538,10 +538,19 @@ class TestBaiduRoutes(unittest.TestCase):
       self.engine.recompute_route(gps_ok=True)
       self.assertEqual(get.call_count, 3)
       self.assertNotIn('waypoints', urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query))
+    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', side_effect=OSError('down')):  # a failed request
+      self.engine.route_time = None
+      self.engine.recompute_hold = 0
+      self.engine.recompute_route(gps_ok=True)
+    self.assertIsNone(self.engine.route)
+    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', return_value=self.answer) as get:
+      self.engine.recompute_hold = 0
+      self.engine.recompute_route(gps_ok=True)  # the retry: the passed waypoint is not asked for again
+      self.assertNotIn('waypoints', urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query))
       self.values['NavDestination'] = {k: v for k, v in self.values['NavDestination'].items() if k != 'waypoints'}
       self.engine.recompute_hold = 0
       self.engine.recompute_route(gps_ok=True)  # another route picked: asked at once
-      self.assertEqual(get.call_count, 4)
+      self.assertEqual(get.call_count, 2)
 
   def test_daily_budget(self):
     self.engine.baidu_daily.left = MagicMock(return_value=0)

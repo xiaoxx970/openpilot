@@ -73,8 +73,9 @@ class RouteEngine:
     self.last_bearing = None
 
     self.nav_destination = None
-    self.nav_waypoints = None  # NavDestination's, as last routed to
-    self.waypoints = []  # those still ahead, (lat, lon)
+    self.nav_waypoints = ()  # NavDestination's, as last routed to
+    self.target = None  # NavDestination's (destination, waypoints) as last seen
+    self.waypoints = []  # its waypoints still ahead, (lat, lon): kept when a request fails, so a passed one is not asked again
     self.step_idx = None
     self.route = None
     self.route_geometry = None  # an (n, 2) array of (longitude, latitude) per step
@@ -119,11 +120,14 @@ class RouteEngine:
 
     destination = self.params.get("NavDestination")
     if destination is None:
+      self.target, self.waypoints = None, []
       self.clear_route()
       self.recompute_hold = 0
       return
     new_destination = (destination['longitude'], destination['latitude'])
     waypoints = as_waypoints(destination.get('waypoints'))
+    if (new_destination, waypoints) != self.target:
+      self.target, self.waypoints = (new_destination, waypoints), list(waypoints)
     self.pass_waypoints()
 
     # Don't recompute when GPS drifts in tunnels
@@ -142,8 +146,7 @@ class RouteEngine:
         self.recompute_hold = REROUTE_BACKOFF[min(self.reroutes, len(REROUTE_BACKOFF) - 1)]
         self.reroutes += 1
       self.request_position = self.last_position
-      if waypoints != self.nav_waypoints:
-        self.nav_waypoints, self.waypoints = waypoints, list(waypoints)
+      self.nav_waypoints = waypoints
       self.calculate_route(new_destination)
       self.reroute_counter = 0
 
@@ -315,8 +318,6 @@ class RouteEngine:
     self.route_geometry = None
     self.step_idx = None
     self.nav_destination = None
-    self.nav_waypoints = None
-    self.waypoints = []
     self.route_time = None
     self.traffic = []
 
