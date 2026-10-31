@@ -38,6 +38,7 @@ BAIDU_RETRY = 60  # updates (seconds) before asking again after a failed request
 # refresh and reroute; one is passed once the car comes this close to it
 WAYPOINT_REACHED = 100.  # m
 MAX_WAYPOINTS = 5
+WAYPOINTS_GIVEN_UP = 2  # off-route reroutes in a row after which the rest are dropped
 
 
 def as_waypoints(value) -> tuple[tuple[float, float], ...]:
@@ -145,6 +146,8 @@ class RouteEngine:
       else:
         self.recompute_hold = REROUTE_BACKOFF[min(self.reroutes, len(REROUTE_BACKOFF) - 1)]
         self.reroutes += 1
+        if self.reroutes >= WAYPOINTS_GIVEN_UP:  # off the picked route again, after a reroute back to it: the driver goes another way
+          self.waypoints = []
       self.request_position = self.last_position
       self.nav_waypoints = waypoints
       self.calculate_route(new_destination)

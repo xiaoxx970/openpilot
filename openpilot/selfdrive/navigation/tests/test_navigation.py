@@ -552,6 +552,17 @@ class TestBaiduRoutes(unittest.TestCase):
       self.engine.recompute_route(gps_ok=True)  # another route picked: asked at once
       self.assertEqual(get.call_count, 2)
 
+  def test_waypoints_given_up_off_the_route(self):
+    self.values['NavDestination'] = dict(self.values['NavDestination'], waypoints=[list(latlon(400, 300))])
+    with patch('openpilot.selfdrive.navigation.navd.baidu.http_get', return_value=self.answer) as get:
+      self.engine.recompute_route(gps_ok=True)
+      lat, lon = latlon(200, -300)  # off the route, away from the waypoint, at speed
+      self.engine.last_position = (lon, lat)
+      for _ in range(45):
+        self.engine.recompute_route(gps_ok=True)
+      queries = [urllib.parse.parse_qs(urllib.parse.urlsplit(c.args[0]).query) for c in get.call_args_list]
+    self.assertEqual(['waypoints' in q for q in queries], [True, True, False])   # the second reroute in a row goes without
+
   def test_daily_budget(self):
     self.engine.baidu_daily.left = MagicMock(return_value=0)
     get = self.route()
