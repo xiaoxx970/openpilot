@@ -23,6 +23,9 @@ SET_SPEED_BUTTONS = (ButtonType.accelCruise, ButtonType.resumeCruise, ButtonType
 # VW reports the momentary main switch as cancel
 MAIN_CRUISE_BUTTONS = (ButtonType.mainCruise, ButtonType.cancel)
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
+# Door and seatbelt count as at a stop below this speed: the wheel speed only reaches standstill about 1 s after the
+# car has stopped, and a passenger getting out in that tail set off the moving soft disable (2026-11-02, 0.17 m/s)
+STOPPED_SPEED = 0.5  # m/s
 
 
 class ModularAssistiveDrivingSystem:
@@ -142,19 +145,20 @@ class ModularAssistiveDrivingSystem:
     # MADS with one chime instead of a soft disable countdown. Only the frame it happens on does: MADS that was paused
     # or enabled while already in that state (main switch at P after starting) keeps waiting silently. Any other door
     # (a passenger getting out) only pauses MADS, as upstream does.
+    stopped = CS.standstill or CS.vEgo < STOPPED_SPEED
     wrong_gear = self.events.has(EventName.wrongGear)
     left_drive = wrong_gear and not self.wrong_gear_prev
     self.wrong_gear_prev = wrong_gear
     driver_door_open = self.selfdrive.sm['carStateIC'].driverDoorOpen
-    door_opened = driver_door_open and not self.driver_door_open_prev and CS.standstill
+    door_opened = driver_door_open and not self.driver_door_open_prev and stopped
     self.driver_door_open_prev = driver_door_open
     seatbelt_unlatched = self.events.has(EventName.seatbeltNotLatched)
-    seatbelt_unlatched_now = seatbelt_unlatched and not self.seatbelt_unlatched_prev and CS.standstill
+    seatbelt_unlatched_now = seatbelt_unlatched and not self.seatbelt_unlatched_prev and stopped
     self.seatbelt_unlatched_prev = seatbelt_unlatched
     disengage = left_drive or door_opened or seatbelt_unlatched_now
 
     if not self.selfdrive.enabled and self.enabled:
-      if CS.standstill:
+      if stopped:
         if self.events.has(EventName.doorOpen):
           self.replace_event(EventName.doorOpen, EventNameSP.silentDoorOpen)
           if not disengage:

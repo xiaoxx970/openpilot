@@ -74,6 +74,17 @@ class TestMadsExit(OpenpilotTestCase):
     step(mads, sd, make_car_state(standstill=True))
     assert mads.state_machine.state == State.enabled
 
+  def test_passenger_door_while_rolling_to_a_stop_pauses(self, mocker):
+    # wheel speed still decaying, standstill not yet set
+    mads, sd = make_enabled_mads(mocker)
+    step(mads, sd, make_car_state(v_ego=0.17), events=[EventName.doorOpen])
+    assert mads.state_machine.state == State.paused
+
+  def test_driver_door_while_rolling_to_a_stop_disengages(self, mocker):
+    mads, sd = make_enabled_mads(mocker)
+    step(mads, sd, make_car_state(v_ego=0.17), events=[EventName.doorOpen], driver_door=True)
+    assert mads.state_machine.state == State.disabled
+
   def test_driver_door_after_passenger_door_disengages(self, mocker):
     mads, sd = make_enabled_mads(mocker)
     step(mads, sd, make_car_state(standstill=True), events=[EventName.doorOpen])
