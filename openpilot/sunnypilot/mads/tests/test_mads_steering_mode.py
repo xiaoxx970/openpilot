@@ -62,7 +62,7 @@ def make_mads(mocker, steering_mode):
   sd.enabled_prev = False
   sd.initialized = True
   sd.CS_prev = make_car_state()
-  sd.sm = {'pandaStates': [make_panda_state(mocker)]}
+  sd.sm = {'pandaStates': [make_panda_state(mocker)], 'carStateIC': custom.CarStateIC.new_message()}
   sd.state_machine = mocker.MagicMock()
 
   mads = ModularAssistiveDrivingSystem(sd)
