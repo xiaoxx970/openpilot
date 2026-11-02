@@ -6,6 +6,12 @@ from openpilot.common.pid import PIDController
 from openpilot.selfdrive.modeld.constants import ModelConstants
 
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
+# A lead that only creeps keeps a_target and the model's shouldStop around the stop threshold, and the brakes
+# were released and re-applied several times a second without the car moving. After falling back to stopping
+# at a standstill, the planner has to want to go for START_DEBOUNCE before the hold is released again. The
+# first pull away is not delayed.
+START_DEBOUNCE_FRAMES = int(0.5 / DT_CTRL)
+RESTOP_WINDOW_FRAMES = int(2.0 / DT_CTRL)
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
 
@@ -47,6 +53,8 @@ class LongControl:
     self.pid = PIDController(0.0, (CP.longitudinalTuning.kiBP, CP.longitudinalTuning.kiV),
                              rate=1 / DT_CTRL)
     self.last_output_accel = 0.0
+    self.start_frames = 0
+    self.restop_frames = RESTOP_WINDOW_FRAMES
 
   def reset(self):
     self.pid.reset()
@@ -56,9 +64,20 @@ class LongControl:
     self.pid.neg_limit = accel_limits[0]
     self.pid.pos_limit = accel_limits[1]
 
+    self.start_frames = 0 if should_stop else self.start_frames + 1
+    self.restop_frames = min(self.restop_frames + 1, RESTOP_WINDOW_FRAMES)
+    if self.long_control_state == LongCtrlState.stopping and CS.standstill and \
+       self.restop_frames < RESTOP_WINDOW_FRAMES and self.start_frames < START_DEBOUNCE_FRAMES:
+      if not should_stop:
+        self.restop_frames = 0  # still flickering, keep debouncing
+      should_stop = True
+
+    prev_state = self.long_control_state
     self.long_control_state = long_control_state_trans(self.CP_SP, active, self.long_control_state,
                                                        should_stop, CS.brakePressed,
                                                        CS.cruiseState.standstill)
+    if prev_state == LongCtrlState.pid and self.long_control_state == LongCtrlState.stopping and CS.standstill:
+      self.restop_frames = 0
     if self.long_control_state == LongCtrlState.off:
       self.reset()
       output_accel = 0.
