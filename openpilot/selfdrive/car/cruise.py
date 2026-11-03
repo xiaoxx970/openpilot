@@ -230,7 +230,8 @@ class VCruiseHelper(VCruiseHelperSP):
     # Speed Limit Assist for Non PCM long cars.
     # True: Disallow set speed changes when user confirmed the target set speed during preActive state
     # False: Allow set speed changes as SLA is not requesting user confirmation
-    if self.update_speed_limit_assist_pre_active_confirmed(button_type):
+    # SET/RES never confirm a limit (only +/- do), so they always do their own job
+    if not set_resume and self.update_speed_limit_assist_pre_active_confirmed(button_type):
       return
 
     # SET takes the current speed below the set speed, or above it while the gas is overriding, like stock VW;

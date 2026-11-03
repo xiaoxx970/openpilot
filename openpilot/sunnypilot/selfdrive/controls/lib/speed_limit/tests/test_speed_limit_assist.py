@@ -134,6 +134,21 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
     assert self.sla.state == SpeedLimitAssistState.preActive
     assert self.sla.is_enabled and not self.sla.is_active
 
+  @parameterized.expand([True, False], names=["pcm_op_long"])
+  def test_no_offer_in_a_car_park_after_engaging(self, pcm_op_long):
+    # fork: engaged in an underground car park, the car's sign recognition still reports the last sign from outside
+    self.sla.pcm_op_long = pcm_op_long
+    limit, set_speed, garage, road = 60 * CV.KPH_TO_MS, 40 * CV.KPH_TO_MS, 24 * CV.KPH_TO_MS, 35 * CV.KPH_TO_MS
+    for _ in range(int(3. / DT_MDL)):
+      self.sla.update(True, False, garage, 0, set_speed, limit, limit, True, 0, self.events_sp)
+      assert self.sla.state == SpeedLimitAssistState.disabled
+    # out on the road it is offered, once
+    self.sla.update(True, False, road, 0, set_speed, limit, limit, True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.preActive
+    for _ in range(int(PRE_ACTIVE_GUARD_PERIOD[pcm_op_long] / DT_MDL) + 1):
+      self.sla.update(True, False, road, 0, set_speed, limit, limit, True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.inactive
+
   def test_transition_disabled_to_pending_no_speed_limit_not_max_initial_set_speed(self):
     for _ in range(int(3. / DT_MDL)):
       self.sla.update(True, False, SPEED_LIMITS['highway'], 0, SPEED_LIMITS['city'], 0, 0, False, 0, self.events_sp)
@@ -183,6 +198,7 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
 
   def test_active_to_adapting_transition(self):
     self.initialize_active_state(self.pcm_long_max_set_speed)
+    self.sla.speed_limit_prev = SPEED_LIMITS['highway']
 
     self.sla.update(True, False, SPEED_LIMITS['highway'] + 2, 0, self.pcm_long_max_set_speed, SPEED_LIMITS['highway'],
                     SPEED_LIMITS['highway'], True, 0, self.events_sp)
@@ -190,6 +206,7 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
 
   def test_adapting_to_active_transition(self):
     self.sla.state = SpeedLimitAssistState.adapting
+    self.sla.speed_limit_prev = SPEED_LIMITS['highway']
     self.sla.v_cruise_cluster_prev = self.pcm_long_max_set_speed
     self.sla.prev_v_cruise_cluster_conv = round(self.pcm_long_max_set_speed * self.speed_conv)
 
@@ -215,6 +232,16 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
       self.sla.update(True, False, speed_limit, 0, self.pcm_long_max_set_speed, speed_limit, speed_limit, True, 0, self.events_sp)
     assert self.sla.state in ACTIVE_STATES
 
+  def test_non_pcm_limit_change_above_cst_waits_for_confirmation(self):
+    self.sla.pcm_op_long = False
+    self.initialize_active_state(SPEED_LIMITS['freeway'])
+    self.sla.speed_limit_prev = SPEED_LIMITS['freeway']
+
+    self.sla.update(True, False, SPEED_LIMITS['freeway'], 0, SPEED_LIMITS['freeway'], SPEED_LIMITS['highway'],
+                    SPEED_LIMITS['highway'], True, 0, self.events_sp)
+    assert self.sla.state == SpeedLimitAssistState.preActive
+    assert self.sla.output_v_target == V_CRUISE_UNSET
+
   def test_invalid_speed_limits_handling(self):
     self.initialize_active_state(self.pcm_long_max_set_speed)
 
@@ -235,6 +262,7 @@ class TestSpeedLimitAssist(OpenpilotTestCase):
 
   def test_distance_based_adapting(self):
     self.sla.state = SpeedLimitAssistState.adapting
+    self.sla.speed_limit_prev = SPEED_LIMITS['highway']
     self.sla.v_cruise_cluster_prev = self.pcm_long_max_set_speed
     self.sla.prev_v_cruise_cluster_conv = round(self.pcm_long_max_set_speed * self.speed_conv)
 
@@ -361,3 +389,13 @@ class TestButtonStateTrackerSLAIntegration(OpenpilotTestCase):
     self.sla.update_buttons(self.tracker.release_toggle)
     time.sleep(CRUISE_BUTTON_CONFIRM_HOLD + 0.1)
     assert not self.sla._get_button_release(req_plus=True, req_minus=False)
+
+  def test_set_resume_do_not_confirm(self) -> None:
+    self.sla.update_buttons(self.tracker.release_toggle)
+    self._run_ctrl_frames([
+      self._make_cs([ButtonEvent(type=ButtonType.setCruise, pressed=True), ButtonEvent(type=ButtonType.resumeCruise, pressed=True)]),
+      self._make_cs([ButtonEvent(type=ButtonType.setCruise, pressed=False), ButtonEvent(type=ButtonType.resumeCruise, pressed=False)]),
+    ])
+    self.sla.update_buttons(self.tracker.release_toggle)
+    assert not self.sla._get_button_release(req_plus=True, req_minus=False)
+    assert not self.sla._get_button_release(req_plus=False, req_minus=True)
