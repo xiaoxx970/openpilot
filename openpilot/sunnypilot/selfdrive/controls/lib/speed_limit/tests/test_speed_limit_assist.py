@@ -444,3 +444,13 @@ class TestButtonStateTrackerSLAIntegration(OpenpilotTestCase):
     self.sla.update_buttons(self.tracker.release_toggle)
     time.sleep(CRUISE_BUTTON_CONFIRM_HOLD + 0.1)
     assert not self.sla._get_button_release(req_plus=True, req_minus=False)
+
+  def test_set_resume_do_not_confirm(self) -> None:
+    self.sla.update_buttons(self.tracker.release_toggle)
+    self._run_ctrl_frames([
+      self._make_cs([ButtonEvent(type=ButtonType.setCruise, pressed=True), ButtonEvent(type=ButtonType.resumeCruise, pressed=True)]),
+      self._make_cs([ButtonEvent(type=ButtonType.setCruise, pressed=False), ButtonEvent(type=ButtonType.resumeCruise, pressed=False)]),
+    ])
+    self.sla.update_buttons(self.tracker.release_toggle)
+    assert not self.sla._get_button_release(req_plus=True, req_minus=False)
+    assert not self.sla._get_button_release(req_plus=False, req_minus=True)

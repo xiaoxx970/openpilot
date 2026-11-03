@@ -44,8 +44,10 @@ LIMIT_MIN_SPEED = 8.33  # m/s, Minimum speed limit to provide as solution on lim
 LIMIT_SPEED_OFFSET_TH = -1.  # m/s Maximum offset between speed limit and current speed for adapting state.
 V_CRUISE_UNSET = 255.
 
-CRUISE_BUTTONS_PLUS = (ButtonType.accelCruise, ButtonType.resumeCruise)
-CRUISE_BUTTONS_MINUS = (ButtonType.decelCruise, ButtonType.setCruise)
+# fork: only +/- confirm a limit. SET and RES keep their own jobs (engage, take the current speed, resume), and on VW
+# the SET/RES press that engages would otherwise confirm the limit offered right after engaging
+CRUISE_BUTTONS_PLUS = (ButtonType.accelCruise,)
+CRUISE_BUTTONS_MINUS = (ButtonType.decelCruise,)
 CRUISE_BUTTON_CONFIRM_HOLD = 0.5  # secs.
 
 
