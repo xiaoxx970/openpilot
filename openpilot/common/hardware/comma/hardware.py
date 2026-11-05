@@ -335,6 +335,13 @@ class HardwareComma(HardwareBase):
     for n in camera_irqs:
       affine_irq(6, n)
 
+  def set_big_core_max_freq(self, khz: int):
+    # big cluster only (cores 4-7: card, selfdrived, controlsd, modeld); hardwared raises it while cool onroad
+    try:
+      sudo_write(str(khz), '/sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq')
+    except OSError:
+      pass  # cluster offline, set_power_save writes the base cap when it comes back
+
   def get_gpu_usage_percent(self):
     try:
       with open('/sys/class/kgsl/kgsl-3d0/gpubusy') as f:

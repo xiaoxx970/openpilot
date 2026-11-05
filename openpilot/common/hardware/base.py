@@ -139,6 +139,9 @@ class HardwareBase(ABC):
   def set_power_save(self, powersave_enabled):
     pass
 
+  def set_big_core_max_freq(self, khz: int):
+    pass
+
   def get_gpu_usage_percent(self):
     return 0
 

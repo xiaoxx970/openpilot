@@ -28,6 +28,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.system.statsd import statlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import FanController
+from openpilot.system.hardware.big_core_freq import BIG_CORE_BASE_FREQ, BigCoreFreqCap
 from openpilot.system.hardware.chestnut.monitoring import chestnut_state_thread
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
 from openpilot.common.version import terms_version, training_version, get_build_metadata, terms_version_sp
@@ -281,6 +282,8 @@ def hardware_thread(end_event, hw_queue) -> None:
   off_ts: float | None = None
   started_ts: float | None = None
   started_seen = False
+  big_core_cap = BigCoreFreqCap()
+  big_core_freq: int | None = None  # what scaling_max_freq of the big cluster holds, None while it is offline
   startup_blocked_ts: float | None = None
   thermal_status = ThermalStatus.ok
 
@@ -486,7 +489,14 @@ def hardware_thread(end_event, hw_queue) -> None:
     should_pwrsave = not onroad_conditions["ignition"] and msg.deviceState.screenBrightnessPercent < 1e-3
     if should_pwrsave != pwrsave or (count == 0):
       HARDWARE.set_power_save(should_pwrsave)
+      big_core_freq = None if should_pwrsave else BIG_CORE_BASE_FREQ
     pwrsave = should_pwrsave
+
+    cap = big_core_cap.update(all_comp_temp, should_start and not should_pwrsave)
+    if big_core_freq is not None and cap != big_core_freq:
+      HARDWARE.set_big_core_max_freq(cap)
+      cloudlog.event("big core max freq", khz=cap, temp=all_comp_temp)
+      big_core_freq = cap
 
     if should_start:
       off_ts = None
