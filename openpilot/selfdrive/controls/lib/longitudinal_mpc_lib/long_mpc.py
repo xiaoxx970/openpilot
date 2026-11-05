@@ -7,8 +7,8 @@ from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
-from openpilot.selfdrive.modeld.constants import index_function
-from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
+from openpilot.selfdrive.modeld.constants import index_function, ModelConstants
+from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU, RADAR_TO_CAMERA
 
 if __name__ == '__main__':  # generating code
   from acados.acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
@@ -88,6 +88,38 @@ RAIN_STOP_DISTANCE_ADD = 1.0
 
 def get_rain_T_FOLLOW(v_ego, heavy=False):
   return float(np.interp(v_ego, RAIN_T_FOLLOW_BP, RAIN_T_FOLLOW_V)) + (HEAVY_RAIN_T_FOLLOW_ADD if heavy else 0.)
+
+# The lead's future speed: the radar extrapolation (it carries the measured acceleration) for the first second, then the
+# model's own predicted lead speed (leadsV3, anchored on the radar speed) by 3 s, like FrogPilot's human-like following. The
+# radar extrapolation lets a braking lead stop braking within about a second; the model sees it braking on to a stop, so
+# the stop starts earlier and softer. While the radar measures the lead braking the trajectory is never more optimistic than
+# the radar's: fully below the first aLeadK, fading out by the second. In the 2026-10-30 replay this kept both real FCWs.
+LEAD_MODEL_BLEND_BP = [1., 3.]
+LEAD_MODEL_MIN_PROB = 0.35
+LEAD_MODEL_BRAKE_GUARD_BP = [-1.0, -0.3]
+# The model's lead must be the radar lead: distance within 25 % (at least 5 m) and speed within 2 m/s
+LEAD_MODEL_MATCH_DIST = (5., 0.25)
+LEAD_MODEL_MATCH_SPEED = 2.
+
+def model_lead_matches(lead, model_lead):
+  if model_lead is None or len(model_lead.x) != len(ModelConstants.LEAD_T_IDXS) or len(model_lead.v) != len(ModelConstants.LEAD_T_IDXS):
+    return False
+  if lead.modelProb <= LEAD_MODEL_MIN_PROB or not np.all(np.isfinite(model_lead.v)):
+    return False
+  d_model = model_lead.x[0] - RADAR_TO_CAMERA
+  return bool(abs(d_model - lead.dRel) < max(LEAD_MODEL_MATCH_DIST[0], LEAD_MODEL_MATCH_DIST[1] * lead.dRel) and
+              abs(model_lead.v[0] - lead.vLead) < LEAD_MODEL_MATCH_SPEED)
+
+def blend_model_lead(lead_xv, lead, model_lead):
+  # lead_xv: the radar extrapolation (x, v) on T_IDXS; returns the blended trajectory, position integrated from the speed
+  v_radar = lead_xv[:, 1]
+  v_model = np.interp(T_IDXS, ModelConstants.LEAD_T_IDXS, np.clip(lead.vLead + (np.asarray(model_lead.v) - model_lead.v[0]), 0.0, 1e8))
+  w = np.interp(T_IDXS, LEAD_MODEL_BLEND_BP, [0., 1.])
+  v = v_radar + w * (v_model - v_radar)
+  guard = float(np.interp(lead.aLeadK, LEAD_MODEL_BRAKE_GUARD_BP, [1., 0.]))
+  v = v - guard * np.maximum(v - v_radar, 0.)
+  x = lead_xv[0, 0] + np.concatenate(([0.], np.cumsum(T_DIFFS[1:] * (v[:-1] + v[1:]) / 2)))
+  return np.column_stack((x, v))
 
 def get_stopped_equivalence_factor(v_lead):
   return (v_lead**2) / (2 * COMFORT_BRAKE)
@@ -295,7 +327,7 @@ class LongitudinalMpc:
     lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
     return lead_xv
 
-  def process_lead(self, lead):
+  def process_lead(self, lead, model_lead=None):
     v_ego = self.x0[1]
     if lead is not None and lead.present:
       x_lead = lead.dRel
@@ -316,15 +348,19 @@ class LongitudinalMpc:
     v_lead = np.clip(v_lead, 0.0, 1e8)
     a_lead = np.clip(a_lead, -10., 5.)
     lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
+    if lead is not None and lead.present and model_lead_matches(lead, model_lead):
+      lead_xv = blend_model_lead(lead_xv, lead, model_lead)
     return lead_xv
 
-  def update(self, radarstate, personality=log.LongitudinalPersonality.standard, t_follow=None, stop_distance_add=0.):
+  def update(self, radarstate, personality=log.LongitudinalPersonality.standard, t_follow=None, stop_distance_add=0., model_leads=None):
     # t_follow overrides the personality's; stop_distance_add moves the obstacle closer, a longer stop distance
     if t_follow is None:
       t_follow = get_T_FOLLOW(personality)
 
-    lead_xv_0 = self.process_lead(radarstate.leadOne)
-    lead_xv_1 = self.process_lead(radarstate.leadTwo)
+    # leadOne / leadTwo pair with the model's leadsV3[0] / [1], as in radard
+    model_leads = list(model_leads) if model_leads is not None else []
+    lead_xv_0 = self.process_lead(radarstate.leadOne, model_leads[0] if len(model_leads) > 0 else None)
+    lead_xv_1 = self.process_lead(radarstate.leadTwo, model_leads[1] if len(model_leads) > 1 else None)
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
