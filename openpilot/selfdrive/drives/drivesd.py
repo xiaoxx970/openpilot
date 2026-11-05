@@ -412,7 +412,7 @@ class Device:
     self.lock = threading.Lock()
 
   def onroad(self) -> bool:
-    return self.params.get_bool("IsOnroad")
+    return not self.params.get_bool("IsOffroad")   # (there is no IsOnroad) unset at manager start: onroad till it says
 
   def state(self, drives: Drives | None = None) -> dict:
     out = {"onroad": self.onroad(), "branch": self.params.get("GitBranch"), "commit": (self.params.get("GitCommit") or "")[:9]}
@@ -684,7 +684,10 @@ class LanServer:
 
   def run(self, stop: threading.Event):
     while True:
-      self.step()
+      try:
+        self.step()
+      except Exception:  # the LAN side is extra: the Tailscale side goes on without it
+        pass
       if stop.wait(LINK_EVERY):
         self._stop()
         return
@@ -692,9 +695,12 @@ class LanServer:
 
 def indexer(drives: Drives, device: Device, stop: threading.Event):
   while not stop.wait(INDEX_EVERY):
-    if not device.onroad():
-      with drives.lock:
-        drives.index_all(onroad=device.onroad)
+    try:
+      if not device.onroad():
+        with drives.lock:
+          drives.index_all(onroad=device.onroad)
+    except Exception:  # a bad qlog or params: the next look
+      pass
 
 
 def main():

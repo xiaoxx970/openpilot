@@ -180,14 +180,19 @@ class TestRange(unittest.TestCase):
 
 
 class FakeParams:
+  """Params with the keys the car has: an unknown one raises, as Params does."""
+  KEYS = ("IsOffroad", "GitBranch", "GitCommit")
+
   def __init__(self, values):
     self.values = values
 
   def get(self, key):
+    if key not in self.KEYS:
+      raise KeyError(key)
     return self.values.get(key)
 
   def get_bool(self, key):
-    return bool(self.values.get(key))
+    return bool(self.get(key))
 
 
 class TestServer(unittest.TestCase):
@@ -198,7 +203,7 @@ class TestServer(unittest.TestCase):
     with open(os.path.join(self.disk.root, "00000101--abcdef0123--0", "qcamera.ts"), "wb") as f:
       f.write(bytes(range(256)) * 4)
     self.disk.drives.index_all()
-    self.params = FakeParams({"IsOnroad": False, "GitBranch": "golf8-dev", "GitCommit": "f1306b2c6aaaa"})
+    self.params = FakeParams({"IsOffroad": True, "GitBranch": "golf8-dev", "GitCommit": "f1306b2c6aaaa"})
     device = drivesd.Device(self.params, data_dir=self.disk.tmp.name)
     link = drivesd.Link(os.path.join(self.disk.tmp.name, "link"))
     self.server = ThreadingHTTPServer(("127.0.0.1", 0), drivesd.handler(self.disk.drives, device, link))
@@ -226,7 +231,7 @@ class TestServer(unittest.TestCase):
     self.assertEqual(headers["Content-Type"], "application/vnd.apple.mpegurl")
 
   def test_big_files_wait_for_offroad(self):
-    self.params.values["IsOnroad"] = True
+    self.params.values["IsOffroad"] = False
     with self.assertRaises(urllib.error.HTTPError) as e:
       self.get("/api/drives/00000101--abcdef0123/0/fcamera.hevc")
     self.assertEqual(e.exception.code, 409)
@@ -327,7 +332,7 @@ class TestLan(unittest.TestCase):
     self.addCleanup(self.disk.tmp.cleanup)
     self.disk.segment("00000101--abcdef0123--0", files=("qlog.zst", "qcamera.ts", "fcamera.hevc"))
     self.disk.drives.index_all()
-    self.device = drivesd.Device(FakeParams({"IsOnroad": False}), data_dir=self.disk.tmp.name)
+    self.device = drivesd.Device(FakeParams({"IsOffroad": True}), data_dir=self.disk.tmp.name)
     self.link = drivesd.Link(os.path.join(self.disk.tmp.name, "link"))
     self.cert, key = self_signed("localhost")
     self.ip = "127.0.0.1"
