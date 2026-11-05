@@ -35,6 +35,14 @@ RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
 NEIGHBOUR_LANE_MAX_PATH_OFFSET = 2.0  # m
 LaneAssignment = structs.RadarData.RadarPoint.LaneAssignment
 
+# When the vision lead has no radar match, or is matched to a farther car, a moving track the radar itself places in our
+# lane that has stayed near the planned path takes over if it is clearly closer. The model can keep a car that already
+# left the lane as its lead for seconds, and at short range it reads the distance up to ~30 % long, while a radar match
+# must be within 25 % of the vision distance.
+IN_PATH_MAX_OFFSET = 1.0   # m from the planned path
+IN_PATH_MIN_FRAMES = 20    # 1 s at DT_MDL
+IN_PATH_MIN_V_LEAD = 5.    # m/s, never for stationary returns (parked cars, gantries, bridges)
+
 
 class KalmanParams:
   def __init__(self, dt: float):
@@ -62,6 +70,7 @@ class Track:
   def __init__(self, identifier: int, v_lead: float, kalman_params: KalmanParams):
     self.identifier = identifier
     self.cnt = 0
+    self.in_path_cnt = 0
     self.aLeadTau = FirstOrderFilter(_LEAD_ACCEL_TAU, 0.45, DT_MDL)
     self.K_A = kalman_params.A
     self.K_C = kalman_params.C
@@ -116,6 +125,13 @@ class Track:
     if self.laneAssignment in (LaneAssignment.left, LaneAssignment.right):
       return abs(self.path_offset(path)) < NEIGHBOUR_LANE_MAX_PATH_OFFSET
     return True
+
+  def update_in_path(self, path: capnp._DynamicStructReader):
+    in_path = self.laneAssignment == LaneAssignment.same and abs(self.path_offset(path)) < IN_PATH_MAX_OFFSET
+    self.in_path_cnt = self.in_path_cnt + 1 if in_path else 0
+
+  def is_in_path_lead(self) -> bool:
+    return self.in_path_cnt >= IN_PATH_MIN_FRAMES and self.vLead >= IN_PATH_MIN_V_LEAD and self.dRel > 2.
 
   def potential_low_speed_lead(self, v_ego: float):
     # stop for stuff in front of you and low speed, even without model confirmation
@@ -178,7 +194,7 @@ def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: floa
 
 def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
              model_v_ego: float, lead_prob: float, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
-             path: capnp._DynamicStructReader, low_speed_override: bool = True) -> dict[str, Any]:
+             path: capnp._DynamicStructReader, low_speed_override: bool = True, in_path_fallback: bool = False) -> dict[str, Any]:
   # Determine leads, this is where the essential logic happens
   if len(tracks) > 0 and ready and lead_prob > .5:
     track = match_vision_to_track(v_ego, lead_msg, tracks, path)
@@ -191,6 +207,13 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
     lead_dict = get_custom_yrel(CP, CP_SP, lead_dict, lead_msg)
   elif (track is None) and ready and (lead_prob > .5):
     lead_dict = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego, lead_prob)
+
+  if in_path_fallback and lead_dict['present']:
+    in_path_tracks = [c for c in tracks.values() if c is not track and c.is_in_path_lead()]
+    if len(in_path_tracks) > 0:
+      closest_track = min(in_path_tracks, key=lambda c: c.dRel)
+      if closest_track.dRel < lead_dict['dRel'] - max(5.0, 0.2 * lead_dict['dRel']):
+        lead_dict = closest_track.get_RadarState(lead_prob)
 
   if low_speed_override:
     low_speed_tracks = [c for c in tracks.values() if c.potential_low_speed_lead(v_ego)]
@@ -258,6 +281,7 @@ class RadarD:
       if ids not in self.tracks:
         self.tracks[ids] = Track(ids, v_lead, self.kalman_params)
       self.tracks[ids].update(rpt[0], rpt[1], rpt[2], v_lead, rpt[3])
+      self.tracks[ids].update_in_path(sm['modelV2'].position)
 
     # *** publish radarState ***
     self.radar_state_valid = sm.all_checks()
@@ -281,7 +305,7 @@ class RadarD:
           self.lead_prob_filters[i].update(lead_prob)
 
       self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x,
-                                          self.CP, self.CP_SP, path, low_speed_override=True)
+                                          self.CP, self.CP_SP, path, low_speed_override=True, in_path_fallback=True)
       self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x,
                                           self.CP, self.CP_SP, path, low_speed_override=False)
 
