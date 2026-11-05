@@ -1,5 +1,9 @@
+import datetime
+import hashlib
 import json
 import os
+import socket
+import ssl
 import tempfile
 import threading
 import unittest
@@ -196,7 +200,8 @@ class TestServer(unittest.TestCase):
     self.disk.drives.index_all()
     self.params = FakeParams({"IsOnroad": False, "GitBranch": "golf8-dev", "GitCommit": "f1306b2c6aaaa"})
     device = drivesd.Device(self.params, data_dir=self.disk.tmp.name)
-    self.server = ThreadingHTTPServer(("127.0.0.1", 0), drivesd.handler(self.disk.drives, device))
+    link = drivesd.Link(os.path.join(self.disk.tmp.name, "link"))
+    self.server = ThreadingHTTPServer(("127.0.0.1", 0), drivesd.handler(self.disk.drives, device, link))
     threading.Thread(target=self.server.serve_forever, daemon=True).start()
     self.addCleanup(self.server.server_close)
     self.addCleanup(self.server.shutdown)
@@ -241,10 +246,155 @@ class TestServer(unittest.TestCase):
         self.get(path)
       self.assertEqual(e.exception.code, 404, path)
 
+  def test_link_over_tailscale(self):
+    cert, key = self_signed()
+    body = json.dumps({"key_hash": "a" * 64, "origin": ORIGIN, "cert": cert, "key": key}).encode()
+    req = urllib.request.Request(self.base + "/api/link", body, {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+      self.assertEqual(len(json.loads(r.read())["link"]), 16)
+
   def test_peers_only(self):
     with patch.object(drivesd, "allowed", return_value=False), self.assertRaises(urllib.error.HTTPError) as e:
       self.get("/api/drives")
     self.assertEqual(e.exception.code, 403)
+
+
+def self_signed(name="device.comma.example.cc"):
+  """A certificate and key for name, as PEM text."""
+  from cryptography import x509
+  from cryptography.hazmat.primitives import hashes, serialization
+  from cryptography.hazmat.primitives.asymmetric import ec
+  from cryptography.x509.oid import NameOID
+  key = ec.generate_private_key(ec.SECP256R1())
+  subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+  now = datetime.datetime.now(datetime.UTC)
+  cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject).public_key(key.public_key())
+          .serial_number(1).not_valid_before(now - datetime.timedelta(days=1)).not_valid_after(now + datetime.timedelta(days=30))
+          .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False).sign(key, hashes.SHA256()))
+  return (cert.public_bytes(serialization.Encoding.PEM).decode(),
+          key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode())
+
+
+ORIGIN = "https://comma.example.cc:7443"
+KEY = "k" * 32
+
+
+def free_port():
+  with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    return s.getsockname()[1]
+
+
+class TestLink(unittest.TestCase):
+  def setUp(self):
+    self.tmp = self.enterContext(tempfile.TemporaryDirectory())
+    self.link = drivesd.Link(os.path.join(self.tmp, "link"))
+    self.cert, self.key = self_signed()
+
+  def body(self, **kw):
+    return {"key_hash": hashlib.sha256(KEY.encode()).hexdigest(), "origin": ORIGIN, "cert": self.cert, "key": self.key, **kw}
+
+  def test_save_and_check(self):
+    self.assertFalse(self.link.ready())
+    self.assertIsNone(self.link.digest())
+    answer = self.link.save(self.body())
+    self.assertEqual(answer, {"link": self.link.digest()})
+    self.assertTrue(self.link.ready())
+    self.assertEqual(os.stat(os.path.join(self.tmp, "link", "key.pem")).st_mode & 0o777, 0o600)
+    self.assertTrue(self.link.key_ok({"Cookie": "a=b; navkey=" + KEY}))
+    self.assertTrue(self.link.key_ok({"X-Key": KEY}))
+    self.assertFalse(self.link.key_ok({"Cookie": "navkey=wrong"}))
+    self.assertFalse(self.link.key_ok({}))
+    self.assertNotIn(KEY.encode(), open(os.path.join(self.tmp, "link", "link.json"), "rb").read())   # only its hash
+
+  def test_turned_down(self):
+    self.assertIn("error", self.link.save(self.body(origin="http://x")))
+    self.assertIn("error", self.link.save(self.body(key_hash="abc")))
+    self.assertIn("error", self.link.save(self.body(cert="nope")))
+    self.assertFalse(self.link.ready())
+
+  def test_digest_follows_the_files(self):
+    self.link.save(self.body())
+    first = self.link.digest()
+    cert, key = self_signed()
+    self.link.save(self.body(cert=cert, key=key))
+    self.assertNotEqual(first, self.link.digest())
+
+
+class TestLan(unittest.TestCase):
+  def setUp(self):
+    self.disk = Disk()
+    self.addCleanup(self.disk.tmp.cleanup)
+    self.disk.segment("00000101--abcdef0123--0", files=("qlog.zst", "qcamera.ts", "fcamera.hevc"))
+    self.disk.drives.index_all()
+    self.device = drivesd.Device(FakeParams({"IsOnroad": False}), data_dir=self.disk.tmp.name)
+    self.link = drivesd.Link(os.path.join(self.disk.tmp.name, "link"))
+    self.cert, key = self_signed("localhost")
+    self.ip = "127.0.0.1"
+    self.lan = drivesd.LanServer(self.disk.drives, self.device, self.link, address=lambda: self.ip, port=free_port())
+    self.addCleanup(self.lan._stop)
+    self.link_body = {"key_hash": hashlib.sha256(KEY.encode()).hexdigest(), "origin": ORIGIN, "cert": self.cert, "key": key}
+    self.ctx = ssl.create_default_context(cadata=self.cert)
+
+  def get(self, path, headers=None, method="GET"):
+    req = urllib.request.Request(f"https://localhost:{self.lan.port}{path}", headers=headers or {}, method=method)
+    with urllib.request.urlopen(req, timeout=5, context=self.ctx) as r:
+      return r.status, dict(r.headers), r.read()
+
+  def test_off_until_linked(self):
+    self.lan.step()
+    self.assertIsNone(self.lan.server)
+    self.assertEqual(self.device.state()["lan"], {"ip": "127.0.0.1", "port": self.lan.port, "serving": False, "link": None})
+
+  def test_off_without_wifi(self):
+    self.link.save(self.link_body)
+    self.ip = None
+    self.lan.step()
+    self.assertIsNone(self.lan.server)
+
+  def test_https_with_the_cookie_from_the_page(self):
+    self.link.save(self.link_body)
+    self.lan.step()
+    self.assertTrue(self.device.state()["lan"]["serving"])
+    status, headers, body = self.get("/api/drives", {"Cookie": "navkey=" + KEY, "Origin": ORIGIN})
+    self.assertEqual(json.loads(body)["drives"][0]["id"], "00000101--abcdef0123")
+    self.assertEqual((headers["Access-Control-Allow-Origin"], headers["Access-Control-Allow-Credentials"]), (ORIGIN, "true"))
+    _, headers, _ = self.get("/api/ping", {"Cookie": "navkey=" + KEY, "Origin": "https://evil.example"})
+    self.assertNotIn("Access-Control-Allow-Origin", headers)
+    status, _, _ = self.get("/api/drives/00000101--abcdef0123/0/qcamera.ts", {"Cookie": "navkey=" + KEY, "Range": "bytes=0-3"})
+    self.assertEqual(status, 206)
+
+  def test_key_required(self):
+    self.link.save(self.link_body)
+    self.lan.step()
+    for headers in ({}, {"Cookie": "navkey=wrong"}):
+      with self.assertRaises(urllib.error.HTTPError) as e:
+        self.get("/api/drives", headers)
+      self.assertEqual(e.exception.code, 403)
+    with self.assertRaises(urllib.error.HTTPError) as e:   # the link comes over Tailscale only
+      self.get("/api/link", {"Cookie": "navkey=" + KEY, "Content-Type": "application/json"}, method="POST")
+    self.assertEqual(e.exception.code, 404)
+
+  def test_preflight(self):
+    self.link.save(self.link_body)
+    self.lan.step()
+    status, headers, _ = self.get("/api/drives", {"Origin": ORIGIN, "Access-Control-Request-Method": "GET"}, method="OPTIONS")
+    self.assertEqual(status, 204)
+    self.assertEqual(headers["Access-Control-Allow-Private-Network"], "true")
+    self.assertEqual(headers["Access-Control-Allow-Origin"], ORIGIN)
+
+  def test_restarted_for_a_new_address_or_certificate(self):
+    self.link.save(self.link_body)
+    self.lan.step()
+    first = self.lan.server
+    self.lan.step()
+    self.assertIs(self.lan.server, first)
+    cert, key = self_signed("localhost")
+    self.link.save({**self.link_body, "cert": cert, "key": key})
+    self.lan.step()
+    self.assertIsNot(self.lan.server, first)
+    self.ctx = ssl.create_default_context(cadata=cert)
+    self.assertEqual(self.get("/api/ping", {"X-Key": KEY})[0], 200)
 
 
 if __name__ == "__main__":

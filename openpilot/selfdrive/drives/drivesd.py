@@ -7,13 +7,23 @@ with each drive's track and timeline, the qcamera video, the logs and videos to 
   GET /api/drives/<route>/qcamera.m3u8     its qcamera video as one HLS playlist
   GET /api/drives/<route>/<n>/<file>       a segment's file as it is on disk (Range works); big ones only while offroad
   POST /api/drives/<route>/keep {keep}     keep the drive from the deleter (or no longer)
-  GET /api/device                          onroad, temperatures, fan, cores, storage, branch
+  GET /api/device                          onroad, temperatures, fan, cores, storage, branch, the LAN address
+  POST /api/link {key_hash, origin, cert, key}   from comma-link: what the LAN side needs (Tailscale only)
 
 A drive is read from its qlogs once, offroad, into a small index file per segment: never while driving. The files go out
 paced, the big ones (rlog, the full cameras) not at all while driving. Low priority, on the little cores only: cores 4 and 5
-are card/controlsd/selfdrived's and plannerd/radard's. Like destinationd, it listens on the Tailscale interface only and
-answers Tailscale peers only.
+are card/controlsd/selfdrived's and plannerd/radard's. Like destinationd, it listens on the Tailscale interface and answers
+Tailscale peers only there.
+
+On the car's Wi-Fi (its hotspot, or a network it joined) it also answers the phone directly, with https on LAN_PORT, once
+comma-link has sent the certificate of the car's own name (device.comma.<domain>, which comma-link points at the car's LAN
+address): then the page skips the server. There it answers the page's origin only (CORS), with the key's cookie (the
+server's cookie, for its domain and so for the car's name too): the car keeps the key's hash, never the key. Never on the
+cellular interface.
 """
+import hashlib
+import hmac
+import ssl
 import json
 import math
 import os
@@ -26,6 +36,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from openpilot.selfdrive.navigation.destinationd import allowed, interface_ip
 
 PORT = 8083
+LAN_PORT = 8443
+LAN_INTERFACES = ("wlan0",)   # Wi-Fi: the hotspot or a joined network; never the modem's
+LINK_DIR = "/data/drives_link"   # from comma-link: link.json (the key's hash, the page's origin), cert.pem, key.pem
+LINK_EVERY = 30.   # s between looks at the LAN address and the link files
+COOKIE = "navkey"   # comma-link's key cookie
 INDEX_DIR = "/data/drives_index"
 INDEX_VERSION = 1
 KEEP_ATTR = "user.keep"   # a kept drive's segments, see the deleter
@@ -393,6 +408,7 @@ class Device:
   """The device's state, for the page: deviceState as last sent, the params, the disk."""
   def __init__(self, params, sm=None, data_dir: str = "/data"):
     self.params, self.sm, self.data_dir = params, sm, data_dir
+    self.lan: dict | None = None   # the LAN side, see LanServer
     self.lock = threading.Lock()
 
   def onroad(self) -> bool:
@@ -400,6 +416,8 @@ class Device:
 
   def state(self, drives: Drives | None = None) -> dict:
     out = {"onroad": self.onroad(), "branch": self.params.get("GitBranch"), "commit": (self.params.get("GitCommit") or "")[:9]}
+    if self.lan is not None:
+      out["lan"] = dict(self.lan)
     if self.sm is not None:
       with self.lock:
         self.sm.update(0)
@@ -441,9 +459,83 @@ def parse_range(header: str | None, size: int) -> tuple[int, int] | None:
   return (first, last) if 0 <= first <= last < size else None
 
 
-def handler(drives: Drives, device: Device):
+class Link:
+  """What comma-link sent for the LAN side: the key's hash, the page's origin, the car name's certificate and key."""
+  def __init__(self, path: str = LINK_DIR):
+    self.path = path
+    self.lock = threading.Lock()
+
+  def _read(self, name: str) -> bytes | None:
+    try:
+      with open(os.path.join(self.path, name), "rb") as f:
+        return f.read()
+    except OSError:
+      return None
+
+  def config(self) -> dict:
+    try:
+      c = json.loads(self._read("link.json") or b"{}")
+    except ValueError:
+      return {}
+    return c if isinstance(c, dict) else {}
+
+  def ready(self) -> bool:
+    c = self.config()
+    return bool(c.get("key_hash") and c.get("origin")) and self._read("cert.pem") is not None and self._read("key.pem") is not None
+
+  def digest(self) -> str | None:
+    """What the car has, for comma-link to tell whether to send it again."""
+    parts = [self._read(n) for n in ("link.json", "cert.pem", "key.pem")]
+    return hashlib.sha256(b"\0".join(parts)).hexdigest()[:16] if all(p is not None for p in parts) else None  # type: ignore[misc]
+
+  def save(self, body: dict) -> dict:
+    key_hash, origin = str(body.get("key_hash") or ""), str(body.get("origin") or "")
+    cert, key = str(body.get("cert") or ""), str(body.get("key") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", key_hash) or not re.fullmatch(r"https://[0-9A-Za-z.-]+(:\d+)?", origin):
+      return {"error": "key_hash or origin"}
+    if "-----BEGIN CERTIFICATE-----" not in cert or "PRIVATE KEY-----" not in key:
+      return {"error": "cert or key"}
+    with self.lock:
+      os.makedirs(self.path, mode=0o700, exist_ok=True)
+      for name, data in (("cert.pem", cert.encode()), ("key.pem", key.encode()),
+                         ("link.json", json.dumps({"key_hash": key_hash, "origin": origin}).encode())):
+        tmp = os.path.join(self.path, name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+          f.write(data)
+        os.replace(tmp, os.path.join(self.path, name))
+    return {"link": self.digest()}
+
+  def key_ok(self, headers) -> bool:
+    want = self.config().get("key_hash")
+    if not want:
+      return False
+    given = headers.get("X-Key")
+    for part in (headers.get("Cookie") or "").split(";"):
+      name, _, value = part.strip().partition("=")
+      if name == COOKIE and given is None:
+        given = value
+    return given is not None and hmac.compare_digest(hashlib.sha256(given.encode()).hexdigest(), want)
+
+  def context(self) -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(os.path.join(self.path, "cert.pem"), os.path.join(self.path, "key.pem"))
+    return ctx
+
+
+def handler(drives: Drives, device: Device, link: Link | None = None, lan: bool = False):
+  """lan: the phone on the car's Wi-Fi, with the key's cookie, from the page's origin; else Tailscale peers."""
   class Handler(BaseHTTPRequestHandler):
     timeout = 30.
+
+    def end_headers(self):
+      origin = self.headers.get("Origin")
+      if lan and link is not None and origin and origin == link.config().get("origin"):
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Credentials", "true")
+        self.send_header("Vary", "Origin")
+      super().end_headers()
 
     def _send(self, code: int, body: bytes, kind: str):
       self.send_response(code)
@@ -460,7 +552,7 @@ def handler(drives: Drives, device: Device):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
     def _allowed(self) -> bool:
-      if allowed(self.client_address[0]):
+      if (link is not None and link.key_ok(self.headers)) if lan else allowed(self.client_address[0]):
         return True
       self._send(403, b"", "text/plain")
       return False
@@ -497,7 +589,9 @@ def handler(drives: Drives, device: Device):
       if not self._allowed():
         return
       parts = [urllib.parse.unquote(p) for p in urllib.parse.urlsplit(self.path).path.strip("/").split("/")]
-      if parts == ["api", "device"]:
+      if parts == ["api", "ping"]:
+        self._json({"ok": True, "lan": lan})
+      elif parts == ["api", "device"]:
         self._json(device.state(drives))
       elif parts == ["api", "drives"]:
         self._json(drives.list())
@@ -526,18 +620,74 @@ def handler(drives: Drives, device: Device):
         return
       parts = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
       try:
-        body = json.loads(self.rfile.read(min(max(0, int(self.headers.get("Content-Length") or 0)), 4096)) or b"{}")
+        body = json.loads(self.rfile.read(min(max(0, int(self.headers.get("Content-Length") or 0)), 65536)) or b"{}")
       except ValueError:
         body = None
       if len(parts) == 4 and parts[:2] == ["api", "drives"] and parts[3] == "keep" and isinstance(body, dict):
         self._json(drives.keep(urllib.parse.unquote(parts[2]), bool(body.get("keep", True))))
+      elif parts == ["api", "link"] and not lan and link is not None and isinstance(body, dict):
+        self._json(link.save(body))
       else:
         self._send(404, b"", "text/plain")
+
+    def do_OPTIONS(self):   # the browser's preflight, without the cookie
+      if not lan:
+        self._send(404, b"", "text/plain")
+        return
+      self.send_response(204)
+      self.send_header("Access-Control-Allow-Methods", "GET, POST")
+      self.send_header("Access-Control-Allow-Headers", "Content-Type, Range")
+      self.send_header("Access-Control-Allow-Private-Network", "true")
+      self.send_header("Access-Control-Max-Age", "600")
+      self.send_header("Content-Length", "0")
+      self.end_headers()
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002  # stdlib override; places stay off the logs
       pass
 
   return Handler
+
+
+def lan_address() -> str | None:
+  return next((ip for ip in map(interface_ip, LAN_INTERFACES) if ip is not None), None)
+
+
+class LanServer:
+  """The https side on the car's Wi-Fi: (re)started when its address or the link files change, stopped without either."""
+  def __init__(self, drives: Drives, device: Device, link: Link, address=lan_address, port: int = LAN_PORT):
+    self.drives, self.device, self.link, self.address, self.port = drives, device, link, address, port
+    self.key: tuple | None = None
+    self.server: ThreadingHTTPServer | None = None
+
+  def _stop(self):
+    if self.server is not None:
+      self.server.shutdown()
+      self.server.server_close()
+    self.server, self.key = None, None
+
+  def step(self):
+    ip = self.address()
+    want = (ip, self.link.digest()) if ip is not None and self.link.ready() else None
+    self.device.lan = {"ip": ip, "port": self.port, "serving": False, "link": self.link.digest()}
+    if want != self.key:
+      self._stop()
+      if want is not None:
+        try:
+          server = ThreadingHTTPServer((ip, self.port), handler(self.drives, self.device, self.link, lan=True))
+          server.socket = self.link.context().wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+        except (OSError, ssl.SSLError):   # the port still held, or a bad certificate: the next look
+          return
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.server, self.key = server, want
+    self.device.lan["serving"] = self.server is not None
+
+  def run(self, stop: threading.Event):
+    while True:
+      self.step()
+      if stop.wait(LINK_EVERY):
+        self._stop()
+        return
 
 
 def indexer(drives: Drives, device: Device, stop: threading.Event):
@@ -557,13 +707,15 @@ def main():
   os.nice(15)
   drives = Drives(Paths.log_root())
   device = Device(Params(), messaging.SubMaster(['deviceState']))
+  link = Link()
   stop = threading.Event()
   threading.Thread(target=indexer, args=(drives, device, stop), daemon=True).start()
+  threading.Thread(target=LanServer(drives, device, link).run, args=(stop,), daemon=True).start()
   while True:
     address = interface_ip()
     if address is not None:
       try:
-        server = ThreadingHTTPServer((address, PORT), handler(drives, device))
+        server = ThreadingHTTPServer((address, PORT), handler(drives, device, link))
         break
       except OSError:   # the port is still held by a previous run
         pass
