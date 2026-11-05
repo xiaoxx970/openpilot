@@ -146,6 +146,7 @@ procs = [
   PythonProcess("navd", "openpilot.selfdrive.navigation.navd", navigation),
   PythonProcess("mapsd", "openpilot.selfdrive.navigation.mapsd", navigation),
   PythonProcess("destinationd", "openpilot.selfdrive.navigation.destinationd", navigation_destination, enabled=not PC),
+  PythonProcess("drivesd", "openpilot.selfdrive.drives.drivesd", always_run, enabled=not PC),   # comma-link's drives page
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),

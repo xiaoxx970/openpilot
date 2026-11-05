@@ -24,10 +24,19 @@ DELETE_CHUNK_PAUSE = 0.05  # s
 PRESERVE_ATTR_NAME = 'user.preserve'
 PRESERVE_ATTR_VALUE = b'1'
 PRESERVE_COUNT = 5
+KEEP_ATTR_NAME = 'user.keep'   # a whole drive kept on comma-link's drives page (drivesd): all its segments, last to go
 
 
 def has_preserve_xattr(d: str) -> bool:
   return getxattr(os.path.join(Paths.log_root(), d), PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+
+
+def has_keep_xattr(d: str) -> bool:
+  # uncached: drivesd sets and clears it in its own process
+  try:
+    return os.getxattr(os.path.join(Paths.log_root(), d), KEEP_ATTR_NAME) == b'1'
+  except OSError:
+    return False
 
 
 def get_preserved_segments(dirs_by_creation: list[str]) -> set[str]:
@@ -50,6 +59,7 @@ def get_preserved_segments(dirs_by_creation: list[str]) -> set[str]:
     for _seg_num in range(max(0, seg_num - 2), seg_num + 1):
       preserved.add(f"{date_str}--{_seg_num}")
 
+  preserved.update(filter(has_keep_xattr, dirs_by_creation))
   return preserved
 
 
