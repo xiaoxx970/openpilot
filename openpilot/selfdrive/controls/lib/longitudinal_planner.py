@@ -110,6 +110,12 @@ COAST_BAND_SAVE_INTERVAL = 120.  # s between saves, and only after new edges; th
 # wheels never slipped; the three slips in rain were the driver's own launches above 1 m/s^2 at 11-16 km/h
 RAIN_ACCEL_CAP = (1.2, 1.0)  # m/s^2: rain, heavy rain
 RAIN_ACCEL_CAP_RATE = 0.5    # m/s^3 the cap moves at as rain mode starts, changes or ends, so the command never steps
+# Behind a stopped lead the MPC plans to stop STOP_DISTANCE (6 m) short of it, yet the car ends ~4 m behind, so over the last
+# 10 m it brakes 0.1-0.3 m/s^2 more than needed and lets go at the end. The model asks for about what a driver does there
+# (-0.9..-1.0 against the MPC's -1.2..-1.3, the owner's own stops -0.86; 2026-11-05). While the model's softer request still
+# stops the car at least this far short of a stopped lead (m, radar distance), it shapes the stop instead of the MPC
+MODEL_STOP_MARGIN = 3.5
+MODEL_STOP_LEAD_SPEED = 1.  # m/s; leads slower than this count as stopped
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 def get_max_decel(v_ego):
@@ -382,6 +388,13 @@ class RainAccelCap:
     return self.cap
 
 
+def model_stops_short(a_model, a_mpc, lead, v_ego):
+  # True when the model's request is softer than the MPC's and braking at it stops MODEL_STOP_MARGIN short of a stopped lead
+  if not lead.present or lead.vLead >= MODEL_STOP_LEAD_SPEED or a_model >= 0. or a_model <= a_mpc:
+    return False
+  return v_ego ** 2 / (2. * -a_model) <= lead.dRel - MODEL_STOP_MARGIN
+
+
 def get_coast_accel(pitch):
   # where the coast band starts before the car has shown its own edges; kept from the chill planner upstream removed
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
@@ -492,7 +505,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     else:
       self.mpc.set_cur_state(v_ego, sm['carState'].aEgo)
     t_follow, stop_distance_add = get_follow_distance(sm['selfdriveStateIC'], sm['selfdriveState'].personality, v_ego)
-    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality, t_follow=t_follow, stop_distance_add=stop_distance_add)
+    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality, t_follow=t_follow, stop_distance_add=stop_distance_add,
+                    model_leads=sm['modelV2'].leadsV3)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
@@ -512,6 +526,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
+    if model_stops_short(output_a_target_e2e, output_a_target_mpc, sm['radarState'].leadOne, v_ego):
+      output_a_target_mpc = output_a_target_e2e
 
     v_cruise, lead_capped = self.lead_closing_limit.update(v_cruise, v_ego, sm['radarState'].leadOne, sm['selfdriveState'].personality, t_follow)
     self.a_cruise = get_cruise_accel(v_cruise, v_ego, self.a_cruise, self.dt, sm['selfdriveState'].personality, lead_capped)
