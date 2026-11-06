@@ -42,7 +42,7 @@ LINK_DIR = "/data/drives_link"   # from comma-link: link.json (the key's hash, t
 LINK_EVERY = 30.   # s between looks at the LAN address and the link files
 COOKIE = "navkey"   # comma-link's key cookie
 INDEX_DIR = "/data/drives_index"
-INDEX_VERSION = 2   # 2: bookmarks
+INDEX_VERSION = 3   # 2: bookmarks, 3: segment times from the segment, not the route's initData
 KEEP_ATTR = "user.keep"   # a kept drive's segments, see the deleter
 SEGMENT = re.compile(r"^(?P<route>[0-9A-Za-z-]+?)--(?P<n>\d+)$")
 FILES = ("qlog.zst", "qlog", "qcamera.ts", "rlog.zst", "rlog", "fcamera.hevc", "ecamera.hevc", "dcamera.hevc")
@@ -126,6 +126,8 @@ def summarize(events) -> dict:
     try:
       which = e.which()
     except Exception:  # a message this cereal does not know
+      continue
+    if which == "initData":   # every segment's carries the route's start time, not the segment's
       continue
     mono = e.logMonoTime * 1e-9
     if t0 is None:

@@ -62,6 +62,12 @@ class TestSummarize(unittest.TestCase):
     self.assertEqual(s["cores"], [20, 80])
     self.assertLessEqual(len(s["track"]), 13)   # one point per 5 s
 
+  def test_init_data_of_the_route(self):
+    # a later segment's qlog opens with the route's initData, a segment (or more) before its own events
+    s = drivesd.summarize([NS(logMonoTime=int(40e9), which=lambda: "initData")] + segment_events())
+    self.assertEqual(s["engaged"], [[10., 50.]])
+    self.assertAlmostEqual(s["duration"], 60., delta=0.5)
+
   def test_runs_open_at_the_end(self):
     s = drivesd.summarize([sds(0., True), sds(20., True)])
     self.assertEqual(s["engaged"], [[0., 20.]])
