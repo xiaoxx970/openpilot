@@ -39,6 +39,7 @@ def segment_events():
   out += [sds(0., False), sds(10., True), sds(30., True, "commIssue/softDisable", "userPrompt", "通讯问题"), sds(31., True),
           sds(50., False)]
   out += [ev(20., "roadEventsIC", jamFollow=True), ev(40., "roadEventsIC", jamFollow=False)]
+  out.append(ev(33., "userBookmark"))
   out += [limit(5., 60), limit(6., 62), limit(45., 40)]
   out += [gps(t, 32.1 + t * 1e-5, 118.9) for t in range(1, 60)]
   out += [ev(15., "deviceState", cpuTempC=[60., 70.], memoryTempC=50., cpuUsagePercent=[10, 90]),
@@ -125,6 +126,7 @@ class TestDrives(unittest.TestCase):
     listed = self.disk.drives.list()["drives"][1]
     self.assertEqual(listed["runs"], [[10, 50], [70, 110], [130, 170]])
     self.assertEqual(listed["alert_t"], [30, 90, 150])
+    self.assertEqual((listed["bookmarks"], listed["bookmark_t"]), (3, [33, 93, 153]))
 
   def test_stops_when_the_car_starts(self):
     self.assertEqual(self.disk.drives.index_all(onroad=lambda: True), 0)

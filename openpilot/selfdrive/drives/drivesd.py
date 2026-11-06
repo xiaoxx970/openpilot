@@ -42,7 +42,7 @@ LINK_DIR = "/data/drives_link"   # from comma-link: link.json (the key's hash, t
 LINK_EVERY = 30.   # s between looks at the LAN address and the link files
 COOKIE = "navkey"   # comma-link's key cookie
 INDEX_DIR = "/data/drives_index"
-INDEX_VERSION = 1
+INDEX_VERSION = 2   # 2: bookmarks
 KEEP_ATTR = "user.keep"   # a kept drive's segments, see the deleter
 SEGMENT = re.compile(r"^(?P<route>[0-9A-Za-z-]+?)--(?P<n>\d+)$")
 FILES = ("qlog.zst", "qlog", "qcamera.ts", "rlog.zst", "rlog", "fcamera.hevc", "ecamera.hevc", "dcamera.hevc")
@@ -152,6 +152,8 @@ def summarize(events) -> dict:
         events_out.append({"t": round(t, 1), "kind": "alert", "text": s.alertText1 or shown.split("/")[0],
                            "type": shown.split("/")[0], "status": str(s.alertStatus)})
       alert = shown
+    elif which == "userBookmark":   # the bookmark button: openpilot keeps the segment too
+      events_out.append({"t": round(t, 1), "kind": "bookmark"})
     elif which == "roadEventsIC":
       jams.sample(t, e.roadEventsIC.jamFollow)
     elif which == "longitudinalPlanSP":
@@ -206,6 +208,14 @@ def qlog_of(seg_dir: str) -> str | None:
 def kept(seg_dir: str) -> bool:
   try:
     return os.getxattr(seg_dir, KEEP_ATTR) == b"1"
+  except OSError:
+    return False
+
+
+def bookmarked(seg_dir: str) -> bool:
+  """loggerd marks a segment it keeps for a bookmark."""
+  try:
+    return os.getxattr(seg_dir, "user.preserve") == b"1"
   except OSError:
     return False
 
@@ -363,9 +373,11 @@ class Drives:
     out = {"id": route, "start": round(wall) if wall else None, "duration": round(duration), "distance": round(distance),
            "engaged": round(on / duration, 3) if duration and indexed else None, "segments": len(segs),
            "indexed": indexed, "size": size, "kept": all(kept(d) for _, d in segs),
-           "alerts": sum(1 for e in events if e["kind"] == "alert"), "jam": round(sum(b - a for a, b in merge_runs(jams))),
+           "alerts": sum(1 for e in events if e["kind"] == "alert"),
+           "bookmarks": sum(1 for e in events if e["kind"] == "bookmark") or sum(1 for _, d in segs if bookmarked(d)), "jam": round(sum(b - a for a, b in merge_runs(jams))),
            "thumb": [[la, lo] for _, la, lo in thin(track, THUMB)],
-           "runs": coarse_runs(engaged, duration), "alert_t": [round(e["t"]) for e in events if e["kind"] == "alert"][:MAX_LIST_MARKS]}
+           "runs": coarse_runs(engaged, duration), "alert_t": [round(e["t"]) for e in events if e["kind"] == "alert"][:MAX_LIST_MARKS],
+           "bookmark_t": [round(e["t"]) for e in events if e["kind"] == "bookmark"][:MAX_LIST_MARKS]}
     if detail:
       out.update({"track": thin(track, MAX_TRACK), "timeline": {"engaged": engaged, "jams": merge_runs(jams), "events": events},
                   "files": files, "temps": temps, "cores": [round(sum(c) / len(c)) for c in zip(*[x for x in loads if len(x) == len(loads[0])], strict=True)]
