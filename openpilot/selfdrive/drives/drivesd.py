@@ -374,7 +374,8 @@ class Drives:
            "engaged": round(on / duration, 3) if duration and indexed else None, "segments": len(segs),
            "indexed": indexed, "size": size, "kept": all(kept(d) for _, d in segs),
            "alerts": sum(1 for e in events if e["kind"] == "alert"),
-           "bookmarks": sum(1 for e in events if e["kind"] == "bookmark") or sum(1 for _, d in segs if bookmarked(d)), "jam": round(sum(b - a for a, b in merge_runs(jams))),
+           "bookmarks": sum(1 for e in events if e["kind"] == "bookmark") or sum(1 for _, d in segs if bookmarked(d)),
+           "jam": round(sum(b - a for a, b in merge_runs(jams))),
            "thumb": [[la, lo] for _, la, lo in thin(track, THUMB)],
            "runs": coarse_runs(engaged, duration), "alert_t": [round(e["t"]) for e in events if e["kind"] == "alert"][:MAX_LIST_MARKS],
            "bookmark_t": [round(e["t"]) for e in events if e["kind"] == "bookmark"][:MAX_LIST_MARKS]}
