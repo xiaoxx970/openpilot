@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import time
 
 import numpy as np
@@ -12,9 +13,14 @@ from openpilot.selfdrive.navigation.helpers import latest_gps_source
 from openpilot.selfdrive.navigation.pmtiles import PMTiles
 from openpilot.selfdrive.navigation.renderer import SIZE, MapRenderer
 from openpilot.selfdrive.navigation.route import RouteTracker
-from openpilot.selfdrive.navigation.tiles import RemoteTiles
+from openpilot.selfdrive.navigation.tiles import NoTiles, open_tiles
 
 RETRY_SECONDS = 10
+# Left unpinned, the scheduler put mapsd on core 4 next to card, selfdrived and controlsd (2026-11-06: ~20 % of that core,
+# core 4 at 94 % not engaged). Core 7 is modeld's: ~35 % busy, a big core, and modeld and dmonitoringmodeld are real time,
+# so they always preempt mapsd and the model never waits for the map.
+MAPSD_CORE = 7
+NO_TILES_RETRY_SECONDS = 60  # until an archive is put on the device
 
 
 class MapsD:
@@ -38,7 +44,7 @@ class MapsD:
     try:
       if self.tracker is not None and now >= self.retry_at:
         if self.renderer is None:
-          self.renderer = MapRenderer(PMTiles(RemoteTiles()))
+          self.renderer = MapRenderer(PMTiles(open_tiles()))
         if not self.prefetched:
           # TODO: fetch the tiles more intelligently on demand
           # Every tile the route can show is fetched up front, so each render below is a cache hit.
@@ -50,6 +56,10 @@ class MapsD:
           image, valid = self.renderer.render(*self.tracker.snap(gps.longitude, gps.latitude), self.route)
           if valid:
             return image, sm.logMonoTime[source]
+    except NoTiles:
+      if self.retry_at == 0.0:
+        cloudlog.warning('mapsd: no basemap on the device and no prime for the hosted one')
+      self.retry_at = now + NO_TILES_RETRY_SECONDS
     except Exception:  # a failed fetch, or a corrupt cached tile
       cloudlog.exception('mapsd.render_failed')
       self.close()  # a changed archive needs a fresh reader
@@ -63,7 +73,15 @@ class MapsD:
     self.prefetched = False
 
 
+def pin_to_core() -> None:
+  try:
+    os.sched_setaffinity(0, {MAPSD_CORE})
+  except (AttributeError, OSError):  # not on Linux, or no such core
+    pass
+
+
 def main():
+  pin_to_core()
   rk = Ratekeeper(20.0)
   sm = messaging.SubMaster(['gpsLocation', 'gpsLocationExternal', 'navRoute'])
   server = VisionIpcServer('mapsd')

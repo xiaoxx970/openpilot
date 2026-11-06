@@ -1,4 +1,5 @@
-"""Byte ranges of the hosted PMTiles basemap, cached on disk."""
+"""Byte ranges of the PMTiles basemap: the hosted one, cached on disk, or an archive on the device."""
+import os
 import re
 import time
 from pathlib import Path
@@ -20,7 +21,8 @@ class RemoteTiles:
     self.cache = Path(Paths.comma_home() if PC else '/data') / 'navigation' / 'tiles'
     self.cache.mkdir(parents=True, exist_ok=True, mode=0o700)
     self.session = requests.Session()
-    self.api = Api(Params().get('DongleId'))
+    self.dongle_id = Params().get('DongleId')
+    self.api = Api(self.dongle_id)
     self.url = ''
     self.expires = 0
     self.etag = None
@@ -40,7 +42,7 @@ class RemoteTiles:
   def _fetch(self, offset: int, length: int) -> bytes:
     try:
       if time.time() >= self.expires - 60:  # noqa: TID251 - SAS expiry is a Unix timestamp
-        response = self.api.get(f'v1/{self.api.dongle_id}/nav/tiles', access_token=self.api.get_token(), timeout=10)
+        response = self.api.get(f'v1/{self.dongle_id}/nav/tiles', access_token=self.api.get_token(), timeout=10)
         response.raise_for_status()
         metadata = response.json()
         self.url, self.expires = metadata['url'], metadata['expires']
@@ -115,3 +117,36 @@ class RemoteTiles:
 
   def close(self):
     self.session.close()
+
+
+# An archive on the device, e.g. a regional extract of the Protomaps basemap (pmtiles extract): no account or network needed
+def local_archive() -> Path:
+  return Path(Paths.comma_home() if PC else '/data') / 'navigation' / 'basemap.pmtiles'
+
+
+class LocalTiles:
+  def __init__(self, path: Path | None = None):
+    self.file = open(path or local_archive(), 'rb')
+    self.size = os.fstat(self.file.fileno()).st_size
+
+  def read(self, offset: int, length: int) -> bytes:
+    return os.pread(self.file.fileno(), length, offset)
+
+  def prefetch(self, ranges):
+    pass
+
+  def close(self):
+    self.file.close()
+
+
+class NoTiles(Exception):
+  """No archive on the device, and no prime for the hosted one (its API answers 403 without)."""
+
+
+def open_tiles():
+  """The device's own archive when there is one, else the hosted basemap with prime."""
+  if local_archive().is_file():
+    return LocalTiles()
+  if (Params().get('PrimeType') or 0) <= 0:
+    raise NoTiles
+  return RemoteTiles()

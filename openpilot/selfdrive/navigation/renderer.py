@@ -26,6 +26,8 @@ CUT_WIDTH = 3.0  # black separator under a bridge, added to the road width
 MAX_ROAD_DISTANCE = 100.0  # meters from the ego to the nearest road centerline for a valid map
 ARROW = np.array([(0, -9), (7, 7), (0, 3), (-7, 7)], dtype=np.float64)  # ego marker, pixels around the ego
 ARROW_OUTLINE = 2.0  # pixels
+JAM_RADIUS = 6.0  # pixels around the route's centerline a jam covers, so the whole stroke is inside
+JAM_STATUSES = (2, 3, 4)  # Baidu's slow, congested, blocked; 1 is free flow
 
 
 # The training style's road classes as (zoom, width, zoom, width) stops for the interior and for one side of the
@@ -132,6 +134,23 @@ def draw_vehicle(image: np.ndarray):
     inside |= ((sides[0] >= 0) & (sides[1] >= 0) & (sides[2] >= 0)) | ((sides[0] <= 0) & (sides[1] <= 0) & (sides[2] <= 0))
   image[y0:y1, x0:x1][inside] = 255
   draw_segments(image, arrow, np.roll(arrow, -1, axis=0), ARROW_OUTLINE / 2, 0, overlay=True)
+
+
+def jam_mask(route: np.ndarray, jams, longitude: float, latitude: float, bearing: float, progress: float) -> np.ndarray:
+  """Each pixel's jam status (0: none) along the route, in the frame at a pose: for the UI to colour the route it shows.
+  The model's frame is left as it is. jams: (start, length, status), meters along the route."""
+  mask = np.zeros((SIZE, SIZE), dtype=np.uint8)
+  distance = cumulative_distance(route)
+  for start, length, status in jams:
+    low, high = max(start, progress - SIZE), min(start + length, progress + SIZE)   # what the frame can show
+    if status not in JAM_STATUSES or high <= low:
+      continue
+    inner = (distance > low) & (distance < high)
+    along = np.r_[low, distance[inner], high]
+    points = np.column_stack([np.interp(along, distance, route[:, axis]) for axis in (0, 1)])
+    pixels = project(mercator(points), longitude, latitude, bearing)
+    draw_segments(mask, pixels[:-1], pixels[1:], JAM_RADIUS, int(status))
+  return mask
 
 
 class MapRenderer:

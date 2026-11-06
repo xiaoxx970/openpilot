@@ -205,12 +205,12 @@ class TestBaiduOnline(unittest.TestCase):
     self.online = baidu.BaiduOnline(("ak-test", "sk-test"), self.worker, self.clock)
     self.odo, self.prev = 0., None
 
-  def step(self, x, y=0., course=EAST, v=15., road=MAIN, road_ahead=None) -> baidu.Snapshot:
+  def step(self, x, y=0., course=EAST, v=15., road=MAIN, road_ahead=None, nav=None) -> baidu.Snapshot:
     """One 2 Hz cycle of roadeventd with the car at (x, y)."""
     if self.prev is not None:
       self.odo += math.hypot(x - self.prev[0], y - self.prev[1])
     self.prev = (x, y)
-    snap = self.online.update(self.odo, *latlon(x, y), course, v, road, road_ahead)
+    snap = self.online.update(self.odo, *latlon(x, y), course, v, road, road_ahead, nav)
     self.clock.t += 0.5
     return snap
 
@@ -512,6 +512,55 @@ class TestBaiduOnline(unittest.TestCase):
     for _ in range(400):
       self.step(0., v=1.)
     self.assertEqual(self.sent("route"), [])
+
+  # -- navigation: navd's route brings the traffic
+  def nav_east(self, x0: float, x1: float, jams, y: float = 0.):
+    """navd's route east along y from x0 to x1 m, asked now, with jams (start, length, status) from its first point."""
+    return self.clock.t, [latlon(x, y) for x in np.arange(x0, x1 + 1e-6, 40.)], jams
+
+  def test_no_route_planning_while_navigating(self):
+    self.start({"route": plan_straight})
+    nav = self.nav_east(0., 8000., [(2000., 300., 3)])
+    for i in range(300):                               # 150 s at 15 m/s
+      snap = self.step(7.5 * i, nav=nav)
+    self.assertEqual(self.sent("route"), [])
+    self.assertTrue(snap.jams_online)
+    self.assertEqual(len(snap.jams), 1)
+    self.assertAlmostEqual(snap.jams[0][0], 2000. - 7.5 * 299, delta=2.)
+    self.assertEqual(snap.jams[0][1:], (300., 3))
+
+  def test_planning_again_once_the_navigation_traffic_is_old(self):
+    self.start({"route": plan_straight})
+    nav = self.nav_east(0., 8000., [])
+    times = self.detection_times(400, lambda i: (7.5 * i, 0., EAST, 15., MAIN, None, nav), "route")   # 200 s, no new route
+    self.assertEqual(times, [baidu.NAV_STALE])
+
+  def test_a_new_navigation_route_replaces_a_planning(self):
+    self.start({"route": plan_straight})
+    self.step(0.)
+    self.assertEqual(len(self.sent("route")), 1)
+    snap = self.step(7.5, nav=self.nav_east(7.5, 8000., [(500., 100., 4)]))
+    self.assertTrue(snap.online is False and snap.jams_online)
+    self.assertAlmostEqual(snap.jams[0][0], 500., delta=2.)
+
+  def test_a_navigation_route_away_from_the_car_is_not_used(self):
+    self.start({"route": plan_straight})
+    nav = self.nav_east(0., 8000., [(500., 100., 4)], y=200.)
+    times = self.detection_times(250, lambda i: (7.5 * i, 0., EAST, 15., MAIN, None, nav), "route")
+    self.assertEqual(times, [0., baidu.ROUTE_PERIOD, 2 * baidu.ROUTE_PERIOD])
+
+  def test_leaving_the_navigation_route_plans_at_once(self):
+    self.start({"route": plan_straight})
+    nav = self.nav_east(0., 8000., [(1000., 100., 4)])
+    for i in range(61):
+      self.step(7.5 * i, nav=nav)
+    self.assertEqual(self.sent("route"), [])
+    for k in range(1, 20):                             # north, off the route
+      snap = self.step(450., 7.5 * k, course=0., nav=nav)
+      if self.sent("route"):
+        break
+    self.assertEqual(k, 15)                            # 45 m off from k = 6, for 10 cycles
+    self.assertEqual(snap.jams, [])
 
   def test_leaving_the_road_drops_cameras_and_jams_at_once(self):
     # turned off at 30 s: 5 s after the car is 40 m off, the cameras and jams of the road it left are gone; route planning

@@ -2653,7 +2653,7 @@ struct Event {
     liveMapDataSP @115 :Custom.LiveMapDataSP;
     modelDataV2SP @116 :Custom.ModelDataV2SP;
     roadEventsIC @136 :Custom.RoadEventsIC;
-    customReserved11 @137 :Custom.CustomReserved11;
+    navRouteIC @137 :Custom.NavRouteIC;
     customReserved12 @138 :Custom.CustomReserved12;
     selfdriveStateIC @139 :Custom.SelfdriveStateIC;
     controlsStateIC @140 :Custom.ControlsStateIC;

@@ -81,6 +81,7 @@ class UIState(UIStateSP):
         "gpsLocationExternal",
         "gpsLocation",
         "navInstruction",
+        "navRouteIC",
         "carOutput",
         "carControl",
         "vehicleParameters",
