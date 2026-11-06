@@ -230,6 +230,22 @@ class TestServer(unittest.TestCase):
     status, headers, body = self.get("/api/drives/00000101--abcdef0123/qcamera.m3u8")
     self.assertEqual(headers["Content-Type"], "application/vnd.apple.mpegurl")
 
+  def test_segments_as_one_file(self):
+    self.disk.segment("00000101--abcdef0123--1", files=("qcamera.ts",))
+    with open(os.path.join(self.disk.root, "00000101--abcdef0123--1", "qcamera.ts"), "wb") as f:
+      f.write(b"B" * 100)
+    status, headers, body = self.get("/api/drives/00000101--abcdef0123/0-1/qcamera.ts")
+    self.assertEqual((status, len(body)), (200, 1124))
+    self.assertEqual(body, bytes(range(256)) * 4 + b"B" * 100)
+    self.assertIn('filename="00000101--abcdef0123--0-1--qcamera.ts"', headers["Content-Disposition"])
+    status, headers, body = self.get("/api/drives/00000101--abcdef0123/0-1/qcamera.ts", {"Range": "bytes=1020-1029"})
+    self.assertEqual((status, body, headers["Content-Range"]), (206, bytes([252, 253, 254, 255]) + b"B" * 6, "bytes 1020-1029/1124"))
+    with self.assertRaises(urllib.error.HTTPError) as e:
+      self.get("/api/drives/00000101--abcdef0123/1-0/qcamera.ts")
+    self.assertEqual(e.exception.code, 404)
+    with self.assertRaises(urllib.error.HTTPError):
+      self.get("/api/drives/00000101--abcdef0123/0-500/qcamera.ts")   # more than MAX_SPAN
+
   def test_big_files_wait_for_offroad(self):
     self.params.values["IsOffroad"] = False
     with self.assertRaises(urllib.error.HTTPError) as e:

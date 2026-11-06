@@ -47,6 +47,8 @@ KEEP_ATTR = "user.keep"   # a kept drive's segments, see the deleter
 SEGMENT = re.compile(r"^(?P<route>[0-9A-Za-z-]+?)--(?P<n>\d+)$")
 FILES = ("qlog.zst", "qlog", "qcamera.ts", "rlog.zst", "rlog", "fcamera.hevc", "ecamera.hevc", "dcamera.hevc")
 ONROAD_FILES = ("qlog.zst", "qlog", "qcamera.ts")   # small enough to send while driving
+SPAN = re.compile(r"^(\d{1,5})(?:-(\d{1,5}))?$")   # a segment, or segments a-b: one file, theirs one after another
+MAX_SPAN = 120   # segments in one download
 KINDS = {".ts": "video/mp2t", ".hevc": "application/octet-stream", ".zst": "application/zstd", "": "application/octet-stream"}
 CHUNK = 64 * 1024
 RATE_ONROAD = 512 * 1024        # B/s while driving: qcamera is about 50 kB/s
@@ -381,13 +383,20 @@ class Drives:
     return ("\n".join(lines) + "\n").encode()
 
   def file(self, route: str, n: int, name: str) -> str | None:
-    if name not in FILES:
-      return None
+    paths = self.files(route, n, n, name)
+    return paths[0] if paths else None
+
+  def files(self, route: str, a: int, b: int, name: str) -> tuple[str, ...]:
+    """The file of segments a..b that have it, in order. qlog, rlog, qcamera and the hevc streams play on when put one after
+    another (zstd frames, log events, MPEG-TS packets, Annex B NAL units), so a stretch of a drive downloads as one file."""
+    if name not in FILES or b < a or b - a >= MAX_SPAN:
+      return ()
+    out = []
     for m, seg_dir in self.segments().get(route, []):
-      if m == n:
-        p = os.path.join(seg_dir, name)
-        return p if os.path.isfile(p) else None
-    return None
+      p = os.path.join(seg_dir, name)
+      if a <= m <= b and os.path.isfile(p):
+        out.append(p)
+    return tuple(out)
 
   def keep(self, route: str, on: bool) -> dict | None:
     segs = self.segments().get(route)
@@ -557,33 +566,42 @@ def handler(drives: Drives, device: Device, link: Link | None = None, lan: bool 
       self._send(403, b"", "text/plain")
       return False
 
-    def _file(self, path: str, name: str):
+    def _file(self, paths: tuple[str, ...], name: str, download: str):
+      """The files one after another, as one: Range over the whole."""
       onroad = device.onroad()
       if onroad and name not in ONROAD_FILES:
         self._json({"error": "车在行驶，大文件停车后才能下"}, 409)
         return
-      size = os.path.getsize(path)
+      sizes = [os.path.getsize(p) for p in paths]
+      size = sum(sizes)
       span = parse_range(self.headers.get("Range"), size)
       first, last = span if span is not None else (0, size - 1)
       self.send_response(206 if span is not None else 200)
       self.send_header("Content-Type", KINDS.get(os.path.splitext(name)[1], KINDS[""]))
       self.send_header("Content-Length", str(max(0, last - first + 1)))
       self.send_header("Accept-Ranges", "bytes")
+      self.send_header("Content-Disposition", f'attachment; filename="{download}"')   # the name a save gives it, cross-origin too
       if span is not None:
         self.send_header("Content-Range", f"bytes {first}-{last}/{size}")
       self.end_headers()
       rate = RATE_ONROAD if onroad else RATE_OFFROAD
-      left = last - first + 1
-      with open(path, "rb") as f:
-        f.seek(first)
-        while left > 0:
-          start = time.monotonic()
-          chunk = f.read(min(CHUNK, left))
-          if not chunk:
-            break
-          self.wfile.write(chunk)
-          left -= len(chunk)
-          time.sleep(max(0., len(chunk) / rate - (time.monotonic() - start)))   # paced: the disk and the modem stay free
+      at = 0   # where each file starts in the whole
+      for p, n in zip(paths, sizes, strict=True):
+        lo, hi = max(first, at), min(last, at + n - 1)
+        at += n
+        if lo > hi:
+          continue
+        left = hi - lo + 1
+        with open(p, "rb") as f:
+          f.seek(lo - (at - n))
+          while left > 0:
+            start = time.monotonic()
+            chunk = f.read(min(CHUNK, left))
+            if not chunk:
+              break
+            self.wfile.write(chunk)
+            left -= len(chunk)
+            time.sleep(max(0., len(chunk) / rate - (time.monotonic() - start)))   # paced: the disk and the modem stay free
 
     def do_GET(self):
       if not self._allowed():
@@ -603,13 +621,15 @@ def handler(drives: Drives, device: Device, link: Link | None = None, lan: bool 
           self._send(404, b"", "text/plain")
         else:
           self._send(200, body, "application/vnd.apple.mpegurl")
-      elif len(parts) == 5 and parts[:2] == ["api", "drives"] and parts[3].isdigit():
-        path = drives.file(parts[2], int(parts[3]), parts[4])
-        if path is None:
+      elif len(parts) == 5 and parts[:2] == ["api", "drives"] and (m := SPAN.match(parts[3])):
+        a = int(m.group(1))
+        b = int(m.group(2)) if m.group(2) else a
+        paths = drives.files(parts[2], a, b, parts[4])
+        if not paths:
           self._send(404, b"", "text/plain")
         else:
           try:
-            self._file(path, parts[4])
+            self._file(paths, parts[4], f"{parts[2]}--{parts[3]}--{parts[4]}")
           except (BrokenPipeError, ConnectionResetError):   # the phone stopped watching
             pass
       else:
