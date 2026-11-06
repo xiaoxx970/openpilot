@@ -122,6 +122,9 @@ class TestDrives(unittest.TestCase):
     self.assertEqual(d["files"][0]["files"]["qcamera.ts"], len("qcamera.ts") * 10)
     self.assertEqual(d["cores"], [20, 80])
     self.assertAlmostEqual(d["engaged"], 120 / d["duration"], places=3)
+    listed = self.disk.drives.list()["drives"][1]
+    self.assertEqual(listed["runs"], [[10, 50], [70, 110], [130, 170]])
+    self.assertEqual(listed["alert_t"], [30, 90, 150])
 
   def test_stops_when_the_car_starts(self):
     self.assertEqual(self.disk.drives.index_all(onroad=lambda: True), 0)
@@ -166,6 +169,13 @@ class TestDrives(unittest.TestCase):
     self.assertFalse(self.disk.drives.list()["drives"][0]["kept"])
     self.disk.drives.keep("00000101--abcdef0123", False)
     self.assertFalse(self.disk.drives.list()["drives"][1]["kept"])
+
+
+class TestCoarseRuns(unittest.TestCase):
+  def test_runs(self):
+    self.assertEqual(drivesd.coarse_runs([[0., 10.], [12., 20.], [40.4, 50.6]], 100.), [[0, 20], [40, 51]])
+    self.assertEqual(drivesd.coarse_runs([[0., 10.], [40., 50.]], 6000.), [[0, 50]])   # 30 s of 100 min: closed
+    self.assertEqual(drivesd.coarse_runs([], 100.), [])
 
 
 class TestRange(unittest.TestCase):

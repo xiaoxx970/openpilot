@@ -49,6 +49,7 @@ FILES = ("qlog.zst", "qlog", "qcamera.ts", "rlog.zst", "rlog", "fcamera.hevc", "
 ONROAD_FILES = ("qlog.zst", "qlog", "qcamera.ts")   # small enough to send while driving
 SPAN = re.compile(r"^(\d{1,5})(?:-(\d{1,5}))?$")   # a segment, or segments a-b: one file, theirs one after another
 MAX_SPAN = 120   # segments in one download
+MAX_LIST_MARKS = 60   # engaged runs and alerts a drive in the list carries
 KINDS = {".ts": "video/mp2t", ".hevc": "application/octet-stream", ".zst": "application/zstd", "": "application/octet-stream"}
 CHUNK = 64 * 1024
 RATE_ONROAD = 512 * 1024        # B/s while driving: qcamera is about 50 kB/s
@@ -209,6 +210,18 @@ def kept(seg_dir: str) -> bool:
     return False
 
 
+def coarse_runs(runs: list[list[float]], duration: float) -> list[list[int]]:
+  """Engaged runs for the list's small timeline: gaps under 1% of the drive (at least 5 s) closed, whole seconds."""
+  gap = max(5., duration / 100)
+  out: list[list[float]] = []
+  for a, b in runs:
+    if out and a - out[-1][1] < gap:
+      out[-1][1] = max(out[-1][1], b)
+    else:
+      out.append([a, b])
+  return [[round(a), round(b)] for a, b in out[:MAX_LIST_MARKS]]
+
+
 class Drives:
   """The drives on disk (log_root) and their index (index_dir)."""
   def __init__(self, log_root: str, index_dir: str = INDEX_DIR, clock=time.time, reader=read_qlog):  # noqa: TID251  # vs file mtimes
@@ -351,7 +364,8 @@ class Drives:
            "engaged": round(on / duration, 3) if duration and indexed else None, "segments": len(segs),
            "indexed": indexed, "size": size, "kept": all(kept(d) for _, d in segs),
            "alerts": sum(1 for e in events if e["kind"] == "alert"), "jam": round(sum(b - a for a, b in merge_runs(jams))),
-           "thumb": [[la, lo] for _, la, lo in thin(track, THUMB)]}
+           "thumb": [[la, lo] for _, la, lo in thin(track, THUMB)],
+           "runs": coarse_runs(engaged, duration), "alert_t": [round(e["t"]) for e in events if e["kind"] == "alert"][:MAX_LIST_MARKS]}
     if detail:
       out.update({"track": thin(track, MAX_TRACK), "timeline": {"engaged": engaged, "jams": merge_runs(jams), "events": events},
                   "files": files, "temps": temps, "cores": [round(sum(c) / len(c)) for c in zip(*[x for x in loads if len(x) == len(loads[0])], strict=True)]
