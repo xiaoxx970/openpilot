@@ -275,6 +275,8 @@ class Drives:
       return False
     if self.clock() - changed <= SETTLED:
       return False
+    if self.index_of(seg_dir) is None:   # none, or one of an older INDEX_VERSION
+      return True
     try:
       return os.path.getmtime(self._index_path(seg_dir)) < changed
     except OSError:

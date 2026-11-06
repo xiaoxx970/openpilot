@@ -128,6 +128,16 @@ class TestDrives(unittest.TestCase):
     self.assertEqual(listed["alert_t"], [30, 90, 150])
     self.assertEqual((listed["bookmarks"], listed["bookmark_t"]), (3, [33, 93, 153]))
 
+  def test_index_of_an_older_version_redone(self):
+    self.disk.drives.index_all()
+    path = os.path.join(self.disk.index, "00000101--abcdef0123--0.json")
+    with open(path, encoding="utf-8") as f:
+      old = {**json.load(f), "version": drivesd.INDEX_VERSION - 1}
+    with open(path, "w", encoding="utf-8") as f:   # newer than its qlog, as on the car
+      json.dump(old, f)
+    self.assertEqual(self.disk.drives.index_all(), 1)
+    self.assertIsNotNone(self.disk.drives.index_of(os.path.join(self.disk.root, "00000101--abcdef0123--0")))
+
   def test_stops_when_the_car_starts(self):
     self.assertEqual(self.disk.drives.index_all(onroad=lambda: True), 0)
 
