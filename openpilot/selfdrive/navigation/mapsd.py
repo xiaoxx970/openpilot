@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import time
 
 import numpy as np
@@ -15,6 +16,10 @@ from openpilot.selfdrive.navigation.route import RouteTracker
 from openpilot.selfdrive.navigation.tiles import NoTiles, open_tiles
 
 RETRY_SECONDS = 10
+# Left unpinned, the scheduler put mapsd on core 4 next to card, selfdrived and controlsd (2026-11-06: ~20 % of that core,
+# core 4 at 94 % not engaged). Core 7 is modeld's: ~35 % busy, a big core, and modeld and dmonitoringmodeld are real time,
+# so they always preempt mapsd and the model never waits for the map.
+MAPSD_CORE = 7
 NO_TILES_RETRY_SECONDS = 60  # until an archive is put on the device
 
 
@@ -68,7 +73,15 @@ class MapsD:
     self.prefetched = False
 
 
+def pin_to_core() -> None:
+  try:
+    os.sched_setaffinity(0, {MAPSD_CORE})
+  except (AttributeError, OSError):  # not on Linux, or no such core
+    pass
+
+
 def main():
+  pin_to_core()
   rk = Ratekeeper(20.0)
   sm = messaging.SubMaster(['gpsLocation', 'gpsLocationExternal', 'navRoute'])
   server = VisionIpcServer('mapsd')
