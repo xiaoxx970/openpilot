@@ -76,3 +76,12 @@ class TestModelStopsShort(OpenpilotTestCase):
     self.assertFalse(model_stops_short(0.2, -0.8, radar_lead(20., 0.), v))    # the model does not brake
     self.assertFalse(model_stops_short(-1.0, -1.3, radar_lead(20., 2.), v))   # the lead still moves
     self.assertFalse(model_stops_short(-1.0, -1.3, NS(present=False), v))
+
+
+class TestEarlyStop(OpenpilotTestCase):
+  def test_stop_starts_at_the_stock_handover_speed_only_while_braking(self):
+    from openpilot.selfdrive.controls.lib.drive_helpers import should_stop
+    self.assertTrue(should_stop(0.2, 0.05))     # the old entry is unchanged
+    self.assertTrue(should_stop(0.4, -0.2))     # 1.4 km/h and still braking: hand over now
+    self.assertFalse(should_stop(0.4, 0.))      # crawling behind a creeping lead: keep regulating
+    self.assertFalse(should_stop(0.5, -0.5))    # above 1.6 km/h
