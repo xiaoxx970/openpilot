@@ -551,43 +551,7 @@ class SelfdriveD:
     if CS.gearShifter == car.CarState.GearShifter.park and self.mads.enabled:
       self.events.remove(EventName.canBusMissing)
 
-    # a long press (1 s) toggles Blendful; its release is no distance press
-    distance_long_release = self._update_distance_button(CS)
-
-    # distance button like stock VW: the first press only shows the distance, presses while it is
-    # shown step it up (wrapping to the shortest) and +/- step it up and down
-    if self.CP.openpilotLongitudinalControl:
-      # rain selects its own following distance, one step past relaxed, and a traffic jam ahead relaxed (see FollowDistance)
-      cs_ic = self.sm['carStateIC']
-      rain_level = self.rain_detector.update(cs_ic.rainAmount, cs_ic.rainWiperRequest, cs_ic.wiperSwitch)
-      road_fresh = self.sm.seen['roadEventsIC'] and (self.sm.frame - self.sm.recv_frame['roadEventsIC']) * DT_CTRL < ROAD_EVENTS_TIMEOUT
-      jam_ahead = road_fresh and self.sm['roadEventsIC'].jamFollow
-      personality, show_personality = self.follow.update(rain_level > 0, self.rain_follow_enabled, jam_ahead, self.personality)
-      if personality != self.personality:
-        self._set_personality(personality)
-
-      self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
-      top = self.follow.top(self.rain_follow_enabled)
-      position = new_position = self.follow.position(self.personality)
-      show_personality = show_personality or self.distance_display.step != 0
-      if not distance_long_release and any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
-        # the first press shows the current personality on screen too, like the cluster
-        show_personality = show_personality or CS.cruiseState.available
-        if self.distance_display.cycle:
-          new_position = (new_position + 1) % (top + 1)
-      new_position = min(max(new_position + self.distance_display.step, 0), top)
-      if new_position != position:
-        personality = self.follow.select(new_position, self.personality)
-        if personality != self.personality:
-          self._set_personality(personality)
-        show_personality = True
-      # Write once when the distance display closes, not on every press: each write is fsync'd, and
-      # bursts of them while driving went with multi-second disk stalls (deviceState -> commIssue).
-      # Until then the pending write keeps params_thread from reading the old value back.
-      if self.personality_write_pending is not None and not self.distance_display.is_open:
-        self.personality_write_event.set()
-      if show_personality:
-        self.events.add(EventName.personalityChanged)
+    self._update_distance(CS)
 
     self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
 
@@ -734,6 +698,45 @@ class SelfdriveD:
     self.publish_selfdriveState(CS)
 
     self.CS_prev = CS
+
+  def _update_distance(self, CS):
+    # a long press (1 s) toggles Blendful; its release is no distance press
+    distance_long_release = self._update_distance_button(CS)
+
+    # distance button like stock VW: the first press only shows the distance, presses while it is
+    # shown step it up (wrapping to the shortest) and +/- step it up and down
+    if self.CP.openpilotLongitudinalControl:
+      # rain selects its own following distance, one step past relaxed, and a traffic jam ahead relaxed (see FollowDistance)
+      cs_ic = self.sm['carStateIC']
+      rain_level = self.rain_detector.update(cs_ic.rainAmount, cs_ic.rainWiperRequest, cs_ic.wiperSwitch)
+      road_fresh = self.sm.seen['roadEventsIC'] and (self.sm.frame - self.sm.recv_frame['roadEventsIC']) * DT_CTRL < ROAD_EVENTS_TIMEOUT
+      jam_ahead = road_fresh and self.sm['roadEventsIC'].jamFollow
+      personality, show_personality = self.follow.update(rain_level > 0, self.rain_follow_enabled, jam_ahead, self.personality)
+      if personality != self.personality:
+        self._set_personality(personality)
+
+      self.distance_display.update(CS.buttonEvents, CS.cruiseState.available)
+      top = self.follow.top(self.rain_follow_enabled)
+      position = new_position = self.follow.position(self.personality)
+      show_personality = show_personality or self.distance_display.step != 0
+      if not distance_long_release and any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
+        # the first press shows the current personality on screen too, like the cluster
+        show_personality = show_personality or CS.cruiseState.available
+        if self.distance_display.cycle:
+          new_position = (new_position + 1) % (top + 1)
+      new_position = min(max(new_position + self.distance_display.step, 0), top)
+      if new_position != position:
+        personality = self.follow.select(new_position, self.personality)
+        if personality != self.personality:
+          self._set_personality(personality)
+        show_personality = True
+      # Write once when the distance display closes, not on every press: each write is fsync'd, and
+      # bursts of them while driving went with multi-second disk stalls (deviceState -> commIssue).
+      # Until then the pending write keeps params_thread from reading the old value back.
+      if self.personality_write_pending is not None and not self.distance_display.is_open:
+        self.personality_write_event.set()
+      if show_personality:
+        self.events.add(EventName.personalityChanged)
 
   def _update_distance_button(self, CS) -> bool:
     """Toggles Blendful once a distance press is held for 1 s. Returns True on the release that ends such a
