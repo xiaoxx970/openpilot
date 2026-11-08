@@ -20,15 +20,8 @@ LANE_CHANGE_START_JERK = 0.8  # m/s^3, allowed at the very start of a lane chang
 LANE_CHANGE_JERK_RAMP_T = 2.0  # s, time taken to ease back up to MAX_LATERAL_JERK
 
 
-# While still braking, the stop starts at the speed the Golf 8's stock radar hands it to the ESP (1.6 km/h,
-# 2026-08-24 stock stop). From 1.1 km/h, the car crawled on idle creep for seconds before the ESP clamped (2026-11-06).
-# In 1.7 h of op long since 10-24 this fired 41 times, 40 of them ending in a stop anyway
-EARLY_STOP_SPEED = 0.45  # m/s
-EARLY_STOP_MAX_ACCEL = -0.05  # m/s^2
-
-
 def should_stop(v_ego: float, a_target: float) -> bool:
-  return bool((v_ego < 0.3 and a_target < 0.1) or (v_ego < EARLY_STOP_SPEED and a_target < EARLY_STOP_MAX_ACCEL))
+  return bool(v_ego < 0.3 and a_target < 0.1)
 
 def clamp(val, min_val, max_val):
   clamped_val = float(np.clip(val, min_val, max_val))
