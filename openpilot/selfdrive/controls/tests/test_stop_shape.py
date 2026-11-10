@@ -4,7 +4,8 @@ import numpy as np
 
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, T_IDXS, model_lead_matches, blend_model_lead
-from openpilot.selfdrive.controls.lib.longitudinal_planner import MODEL_STOP_MARGIN, model_stops_short
+from openpilot.selfdrive.controls.lib.longitudinal_planner import MODEL_STOP_BLEND_TIME, MODEL_STOP_ENTER_MARGIN_ADD, MODEL_STOP_MARGIN, \
+                                                                   MODEL_STOP_MIN_GAP, ModelStopBlend, model_stops_short
 from openpilot.selfdrive.controls.radard import RADAR_TO_CAMERA
 
 LEAD_T = np.array([0., 2., 4., 6., 8., 10.])
@@ -76,3 +77,60 @@ class TestModelStopsShort(OpenpilotTestCase):
     self.assertFalse(model_stops_short(0.2, -0.8, radar_lead(20., 0.), v))    # the model does not brake
     self.assertFalse(model_stops_short(-1.0, -1.3, radar_lead(20., 2.), v))   # the lead still moves
     self.assertFalse(model_stops_short(-1.0, -1.3, NS(present=False), v))
+
+
+class TestModelStopBlend(OpenpilotTestCase):
+  DT = 0.05
+  A_MODEL, A_MPC = -0.55, -0.95
+
+  def ramp(self, blend, lead, v, a_mpc=None, frames=None):
+    frames = frames or int(MODEL_STOP_BLEND_TIME / self.DT) + 4
+    return [blend.update(self.A_MODEL, self.A_MPC if a_mpc is None else a_mpc, lead, v) for _ in range(frames)]
+
+  def test_entry_and_exit_have_no_step(self):
+    blend = ModelStopBlend(self.DT)
+    lead = radar_lead(20., 0.)
+    entry = self.ramp(blend, lead, 3.)
+    self.assertAlmostEqual(entry[-1], self.A_MODEL)
+    self.assertLess(np.abs(np.diff([self.A_MPC] + entry)).max(), 0.1)
+    # the model is no longer the softer request's safe stop: the lead is back inside the margin
+    v = 8.
+    exit_ = self.ramp(blend, radar_lead(10., 0.), v, a_mpc=-0.95)
+    self.assertAlmostEqual(exit_[-1], -0.95, places=2)
+    self.assertLess(np.abs(np.diff(exit_)).max(), 0.1)
+
+  def test_hysteresis_holds_on_the_limit(self):
+    v = 3.
+    limit = v ** 2 / (2. * -self.A_MODEL) + MODEL_STOP_MARGIN
+    blend = ModelStopBlend(self.DT)
+    # inside the entry margin but outside the exit margin: does not start
+    self.assertFalse(blend.update(self.A_MODEL, self.A_MPC, radar_lead(limit + MODEL_STOP_ENTER_MARGIN_ADD / 2, 0.), v) != self.A_MPC)
+    self.assertFalse(blend.active)
+    blend.update(self.A_MODEL, self.A_MPC, radar_lead(limit + MODEL_STOP_ENTER_MARGIN_ADD + 0.1, 0.), v)
+    self.assertTrue(blend.active)
+    # the same in-between distance keeps it going, a lead just below the entry speed limit too
+    blend.update(self.A_MODEL, self.A_MPC, radar_lead(limit + MODEL_STOP_ENTER_MARGIN_ADD / 2, 0.9), v)
+    self.assertTrue(blend.active)
+
+  def test_much_harder_mpc_takes_over_at_once(self):
+    blend = ModelStopBlend(self.DT)
+    self.ramp(blend, radar_lead(20., 0.), 3.)
+    self.assertAlmostEqual(blend.update(self.A_MODEL, -2.0, radar_lead(20., 3.), 3.), -2.0)  # the lead moved: rule off, MPC 1.45 harder
+
+  def test_never_harder_than_the_mpc_nor_inside_the_min_gap(self):
+    v = 4.
+    d = MODEL_STOP_MIN_GAP + 8.
+    need = -v ** 2 / (2. * (d - MODEL_STOP_MIN_GAP))  # -1.0
+    blend = ModelStopBlend(self.DT)
+    blend.active = True
+    blend.weight = 1.
+    out = blend.update(self.A_MODEL, -1.2, radar_lead(d, 2.), v)  # rule off, still mostly the model along the ramp
+    self.assertAlmostEqual(out, need)
+    blend.active = True
+    blend.weight = 1.
+    self.assertAlmostEqual(blend.update(self.A_MODEL, -0.8, radar_lead(MODEL_STOP_MIN_GAP + 1., 2.), v), -0.8)  # the limit is harder than the MPC
+
+  def test_idle_passes_the_mpc_through(self):
+    blend = ModelStopBlend(self.DT)
+    self.assertEqual(blend.update(self.A_MODEL, -0.3, radar_lead(20., 0.), 3.), -0.3)  # the MPC is the softer one
+    self.assertEqual(blend.update(0.2, self.A_MPC, radar_lead(20., 0.), 3.), self.A_MPC)  # the model does not brake

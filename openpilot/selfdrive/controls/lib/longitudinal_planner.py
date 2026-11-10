@@ -116,6 +116,13 @@ RAIN_ACCEL_CAP_RATE = 0.5    # m/s^3 the cap moves at as rain mode starts, chang
 # stops the car at least this far short of a stopped lead (m, radar distance), it shapes the stop instead of the MPC
 MODEL_STOP_MARGIN = 3.5
 MODEL_STOP_LEAD_SPEED = 1.  # m/s; leads slower than this count as stopped
+# Handing the stop to the model and back stepped the command by 0.3-0.6 m/s^2 (10 of 11 stops, 2026-11-10), a release followed
+# by a re-brake. Both ways are now a ramp, with hysteresis so the rule cannot flip while it sits on its limits.
+MODEL_STOP_BLEND_TIME = 1.  # s, a full hand-over
+MODEL_STOP_ENTER_MARGIN_ADD = 0.3  # m, extra margin needed to start
+MODEL_STOP_ENTER_LEAD_SPEED = 0.8  # m/s, leads must be this slow to start
+MODEL_STOP_MIN_GAP = 2.5  # m, the blended request never brakes too little to stop this far short of the lead
+MODEL_STOP_URGENT_DELTA = 0.8  # m/s^2, an MPC this much harder than the model takes over at once
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 def get_max_decel(v_ego):
@@ -388,11 +395,37 @@ class RainAccelCap:
     return self.cap
 
 
-def model_stops_short(a_model, a_mpc, lead, v_ego):
-  # True when the model's request is softer than the MPC's and braking at it stops MODEL_STOP_MARGIN short of a stopped lead
-  if not lead.present or lead.vLead >= MODEL_STOP_LEAD_SPEED or a_model >= 0. or a_model <= a_mpc:
+def model_stops_short(a_model, a_mpc, lead, v_ego, margin=MODEL_STOP_MARGIN, lead_speed=MODEL_STOP_LEAD_SPEED):
+  # True when the model's request is softer than the MPC's and braking at it stops margin short of a stopped lead
+  if not lead.present or lead.vLead >= lead_speed or a_model >= 0. or a_model <= a_mpc:
     return False
-  return v_ego ** 2 / (2. * -a_model) <= lead.dRel - MODEL_STOP_MARGIN
+  return v_ego ** 2 / (2. * -a_model) <= lead.dRel - margin
+
+
+class ModelStopBlend:
+  # Ramps the MPC candidate to the model's softer stop and back, see model_stops_short
+  def __init__(self, dt):
+    self.dt = dt
+    self.reset()
+
+  def reset(self):
+    self.weight = 0.
+    self.active = False
+
+  def update(self, a_model, a_mpc, lead, v_ego):
+    margin = MODEL_STOP_MARGIN if self.active else MODEL_STOP_MARGIN + MODEL_STOP_ENTER_MARGIN_ADD
+    lead_speed = MODEL_STOP_LEAD_SPEED if self.active else MODEL_STOP_ENTER_LEAD_SPEED
+    self.active = model_stops_short(a_model, a_mpc, lead, v_ego, margin, lead_speed)
+    step = self.dt / MODEL_STOP_BLEND_TIME
+    self.weight = float(np.clip(1. if self.active else 0., self.weight - step, self.weight + step))
+    if not self.active and a_mpc < a_model - MODEL_STOP_URGENT_DELTA:
+      self.weight = 0.
+    if self.weight <= 0.:
+      return a_mpc
+    blended = a_mpc + self.weight * (min(a_model, 0.) - a_mpc)
+    if lead.present:  # however far along the ramp is, keep enough braking to stop short of the lead
+      blended = min(blended, -v_ego ** 2 / (2. * max(lead.dRel - MODEL_STOP_MIN_GAP, 0.5)))
+    return max(blended, a_mpc)
 
 
 def get_coast_accel(pitch):
@@ -449,6 +482,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.lead_closing_limit = LeadClosingLimit(self.dt)
     self.pull_away = PullAwayAssist(self.dt)
     self.e2e_deadband = E2EDeadband(self.dt)
+    self.model_stop_blend = ModelStopBlend(self.dt)
     self.rain_accel_cap = RainAccelCap(self.dt)
     self.params = Params()
     try:
@@ -489,6 +523,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.a_cruise = self.output_a_target
       self.pull_away.reset()
       self.e2e_deadband.reset()
+      self.model_stop_blend.reset()
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
@@ -526,8 +561,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
-    if model_stops_short(output_a_target_e2e, output_a_target_mpc, sm['radarState'].leadOne, v_ego):
-      output_a_target_mpc = output_a_target_e2e
+    output_a_target_mpc = self.model_stop_blend.update(output_a_target_e2e, output_a_target_mpc, sm['radarState'].leadOne, v_ego)
 
     v_cruise, lead_capped = self.lead_closing_limit.update(v_cruise, v_ego, sm['radarState'].leadOne, sm['selfdriveState'].personality, t_follow)
     self.a_cruise = get_cruise_accel(v_cruise, v_ego, self.a_cruise, self.dt, sm['selfdriveState'].personality, lead_capped)
